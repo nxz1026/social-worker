@@ -52,7 +52,16 @@ def _load_convert_md():
     return module
 
 
+def _load_classify_rules():
+    """加载同目录的 classify_rules.py（M2 规则层）。"""
+    spec = importlib.util.spec_from_file_location("classify_rules", SCRIPT_DIR / "classify_rules.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 _cm = _load_convert_md()
+_cr = _load_classify_rules()
 CONVERTIBLE = _cm.CONVERTIBLE
 TEXTUAL = _cm.TEXTUAL
 MEDIA = _cm.MEDIA
@@ -457,6 +466,16 @@ def main() -> int:
     min_conf = float(cfg.get("min_confidence", 0.7))
     llm = load_llm()
 
+    # M2 规则层：判得了就省一次 LLM 调用；判不了（没命中/并列）才走 LLM
+    rules = None
+    try:
+        rules_dir = CFG.path.parent if getattr(CFG, "path", None) else (ROOT / "config")
+        if rules_dir.is_dir():
+            rules = _cr.load_rules(rules_dir)
+            log(f"· 规则层已加载：{rules_dir}")
+    except Exception as exc:
+        log(f"  ! 规则层加载失败，本次全部走 LLM：{exc}")
+
     log("=== 拉取飞书未分类 ===")
     items = pull_inbox(cfg["feishu"]["inbox"])
     log(f"  {len(items)} 个文件" if items else "  (空)")
@@ -493,7 +512,14 @@ def main() -> int:
                 continue
             if conv["converter"] in {"pandoc", "docling"}:
                 log(f"     converter={conv['converter']}  文本 {len(conv['text'])} 字")
-            decision = classify(rel, conv["text"], llm, projects, categories, args.verbose)
+            # 先跑 M2 规则层；判不了才调 LLM
+            decision = None
+            if rules is not None:
+                decision = _cr.classify_rule(rel, conv["text"], rules, projects, categories)
+                if decision:
+                    log(f"  · 规则判定 {decision['project']} / {decision['category']}")
+            if not decision:
+                decision = classify(rel, conv["text"], llm, projects, categories, args.verbose)
             if decision["confidence"] < min_conf and decision["project"]:
                 log(f"  ! 置信度 {decision['confidence']:.2f} < {min_conf}，转待确认")
                 decision["project"] = ""

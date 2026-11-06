@@ -56,6 +56,7 @@ python3 "$ROOT/scripts/scan-inbox.py"             # 手动跑一次
 python3 "$ROOT/scripts/scan-inbox.py" --dry-run   # 只报计划
 ```
 
+- 分类先走代码规则层（`config/project_aliases.yaml` + `config/category_keywords.yaml` + `rule_weights.yaml`），判不了才调 LLM；规则判错率 0，改关键词不用改代码
 - 分类结果落 `sources/projects/<项目>/<类别>/` + `vault-<项目>/md/<类别>/`
 - 台账 `state/manifest.yaml`（file_token + sha256），重复扫描不重复入库
 - 置信度 < 0.7 落 `_待确认/`，需人工归位后重跑

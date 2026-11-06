@@ -13,8 +13,13 @@
 social-worker/
 ├── config/
 │   ├── feishu-flow.yaml.example   # 飞书目录 token / 项目 / 类别映射（填值后改名去掉 .example）
-│   └── entities.yaml              # 实体名册：转换时自动插 [[链接]]
+│   ├── entities.yaml              # 实体名册：转换时自动插 [[链接]]
+│   ├── project_aliases.yaml       # M2 规则层：项目 → 关键词（改词不用改代码）
+│   ├── category_keywords.yaml     # M2 规则层：六类 → 关键词
+│   └── rule_weights.yaml          # M2 规则层：文件名/正文预览权重
 ├── scripts/
+│   ├── config.py                  # 配置加载：config/config.yaml + 环境变量覆盖
+│   ├── classify_rules.py          # M2 分类规则层：判不了才走 LLM（纯函数，无路径依赖）
 │   ├── convert-md.py              # 原始文件 → vault 里的 md
 │   ├── scan-inbox.py              # 飞书未分类 → 分类 → 转 md → 归档 → 入库（定时跑）
 │   └── cognee.py                  # 包装 cognee-cli：search / add / cognify / sync
@@ -41,7 +46,7 @@ social-worker/
 飞书「未分类」（手机/电脑随时传）
    │  定时（15 分钟）scan-inbox.py 拉取
    ▼
-分类（LLM 读内容 → 项目 + 类别）
+分类（M2 规则层先判：文件名×10 + 正文×1，唯一最高分才用；判不了才走 LLM）
    │
    ├─ 原件 → sources/projects/<项目>/<类别>/
    ├─ md   → vault-<项目>/md/<类别>/<文档名>.md（顶部带原件链接 + [[实体]]）

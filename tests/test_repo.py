@@ -19,7 +19,9 @@ from pathlib import Path
 import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
-SCRIPTS = ["config.py", "convert-md.py", "scan-inbox.py", "cognee.py"]
+SCRIPTS = ["config.py", "convert-md.py", "scan-inbox.py", "cognee.py", "classify_rules.py"]
+# 纯函数模块，不碰路径/容器，不需要 load_config()
+PURE_MODULES = {"classify_rules.py"}
 
 sys.path.insert(0, str(ROOT / "scripts"))
 import config as sw_config  # noqa: E402
@@ -145,7 +147,7 @@ def test_config_root_env_override():
 def test_scripts_use_config():
     """三个脚本不再写死根目录/容器名，统一走 load_config()。"""
     for name in SCRIPTS:
-        if name == "config.py":
+        if name in PURE_MODULES:
             continue
         text = (ROOT / "scripts" / name).read_text(encoding="utf-8")
         assert not HARDCODED.search(text), f"{name} 仍在硬编码服务端路径/容器名"
