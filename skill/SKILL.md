@@ -74,8 +74,9 @@ python3 "$ROOT/scripts/scan-inbox.py" --dry-run   # 只报计划
 | 命令 | 用途 |
 |---|---|
 | `"$ROOT/scripts/cognee.py" search "<查询>" --dataset <名>` | 检索（**必须指定 dataset**） |
-| `"$ROOT/scripts/cognee.py" add <文件> --dataset <名>` | 入库单个 md（**不支持目录**） |
+| `"$ROOT/scripts/cognee.py" add <文件> --dataset <名>` | 入库单个 md（**不支持目录**）。⚠️ 同一文件再 add 一次会**新建条目而非更新**，要更新用 `sync` |
 | `"$ROOT/scripts/cognee.py" cognify --dataset <名>` | 重建知识图谱 |
+| `"$ROOT/scripts/cognee.py" sync <vault> --dataset <名>` | 全量同步 md 目录（**幂等**，可反复跑；先加 `--dry-run` 看计划） |
 | `"$ROOT/scripts/cognee.py" datasets` | 列出数据集 |
 
 ### `--type` 怎么选
@@ -95,7 +96,7 @@ python3 "$ROOT/scripts/scan-inbox.py" --dry-run   # 只报计划
 
 1. **检索必须指定 `--dataset`**：不带时 Cognee 只搜「最相关的一个」数据集（dataset routing，默认 top_k=1），跨项目问题会漏
 2. 回答政策/法规/项目资料问题前必须先 `search`，用检索结果，不凭记忆
-3. 新增/更新资料：先 `convert-md.py` 转 md，再 `add` + `cognify`
+3. 新增/更新资料：先 `convert-md.py` 转 md，再 `"$ROOT/scripts/cognee.py" sync <vault> --dataset <数据集>`（**幂等**，自动删旧版本/孤儿/重复条目，未变的跳过）。`add` + `cognify` 只适合单文件应急
 4. 文件权限 644、目录 755（容器 uid 1000 要能读）。**写盘后立刻 `chmod`**：`write` 工具默认产出 `-rw-------`，容器读不到
 5. md/txt 直接复制；docx 走 pandoc；xlsx/pptx/pdf 走 docling；图片只复制不转
 6. 图片入库会先过视觉模型（英文描述）再叠本地 OCR；含服务对象面部/证件的图片不要入库
