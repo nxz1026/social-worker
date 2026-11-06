@@ -83,18 +83,11 @@ python3 "$ROOT/scripts/scan-inbox.py" --dry-run   # 只报计划
 | `"$ROOT/scripts/cognee.py" sync <vault> --dataset <名>` | 全量同步 md 目录（**幂等**，可反复跑；先加 `--dry-run` 看计划） |
 | `"$ROOT/scripts/cognee.py" datasets` | 列出数据集 |
 
-### `--type` 怎么选
+### 检索参数
 
-| 类型 | 用在哪 |
-|---|---|
-| `CHUNKS` | 原文块（默认，最稳，不出答案） |
-| `CHUNKS_LEXICAL` | 精确短语、日期、编号（如「2026年10月6日」） |
-| `SUMMARIES` | 文档摘要 |
-| `GRAPH_COMPLETION` | 自然语言回答（走 LLM，会引用来源） |
-| `TEMPORAL` | 带时间的问题（如「10 月的活动」） |
-| `HYBRID_COMPLETION` | 混合检索 + 图谱（不带 --type 时的默认路由结果） |
+`--type` 默认 `auto`，按查询形态自动选（日期 → `TEMPORAL`；带引号 → `CHUNKS_LEXICAL`；其余 → `CHUNKS`）。**默认就够用**；只有要自然语言回答（会引用来源）才显式传 `GRAPH_COMPLETION`。
 
-不带 `--type` 会自动路由：整句引号 → CHUNKS_LEXICAL；含绝对日期 → TEMPORAL；其余 → HYBRID_COMPLETION。
+`--auto-dataset` 按查询里的项目关键词自动选数据集；跨项目问题别加它（判不了时会搜全部）。
 
 规则：
 

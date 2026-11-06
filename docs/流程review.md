@@ -302,6 +302,28 @@ SKILL.md 只保留一句：「检索用 `cognee.py search`；默认 `CHUNKS`，�
 Cognee 能检索到；`--dry-run` 对 docx / 图片 / 定不了项目的文件分别给出正确预览；
 测试 **92 项**全过。
 
+### A13. 检索参数下沉（M7）—— 省 token
+
+> ✅ **已修（M7，2026-11-06）**：`cognee.py search` 的 `--type` 默认改成 `auto`，
+> 新增 `--auto-dataset`。测试见 `tests/test_search.py`（11 项）。
+
+**现状（改前）**：DSH 每次检索都要自己判断该传哪个 `--type`，SKILL.md 里一张 6 行的
+类型表就是为此存在的。判断错了（比如把带日期的查询交给 CHUNKS）会漏召回，判断对了也是
+白烧 token。
+
+**实现（M7 实际落地）**：
+
+- `pick_type(query)`：含日期（`2026年` / `11月` / `11-05` 等）→ `TEMPORAL`；带引号 →
+  `CHUNKS_LEXICAL`；其余 → `CHUNKS`。日期优先于引号。
+- `pick_dataset(query, cfg, config_dir)`：读 `config/project_aliases.yaml`，按关键词出现次数
+  计分，**唯一最高分**才返回对应数据集；并列或没命中返回 `None`（搜全部）。
+  项目 key 与数据集名按约定同名，`config.yaml` 的 `datasets` 映射可覆盖。
+- SKILL.md 的 `--type` 表从 6 行压成 2 句话。
+
+**实测**：默认 → `CHUNKS`；`2026年11月的活动` → `TEMPORAL`；`"亲邻商居共治联盟"` →
+`CHUNKS_LEXICAL`；`花都的入户名单 --auto-dataset` → 自动选中 `huadu`。
+⚠️ `TEMPORAL` 比 `CHUNKS` 慢很多（一次 >60s），文档里已标注。
+
 ## 3. B 类：应保留 LLM 判断 + skill 约束
 
 | 环节 | 为什么不能代码化 |

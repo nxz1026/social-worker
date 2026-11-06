@@ -2,7 +2,7 @@
 """Cognee 客户端（包装官方 cognee-cli）。
 
 用法：
-  cognee.py search "<查询>" [--type CHUNKS] [--dataset NAME] [--top-k N]
+  cognee.py search "<查询>" [--type auto] [--dataset NAME] [--auto-dataset] [--top-k N]
   cognee.py add <宿主机路径> [--dataset NAME]
   cognee.py cognify [--dataset NAME]
   cognee.py datasets
@@ -16,10 +16,13 @@
 import argparse
 import hashlib
 import json
+import re
 import subprocess
 import sys
 import urllib.request
 from pathlib import Path
+
+import yaml
 
 from config import load_config
 
@@ -42,6 +45,55 @@ SEARCH_TYPES = [
     "HYBRID_COMPLETION", "RAG_COMPLETION", "CODE", "CYPHER",
     "GRAPH_REPORT", "BROAD", "SKILLS", "TEMPORAL",
 ]
+# M7：检索参数下沉。--type 默认 auto，由 pick_type 按查询形态选；
+# --auto-dataset 按查询里的项目关键词选数据集。
+AUTO = "auto"
+_DATE_RE = re.compile(r"(19|20)\d{2}|\d{4}[-/年]\d{1,2}|\d{1,2}月|\d{1,2}日")
+
+
+def pick_type(query: str) -> str:
+    """按查询形态选检索类型（M7）。"""
+    q = (query or "").strip()
+    if _DATE_RE.search(q):
+        return "TEMPORAL"
+    if any(ch in q for ch in ('"', "“", "”", "「", "」", "'", "‘", "’")):
+        return "CHUNKS_LEXICAL"
+    return "CHUNKS"
+
+
+def pick_dataset(query: str, cfg, config_dir: Path = None):
+    """按查询里的项目关键词选数据集（M7）。判不了返回 None = 搜全部。
+
+    唯一最高分才返回；并列或没命中都返回 None。
+    """
+    cfg_dir = Path(config_dir) if config_dir else (
+        cfg.path.parent if getattr(cfg, "path", None) else Path("/srv/social-work/config"))
+    alias_file = cfg_dir / "project_aliases.yaml"
+    if not alias_file.is_file():
+        return None
+    try:
+        data = yaml.safe_load(alias_file.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    datasets = getattr(cfg, "datasets", {}) or {}
+    q = query or ""
+    scores = {}
+    for key, words in data.items():
+        if not isinstance(words, list):
+            continue
+        hits = sum(q.count(str(w)) for w in words if w)
+        if hits:
+            scores[key] = hits
+    if not scores:
+        return None
+    ranked = sorted(scores.items(), key=lambda kv: (-kv[1], kv[0]))
+    if len(ranked) > 1 and ranked[0][1] == ranked[1][1]:
+        return None                      # 并列 → 交给全库检索
+    key = ranked[0][0]
+    # 项目 key 与数据集名按约定同名；配置里显式给了映射就用映射
+    return datasets.get(key) or key
 
 
 def load_key():
@@ -99,10 +151,16 @@ def extract_results(data, out):
 
 
 def cmd_search(args, key):
-    cli_args = ["search", args.query, "--query-type", args.type,
+    qtype = pick_type(args.query) if args.type == AUTO else args.type
+    dataset = args.dataset
+    if not dataset and args.auto_dataset:
+        dataset = pick_dataset(args.query, get_config(), None)
+        if dataset:
+            print(f"· 自动选数据集：{dataset}", file=sys.stderr)
+    cli_args = ["search", args.query, "--query-type", qtype,
                 "--output-format", "json"]
-    if args.dataset:
-        cli_args += ["--datasets", args.dataset]
+    if dataset:
+        cli_args += ["--datasets", dataset]
     if args.top_k:
         cli_args += ["--top-k", str(args.top_k)]
     stdout = run(cli_args, key)
@@ -121,6 +179,7 @@ def cmd_search(args, key):
     if not results:
         print("(无结果)")
         return
+    print(f"· 检索类型：{qtype}", file=sys.stderr)
     for name, score, text in results:
         head = f"### {name}"
         if score is not None:
@@ -318,8 +377,11 @@ def main():
 
     s = sub.add_parser("search", help="检索知识库")
     s.add_argument("query")
-    s.add_argument("--type", default="CHUNKS", choices=SEARCH_TYPES)
+    s.add_argument("--type", default=AUTO, choices=[AUTO] + SEARCH_TYPES,
+                   help="检索类型；默认 auto 按查询形态自动选（日期→TEMPORAL，带引号→CHUNKS_LEXICAL）")
     s.add_argument("--dataset")
+    s.add_argument("--auto-dataset", action="store_true",
+                   help="按查询里的项目关键词自动选数据集")
     s.add_argument("--top-k", type=int)
     s.set_defaults(func=cmd_search)
 
