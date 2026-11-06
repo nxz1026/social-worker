@@ -170,10 +170,10 @@ SKILL.md 只保留一句：「检索用 `cognee.py search`；默认 `CHUNKS`，�
 
 ## 4. 结构性问题（比单点优化更重要）
 
-1. **代码分两处**：`cognee.py` 在 `~/.dsh/skills/social-work/scripts/`，`convert-md.py` / `scan-inbox.py` 在 `/srv/social-work/scripts/`。
-   → 应统一到 repo；skill 只留 `SKILL.md` + `templates/` + `review-checklists/`。
-2. **skill 写死服务器绝对路径**（`/srv/social-work/...`，SKILL.md 里 8 处）→ 换机器即失效。
-   → 改用相对路径 + `config.yaml`（或环境变量 `SOCIAL_WORK_ROOT`）。
+1. ~~**代码分两处**：`cognee.py` 在 `~/.dsh/skills/social-work/scripts/`，`convert-md.py` / `scan-inbox.py` 在 `/srv/social-work/scripts/`。~~
+   → ✅ **已修（M8）**：统一到 repo `scripts/`；部署时 cognee.py 落到 `/srv/social-work/scripts/`，skill 里不再放脚本，SKILL.md 一律写 `"$ROOT/scripts/cognee.py"`。
+2. ~~**skill 写死服务器绝对路径**（`/srv/social-work/...`，SKILL.md 里 8 处）→ 换机器即失效。~~
+   → ✅ **已修（M8）**：路径收口到 `config/config.yaml`，SKILL.md 用 `$ROOT`，支持 `SOCIAL_WORK_ROOT` 覆盖。
 3. **密钥与代码混放**：`.env`、`.cognee-key`、`.cognee-token`、`.syncthing-key` 与脚本同目录。
    → repo 化必须剥离，提供 `.env.example`。
 4. **`feishu-flow.yaml` 含真实 folder token**，`资料存放说明.md` 含真实文件夹 URL。

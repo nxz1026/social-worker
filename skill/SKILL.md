@@ -9,7 +9,7 @@ description: 社工工作助手：检索 Cognee 知识库（政策文件、项�
 
 > 下文命令中的 `ROOT` = 服务端根目录，默认 `/srv/social-work`，由 `config/config.yaml` 的 `root` 决定（环境变量 `SOCIAL_WORK_ROOT` 可覆盖）。
 
-服务端 `http://127.0.0.1:8000`（容器 `social-work-cognee`）。客户端 `scripts/cognee.py` 包装官方 `cognee-cli`，自动带 API key。
+服务端 `http://127.0.0.1:8000`（容器 `social-work-cognee`）。客户端 `"$ROOT/scripts/cognee.py"` 包装官方 `cognee-cli`，自动带 API key。
 
 **只索引 md。** 原始 Office/图片留在 `sources/` 存档，不进库。
 
@@ -28,7 +28,7 @@ description: 社工工作助手：检索 Cognee 知识库（政策文件、项�
 | 文件在哪 | 处置 |
 |---|---|
 | DSH 会话工作区 / 用户直接发来 / 机器人收到 | 放进飞书「未分类」→ 跑 `scan-inbox.py`（或等 15 分钟定时） |
-| 已在 `sources/projects/<项目>/` | 跑 `convert-md.py --project <项目>` → `cognee.py sync <vault> --dataset <数据集>` |
+| 已在 `sources/projects/<项目>/` | 跑 `convert-md.py --project <项目>` → `"$ROOT/scripts/cognee.py" sync <vault> --dataset <数据集>` |
 
 - 飞书「未分类」token 取 `feishu-flow.yaml` 的 `feishu.inbox`；上传：`lark-cli drive +upload --file <相对路径> --folder-token <inbox>`（`--file` 只接受 cwd 下相对路径）
 - **禁止手工往飞书「已分类」写文件**（含 `category_folders` 里任何 token）：「已分类」是 `scan-inbox.py` 的产物（`move_to_archive()`），手工放会绕过 `state/manifest.yaml` 台账、md 生成与 Cognee 索引。见 `资料存放说明.md:25`
@@ -73,10 +73,10 @@ python3 "$ROOT/scripts/scan-inbox.py" --dry-run   # 只报计划
 
 | 命令 | 用途 |
 |---|---|
-| `cognee.py search "<查询>" --dataset <名>` | 检索（**必须指定 dataset**） |
-| `cognee.py add <文件> --dataset <名>` | 入库单个 md（**不支持目录**） |
-| `cognee.py cognify --dataset <名>` | 重建知识图谱 |
-| `cognee.py datasets` | 列出数据集 |
+| `"$ROOT/scripts/cognee.py" search "<查询>" --dataset <名>` | 检索（**必须指定 dataset**） |
+| `"$ROOT/scripts/cognee.py" add <文件> --dataset <名>` | 入库单个 md（**不支持目录**） |
+| `"$ROOT/scripts/cognee.py" cognify --dataset <名>` | 重建知识图谱 |
+| `"$ROOT/scripts/cognee.py" datasets` | 列出数据集 |
 
 ### `--type` 怎么选
 
