@@ -27,3 +27,11 @@ RUN /usr/local/bin/pip --python /app/.venv/bin/python install --no-cache-dir \
 RUN /app/.venv/bin/python -c "from PIL import Image; Image.new('RGB', (900, 1200), 'white').save('/tmp/warmup.pdf')" \
  && /app/.venv/bin/python -c "from docling.document_converter import DocumentConverter; DocumentConverter().convert('/tmp/warmup.pdf')" \
  && rm -f /tmp/warmup.pdf
+
+# 预热 cognee 自己的模型（~840 MB）：
+#   Qdrant/bge-small-zh-v1.5   fastembed 的 ONNX 嵌入模型（配置里 EMBEDDING_MODEL=BAAI/bge-small-zh-v1.5
+#                               是 cognee 侧的名字，fastembed 实际拉 Qdrant 那个）
+#   fastino/gliner2.5-base-v1  gliner_demo 图谱抽取器（GRAPH_EXTRACTOR=gliner_demo）
+#   BAAI/bge-small-zh-v1.5     只用到 tokenizer（460K）
+# 不预热的话容器重建后首次 cognify 要联网下 840M。
+RUN HF_HOME=/app/.cache/huggingface /app/.venv/bin/python -c "from huggingface_hub import snapshot_download; snapshot_download('BAAI/bge-small-zh-v1.5', allow_patterns=['tokenizer.json', 'tokenizer_config.json']); snapshot_download('Qdrant/bge-small-zh-v1.5', allow_patterns=['config.json', 'tokenizer.json', 'tokenizer_config.json', 'special_tokens_map.json', 'model_optimized.onnx']); snapshot_download('fastino/gliner2.5-base-v1', allow_patterns=['config.json', 'tokenizer.json', 'tokenizer_config.json', 'model.safetensors']); print('cognee models warmed')"

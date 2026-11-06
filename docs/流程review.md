@@ -382,9 +382,14 @@ RUN pip install "rapidocr>=3.9.1,<4" "docling-ibm-models>=3.9.1,<5" \
 **验证**：PDF 走 `archive.py` 全链路成功（规则判定 → 转换 → 入库 → 台账 → md → 检索命中）；
 `ocr_image()` 对真实照片返回 18 行文字。
 
-**遗留风险（未处理）**：docling 的模型权重（约 600 MB）是**运行时**从 HuggingFace 下载到
-容器可写层（`/app/.cache/huggingface`）的，`docker compose up -d --force-recreate` 会丢掉、
-下次转换重新下载。要彻底解决得把模型预热进镜像（会让镜像大 ~600 MB），这次没做。
+**遗留风险（已解决）**：docling 与 cognee 的模型权重（合计 ~1.4 GB）原本都是**运行时**从
+HuggingFace 下载到容器可写层（`/app/.cache/huggingface`）的，`docker compose up -d --force-recreate`
+会丢掉、下次用到时重新下载。现已在 `Dockerfile` 里分两步预热进镜像：
+① 跑一次真实 `DocumentConverter().convert()` 拉 docling 布局/表格模型（506 MB）；
+② `huggingface_hub.snapshot_download` 拉 cognee 侧三个仓库（`Qdrant/bge-small-zh-v1.5` 91M、
+`fastino/gliner2.5-base-v1` 747M、`BAAI/bge-small-zh-v1.5` 460K）。
+验证方式：`docker run --rm --entrypoint sh cognee-ocr:local -c 'du -sh /app/.cache/huggingface/hub/*'`
+——fresh container（不含可写层）里五个仓库的文件数与运行时逐仓库一致。镜像 4.28 GB → 6.94 GB。
 
 ## 3. B 类：应保留 LLM 判断 + skill 约束
 
