@@ -1,0 +1,7 @@
+reviewItems:
+  - id: data
+    label: 评估范围、方法、样本和数据来源已核对
+  - id: findings
+    label: 发现、证据、局限和专业判断已区分
+  - id: recommendations
+    label: 结论、改进建议和跟进责任已人工复核

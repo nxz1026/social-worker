@@ -1,0 +1,7 @@
+reviewItems:
+  - id: privacy
+    label: 预约、知情同意和匿名化安排已核对
+  - id: questions
+    label: 探访目标、提问与观察要点已确认，未将待了解事项写成既有事实
+  - id: safety
+    label: 安全、转介与后续安排已核对

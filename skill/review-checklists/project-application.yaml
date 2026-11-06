@@ -1,0 +1,7 @@
+reviewItems:
+  - id: eligibility
+    label: 申报资格、截止时间和提交要求已回到原文核对
+  - id: evidence
+    label: 需求依据、机构资质和合作证明真实且齐全
+  - id: budget
+    label: 预算、实施计划、风险和成效指标已核对

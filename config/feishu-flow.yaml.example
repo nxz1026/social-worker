@@ -1,0 +1,64 @@
+# 飞书收件箱工作流配置模板
+# 用法：复制成 config/feishu-flow.yaml 并填真实 folder token。
+# 真配置已在 .gitignore 里，不要提交。
+#
+# token 取法：飞书云盘对应文件夹的 URL 末尾一段
+#   https://<tenant>.feishu.cn/drive/folder/<folder_token>
+feishu:
+  root: <社工知识库根目录 token>
+  inbox: <未分类 folder token>     # 用户上传口
+  archive: <已分类 folder token>   # 归档视图（由脚本写入，不要手工放）
+  url_template: "https://<tenant>.feishu.cn/file/{token}"
+
+projects:
+  huadu:
+    label: 花都
+    dataset: huadu
+    vault: vault-huadu
+    folder: <花都项目根 folder token>
+  huimin:
+    label: 惠民
+    dataset: huimin
+    vault: vault-huimin
+    folder: <惠民项目根 folder token>
+  shared:
+    label: 共享
+    dataset: shared-policies
+    vault: md-shared
+    folder: <共享根 folder token>
+
+categories:
+  - 发票票据
+  - 项目计划
+  - 项目执行
+  - 日常工作佐证
+  - 政策文件
+  - 其他
+
+# 「已分类」下每个项目 × 类别一个 folder。
+# 这些 folder 是 scan-inbox.py 的产物，禁止手工往里写文件。
+category_folders:
+  花都:
+    发票票据: <token>
+    项目计划: <token>
+    项目执行: <token>
+    日常工作佐证: <token>
+    政策文件: <token>
+    其他: <token>
+  惠民:
+    发票票据: <token>
+    项目计划: <token>
+    项目执行: <token>
+    日常工作佐证: <token>
+    政策文件: <token>
+    其他: <token>
+  共享:
+    发票票据: <token>
+    项目计划: <token>
+    项目执行: <token>
+    日常工作佐证: <token>
+    政策文件: <token>
+    其他: <token>
+
+# 分类置信度低于此值 -> 落 _待确认，不自动归档
+min_confidence: 0.7

@@ -1,0 +1,35 @@
+# ---------- 密钥 / 凭据（绝不进仓）----------
+.env
+.cognee-key
+.cognee-token
+.syncthing-key
+*.pem
+*.key
+
+# ---------- 运行时数据（含真实居民个人信息，绝不进仓）----------
+vault-*/
+sources/
+md-shared/
+inbox/
+state/
+snapshots/
+_synctest/
+.sync/
+
+# ---------- 配置里的真实 folder token ----------
+# 提交 config/feishu-flow.yaml.example，不要提交真配置
+config/feishu-flow.yaml
+*.local.yaml
+
+# ---------- Python ----------
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# ---------- 编辑器 / 系统 ----------
+.DS_Store
+*.swp
+.idea/
+.vscode/

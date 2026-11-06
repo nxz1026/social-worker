@@ -1,0 +1,57 @@
+services:
+  cognee:
+    image: cognee-ocr:local
+    container_name: social-work-cognee
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "127.0.0.1:8000:8000"        # 仅本机可访问（DSH skill 走容器网络）
+    volumes:
+      - cognee_system:/cognee-storage/system
+      - cognee_data:/cognee-storage/data
+      # 只读挂载宿主机工作目录，供 Cognee 读取源文件与 vault
+      - /srv/social-work:/host/social-work:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    stop_grace_period: 15s
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 180s
+    deploy:
+      resources:
+        limits:
+          cpus: "4.0"
+          memory: 8G
+
+  # Obsidian vault 同步：文件级双向，服务器端不需要跑 Obsidian
+  syncthing:
+    image: syncthing/syncthing:latest
+    container_name: social-work-syncthing
+    restart: unless-stopped
+    environment:
+      - PUID=1001
+      - PGID=1001
+    volumes:
+      - syncthing_config:/var/syncthing/config
+      - /srv/social-work/vault-huadu:/var/syncthing/vault-huadu
+      - /srv/social-work/vault-huimin:/var/syncthing/vault-huimin
+    ports:
+      - "127.0.0.1:8384:8384"        # Web UI，仅本机
+      - "22000:22000/tcp"            # 同步数据
+      - "22000:22000/udp"
+      - "21027:21027/udp"            # 中继发现
+    healthcheck:
+      test: ["CMD", "/bin/sh", "-c", "curl -fsS http://127.0.0.1:8384/ | grep -q Syncthing"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+volumes:
+  cognee_system:
+  cognee_data:
+  syncthing_config:

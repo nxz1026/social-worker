@@ -1,0 +1,7 @@
+reviewItems:
+  - id: privacy
+    label: 姓名、电话、证件号、详细地址等可识别信息已匿名化
+  - id: facts
+    label: 事实、服务对象陈述、专业判断和待核实信息已区分
+  - id: follow-up
+    label: 风险线索、后续计划和待督导事项已确认

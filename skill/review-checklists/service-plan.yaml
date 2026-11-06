@@ -1,0 +1,7 @@
+reviewItems:
+  - id: needs
+    label: 需求、优势和服务对象意愿已核对
+  - id: actions
+    label: 目标、行动、责任人和时限已共同确认
+  - id: evaluation
+    label: 风险、资源、指标和评估安排已核对

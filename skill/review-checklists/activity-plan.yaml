@@ -1,0 +1,7 @@
+reviewItems:
+  - id: facts
+    label: 事实、数据和时间已核对
+  - id: sources
+    label: 来源与适用范围已核对
+  - id: safety
+    label: 风险、分工和应急安排已核对
