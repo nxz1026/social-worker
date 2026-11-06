@@ -33,7 +33,7 @@ social-worker/
 │   ├── archive.py                 # M5 一条命令归档：定项目 → 放 inbox/ → 跑 scan-inbox → 校验
 │   ├── scan-inbox.py              # inbox/ 队列 → 分类 → 转 md → 归档 → 入库（定时跑）
 │   └── cognee.py                  # 包装 cognee-cli：search / add / cognify / sync
-├── skill/                         # DSH skill（放 ~/.dsh/skills/social-work/）
+├── skill/                         # DSH skill 源（部署到 ~/.dsh/skills/social-work/，改完要同步）
 │   ├── SKILL.md
 │   ├── enabled-skills.yaml
 │   ├── templates/*.md             # 6 套文书模板

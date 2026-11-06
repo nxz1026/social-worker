@@ -5,34 +5,28 @@ description: 社工工作助手：检索 Cognee 知识库（政策文件、项�
 
 # social-work
 
-`ROOT` = `/srv/social-work`（`SOCIAL_WORK_ROOT` 可覆盖）；服务端 `http://127.0.0.1:8000`。**只索引 md**，原始文件留 `sources/`。
+`ROOT` = `/srv/social-work`（`SOCIAL_WORK_ROOT` 可覆盖）；服务端 `http://127.0.0.1:8000`。
 
 ## 命令（都在 `"$ROOT/scripts/`）
 
-| 命令 | 用途 |
+| 命令 | 什么时候用 |
 |---|---|
-| `archive.py --file <路径>` | **收到文件只调这条**（定项目 → 放 `inbox/` → 转 md → 入库 → 校验） |
-| `scan-inbox.py [--dry-run]` | 手动跑一次收件箱（15 分钟自动） |
-| `convert-md.py --project all` | 原始文件 → md（docx→pandoc，xlsx/pptx/pdf→docling） |
+| `archive.py --file <路径>` | **收到文件只调这条** |
+| `scan-inbox.py [--dry-run]` | 手动补跑（15 分钟自动） |
 | `cognee.py search "<查询>" --dataset <名>` | 检索（`--type` 默认 auto） |
-| `cognee.py sync <vault> --dataset <名>` | 同步 md → 库（**幂等**，先 `--dry-run`） |
-| `audit.py --date <日期>` | 审计摘要（每天 22:00 自动发飞书） |
-| `fallback.py --list` | 待兜底清单 |
+| `cognee.py sync <vault> --dataset <名>` | 同步 md → 库（幂等，先 `--dry-run`） |
+| `audit.py --date <日期>` | 看审计（22:00 自动发飞书） |
+| `fallback.py --list` | 看待兜底 |
 
-## 数据集
-
-| 数据集 | 内容 | md 位置 |
-|---|---|---|
-| `huadu` | 花都项目 | `vault-huadu/md/` |
-| `huimin` | 惠民项目 | `vault-huimin/md/` |
+数据集：`huadu` → `vault-huadu/md/`；`huimin` → `vault-huimin/md/`
 
 ## 用在哪
 
 - 政策/法规/项目资料/个案记录提问 → 先 `search`，用检索结果，不凭记忆
 - 用户发来文件 → `archive.py`
-- 生成文书 → 读 `templates/<type>.md` + `review-checklists/<type>.yaml`，先 `search` 取政策与案例，按模板填充、引用标来源、不补造事实，输出草稿 + 复核清单
+- 生成文书 → 读 `templates/<type>.md` + `review-checklists/<type>.yaml`，先 `search` 取政策与案例，按模板填充、引用标来源、不补造事实
 
-路由：个案/服务记录→`case-record`｜家访提纲→`home-visit-outline`｜服务计划→`service-plan`｜活动方案→`activity-plan`｜项目申报→`project-application`｜评估报告→`evaluation-report`；匹配失败就列出六种类型让用户选。
+路由：个案/服务记录→`case-record`｜家访提纲→`home-visit-outline`｜服务计划→`service-plan`｜活动方案→`activity-plan`｜项目申报→`project-application`｜评估报告→`evaluation-report`；匹配失败列出六种让用户选。
 
 ## 硬约束
 
