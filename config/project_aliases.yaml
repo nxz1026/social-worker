@@ -3,8 +3,7 @@
 # 归档分类时先跑规则：文件名 + 正文预览里命中哪个项目的关键词，就判给哪个项目。
 # 判不了（没命中 / 多个项目同分）→ 返回 None，交 LLM。
 #
-# key 用 feishu-flow.yaml 里 projects 的 key（huadu / huimin / shared）。
-# 「共享」不靠关键词，走下面 fallback。
+# key 用 feishu-flow.yaml 里 projects 的 key（huadu / huimin）。
 #
 # 改这里就能调规则，不用改代码。
 
@@ -16,8 +15,3 @@ huimin:
   - 惠民
   - 民乐北巷
   - 公平街道
-
-# 兜底：没有任何项目命中，但类别命中这里列的类别 → 用该项目
-fallback:
-  shared:
-    - 政策文件

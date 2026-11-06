@@ -103,7 +103,6 @@ python3 scripts/scan-inbox.py               # 真跑
 
 | 数据集 | 内容 | md 位置 |
 |---|---|---|
-| `shared-policies` | 政策文件（全员共享） | `md-shared/` |
 | `huadu` | 花都项目 | `vault-huadu/md/` |
 | `huimin` | 惠民项目 | `vault-huimin/md/` |
 
@@ -120,6 +119,6 @@ python3 scripts/scan-inbox.py               # 真跑
 
 - 密钥：`.env`、`.cognee-key`、`.cognee-token`、`.syncthing-key`
 - 真实配置：`config/feishu-flow.yaml`（含真实 folder token）
-- 运行时数据：`vault-*/`、`sources/`、`md-shared/`、`inbox/`、`state/`、`snapshots/`
+- 运行时数据：`vault-*/`、`sources/`、`inbox/`、`state/`、`snapshots/`
 
 **这些运行时目录含真实居民个人信息，任何情况下都不要提交。**

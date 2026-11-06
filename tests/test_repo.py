@@ -134,7 +134,6 @@ def test_config_defaults():
     assert cfg.container_root == "/host/social-work"
     assert cfg.key_file == Path("/srv/social-work/.cognee-key")
     assert cfg.audit_retention_days == 90
-    assert cfg.datasets["shared"] == "shared-policies"
     assert cfg.datasets["huadu"] == "huadu"
     assert cfg.datasets["huimin"] == "huimin"
 

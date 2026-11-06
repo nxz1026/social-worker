@@ -26,7 +26,6 @@ DEFAULTS = {
     "key_file": ".cognee-key",
     "audit_retention_days": 90,
     "datasets": {
-        "shared": "shared-policies",
         "huadu": "huadu",
         "huimin": "huimin",
     },

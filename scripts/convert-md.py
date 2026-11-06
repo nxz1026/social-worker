@@ -45,14 +45,13 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 CFG = None
 ROOT = None
 PROJECTS: dict = {}
-SHARED: dict = {}
 CONTAINER_ROOT: Path | None = None
 COGNEE_CONTAINER: str | None = None
 
 
 def apply_config(cfg) -> None:
     """把配置对象落到模块级路径（scan-inbox 复用本模块时也会调用）。"""
-    global CFG, ROOT, PROJECTS, SHARED, CONTAINER_ROOT, COGNEE_CONTAINER
+    global CFG, ROOT, PROJECTS, CONTAINER_ROOT, COGNEE_CONTAINER
     CFG = cfg
     ROOT = cfg.root
     CONTAINER_ROOT = Path(cfg.container_root)
@@ -61,8 +60,6 @@ def apply_config(cfg) -> None:
         "huadu": {"vault": ROOT / "vault-huadu", "sources": ROOT / "sources/projects/huadu"},
         "huimin": {"vault": ROOT / "vault-huimin", "sources": ROOT / "sources/projects/huimin"},
     }
-    # 共享资料不属于任何项目，单独一个目录（不进 vault，只给 Cognee 索引）
-    SHARED = {"vault": ROOT / "md-shared", "sources": ROOT / "sources/_shared"}
 
 
 apply_config(load_config())
@@ -353,7 +350,7 @@ def prune(cfg: dict) -> list[str]:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="原始文件 → vault 里的 markdown")
-    ap.add_argument("--project", choices=[*PROJECTS, "shared", "all"], default="all")
+    ap.add_argument("--project", choices=[*PROJECTS, "all"], default="all")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--force", action="store_true", help="忽略时间戳全部重转")
     ap.add_argument("--jobs", type=int, default=4)
@@ -371,9 +368,9 @@ def main() -> int:
             return 1
 
     if args.project == "all":
-        items = [(k, v) for k, v in PROJECTS.items()] + [("shared", SHARED)]
+        items = list(PROJECTS.items())
     else:
-        items = [(args.project, PROJECTS[args.project] if args.project in PROJECTS else SHARED)]
+        items = [(args.project, PROJECTS[args.project])]
     total_ok = total_fail = total_links = 0
     failures: list[str] = []
 

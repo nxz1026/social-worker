@@ -46,7 +46,6 @@ CONFIG = {
     "projects": {
         "huadu": {"label": "花都", "vault": "vault-huadu", "dataset": "huadu"},
         "huimin": {"label": "惠民", "vault": "vault-huimin", "dataset": "huimin"},
-        "shared": {"label": "共享", "vault": "md-shared", "dataset": "shared-policies"},
     },
     "categories": ["发票票据", "项目计划", "项目执行", "日常工作佐证", "政策文件", "其他"],
     "feishu": {"inbox": "test-inbox", "url_template": "https://example.com/file/{token}"},

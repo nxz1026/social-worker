@@ -21,11 +21,6 @@ projects:
     dataset: huimin
     vault: vault-huimin
     folder: <惠民项目根 folder token>
-  shared:
-    label: 共享
-    dataset: shared-policies
-    vault: md-shared
-    folder: <共享根 folder token>
 
 categories:
   - 发票票据
@@ -46,13 +41,6 @@ category_folders:
     政策文件: <token>
     其他: <token>
   惠民:
-    发票票据: <token>
-    项目计划: <token>
-    项目执行: <token>
-    日常工作佐证: <token>
-    政策文件: <token>
-    其他: <token>
-  共享:
     发票票据: <token>
     项目计划: <token>
     项目执行: <token>

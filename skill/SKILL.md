@@ -23,7 +23,6 @@ description: 社工工作助手：检索 Cognee 知识库（政策文件、项�
 
 | 数据集 | 内容 | md 位置 |
 |---|---|---|
-| `shared-policies` | 政策文件 | `md-shared/` |
 | `huadu` | 花都项目 | `vault-huadu/md/` |
 | `huimin` | 惠民项目 | `vault-huimin/md/` |
 

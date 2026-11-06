@@ -360,7 +360,7 @@ Cognee 能检索到；`--dry-run` 对 docx / 图片 / 定不了项目的文件�
    → repo 化必须剥离，提供 `.env.example`。
 4. **`feishu-flow.yaml` 含真实 folder token**，`资料存放说明.md` 含真实文件夹 URL。
    → **repo 是 public 的话不能进**，需出 `.example` 版本。
-5. **运行时数据与代码同目录**：`vault-*/`、`sources/`、`md-shared/`、`inbox/`、`state/`、`snapshots/`。
+5. **运行时数据与代码同目录**：`vault-*/`、`sources/`、`inbox/`、`state/`、`snapshots/`。
    → `.gitignore` 明确排除（这些含真实居民个人信息，**绝不能进 public repo**）。
 6. **无测试**：分类、归档、去重都没有回归测试。
    → repo 化时加 `tests/`，用样本文件跑 `--dry-run` 断言路径与台账。
@@ -407,5 +407,5 @@ social-worker/
 **实际落地（2026-11-06）**：M8 配置收口 → M6 `sync` 去重 → M2 分类规则层 → M1 图片闸门 → M3 审计摘要 + 22:00 飞书汇总 → M4 错误处理/告警/兜底 → M5 `archive.py` → M7 检索参数下沉 → M9 skill 压缩（131→44 行）。
 
 **全部完成**。测试 103 项全过；代码、配置、文档、skill 均在 `github.com/nxz1026/social-worker`。
-遗留（非本次范围）：`shared-policies` 数据集只有 1 条垃圾条目且 `md-shared/` 无 md；
-`~/.config/systemd/user/social-work-bot.service` 引用不存在的 `feishu-bot.py`（服务是坏的）。
+遗留：无（2026-11-06 已清 `shared-policies` 数据集与空的 `md-shared/`，并停删坏掉的
+`social-work-bot.service`；配置里的 `shared` 项目已一并摘除）。

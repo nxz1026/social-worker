@@ -44,8 +44,7 @@ def test_quotes_and_date_prefers_date():
 # ---------- pick_dataset ----------
 
 _CFG = type("C", (), {"path": ROOT / "config" / "config.yaml",
-                      "datasets": {"shared": "shared-policies",
-                                   "huadu": "huadu", "huimin": "huimin"}})()
+                      "datasets": {"huadu": "huadu", "huimin": "huimin"}})()
 
 
 def test_dataset_by_project_keyword():
