@@ -445,9 +445,13 @@ def archive_one(src: Path, token: str, digest: str, decision: dict, cfg: dict,
         or (bool(project) and category == WORK_PHOTO_CATEGORY)
     )
     name = auto_image_name(src, decision.get("title", "")) if work_photo else src.name
-    url = cfg["feishu"]["url_template"].format(token=token)
     label = projects[project]["label"] if project else "待确认"
-    header = f"> 原件：[{name}]({url})\n>\n> 分类：{label} / {category}\n\n"
+    is_local = token.startswith("local-")   # 手工放进 inbox/ 的，飞书侧没有对应文件
+    if is_local:
+        header = f"> 原件：{name}\n>\n> 分类：{label} / {category}\n\n"
+    else:
+        url = cfg["feishu"]["url_template"].format(token=token)
+        header = f"> 原件：[{name}]({url})\n>\n> 分类：{label} / {category}\n\n"
 
     if project:
         original_dir = f"sources/projects/{project}/{category}"
@@ -519,8 +523,8 @@ def archive_one(src: Path, token: str, digest: str, decision: dict, cfg: dict,
     if not work_photo:
         entry["md"] = str(md_dir.relative_to(ROOT) / (src.stem + ".md"))
 
-    # 飞书归档
-    if project:
+    # 飞书归档（手工放进来的文件飞书侧没有对应条目，跳过）
+    if project and not is_local:
         dest_folder = cfg["category_folders"][projects[project]["label"]][category]
         try:
             move_to_archive(token, dest_folder)
@@ -530,6 +534,9 @@ def archive_one(src: Path, token: str, digest: str, decision: dict, cfg: dict,
             entry["status"] = "pending"
             entry["error"] = f"mv 失败：{exc}"
             log(f"  ! {name} 归档失败：{exc}")
+    elif project:
+        entry["status"] = "done"
+        entry["archived_at"] = datetime.now(TZ).isoformat(timespec="seconds")
     else:
         entry["status"] = "pending_review"
         log(f"  ! {name} 置信度不足，落 _待确认/{category}/")
@@ -582,6 +589,21 @@ def main() -> int:
     items = pull_inbox(cfg["feishu"]["inbox"])
     log(f"  {len(items)} 个文件" if items else "  (空)")
 
+    # M5：inbox/ 就是待处理队列 —— 文件从飞书拉下来、或 archive.py 手工放进来，
+    # 都走同一条处理路径。飞书来的有 token，手工放的用内容 hash 当 key。
+    seen = {it.get("rel_path", "") for it in items}
+    local_count = 0
+    for p in sorted(INBOX.rglob("*")):
+        if not p.is_file():
+            continue
+        rel = p.relative_to(INBOX).as_posix()
+        if rel in seen:
+            continue
+        items.append({"file_token": "", "rel_path": rel})
+        local_count += 1
+    if local_count:
+        log(f"  inbox/ 里还有 {local_count} 个本地文件待处理")
+
     manifest = load_yaml(MANIFEST_PATH, {"files": {}})
     manifest.setdefault("files", {})
 
@@ -595,7 +617,6 @@ def main() -> int:
         open_error_files = set()
 
     for it in items:
-        token = it.get("file_token", "")
         rel = it.get("rel_path", "")
         src = INBOX / rel
         if not src.is_file():
@@ -604,6 +625,8 @@ def main() -> int:
         # lark-cli 落地的文件是 600，Cognee 容器 uid=1000 读不到，docling 会 PermissionError
         os.chmod(src, 0o644)
         digest = sha256_of(src)
+        # 手工放进来的文件没有飞书 token，用内容 hash 当台账 key
+        token = it.get("file_token") or f"local-{digest[:16]}"
         prev = manifest["files"].get(token)
         if prev and prev.get("sha256") == digest and prev.get("status") in {"done", "pending_review"}:
             log(f"  = 跳过（已处理）{rel}")

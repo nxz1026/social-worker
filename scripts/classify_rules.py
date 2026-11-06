@@ -54,7 +54,8 @@ def _best(scores: dict) -> str | None:
     return ranked[0][1]
 
 
-def classify_rule(name, preview, rules: dict, projects=None, categories=None) -> dict | None:
+def classify_rule(name, preview, rules: dict, projects=None, categories=None,
+                  require_category: bool = True) -> dict | None:
     """规则分类。判不了返回 None。
 
     name       文件名（含扩展名）
@@ -62,6 +63,8 @@ def classify_rule(name, preview, rules: dict, projects=None, categories=None) ->
     rules      load_rules() 的返回值
     projects   合法项目 key 列表（feishu-flow.yaml 的 projects），用于过滤
     categories 合法类别列表，用于过滤
+    require_category  为 False 时只要求判出项目（category 可为 None）——
+                      archive.py 只需要项目
 
     返回值形状与 scan-inbox.classify() 一致：
         {"project": <key>, "category": <类别>, "confidence": 1.0, "reason": "rule", ...}
@@ -96,7 +99,9 @@ def classify_rule(name, preview, rules: dict, projects=None, categories=None) ->
                 project = proj
                 break
 
-    if project is None or category is None:
+    if project is None:
+        return None
+    if category is None and require_category:
         return None
     return {"project": project, "category": category, "confidence": 1.0,
             "reason": "rule", "scores": {"project": p_scores, "category": c_scores}}

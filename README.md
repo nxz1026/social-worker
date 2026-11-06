@@ -30,7 +30,8 @@ social-worker/
 │   ├── error_queue.py             # M4 错误队列：state/errors/open.yaml + 每日 jsonl
 │   ├── fallback.py                # M4 待兜底清单：汇总待处理项成 md，供 LLM 处理
 │   ├── convert-md.py              # 原始文件 → vault 里的 md
-│   ├── scan-inbox.py              # 飞书未分类 → 分类 → 转 md → 归档 → 入库（定时跑）
+│   ├── archive.py                 # M5 一条命令归档：定项目 → 放 inbox/ → 跑 scan-inbox → 校验
+│   ├── scan-inbox.py              # inbox/ 队列 → 分类 → 转 md → 归档 → 入库（定时跑）
 │   └── cognee.py                  # 包装 cognee-cli：search / add / cognify / sync
 ├── skill/                         # DSH skill（放 ~/.dsh/skills/social-work/）
 │   ├── SKILL.md

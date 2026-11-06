@@ -23,17 +23,17 @@ description: 社工工作助手：检索 Cognee 知识库（政策文件、项�
 
 ### 收到文件 → 归档
 
-**不要手工拼归档流程。** 两条正路，按文件在哪选一条：
+**只调 `archive.py` 一条命令**，不要手工分步（漏飞书归档/台账/cognify 是三处常见漏点）：
 
-| 文件在哪 | 处置 |
-|---|---|
-| DSH 会话工作区 / 用户直接发来 / 机器人收到 | 放进飞书「未分类」→ 跑 `scan-inbox.py`（或等 15 分钟定时） |
-| 已在 `sources/projects/<项目>/` | 跑 `convert-md.py --project <项目>` → `"$ROOT/scripts/cognee.py" sync <vault> --dataset <数据集>` |
+```bash
+python3 "$ROOT/scripts/archive.py" --file <路径> [--project huimin] [--action auto|ocr|archive_only]
+```
 
-- 飞书「未分类」token 取 `feishu-flow.yaml` 的 `feishu.inbox`；上传：`lark-cli drive +upload --file <相对路径> --folder-token <inbox>`（`--file` 只接受 cwd 下相对路径）
-- **禁止手工往飞书「已分类」写文件**（含 `category_folders` 里任何 token）：「已分类」是 `scan-inbox.py` 的产物（`move_to_archive()`），手工放会绕过 `state/manifest.yaml` 台账、md 生成与 Cognee 索引。见 `资料存放说明.md:25`
-- 手工往 `sources/` 丢文件只解决「原件落位」，**不含飞书归档**；要飞书副本仍走「未分类」
-- `scan-inbox.py` 一条命令覆盖：分类 → 转 md → 原件落位 → 飞书归档 → 写台账 → Cognee 重建。手工分步做必漏项（飞书归档、台账、cognify 是三处常见漏点）
+- 它内部做：定项目（给了就用，没给按规则判，**判不了报错退出不猜**）→ 放进 `inbox/` 对应位置（目录即授权）→ 跑 `scan-inbox.py` → 校验台账与 md
+- 文件已在 `sources/projects/<项目>/`：跑 `convert-md.py --project <项目>` → `"$ROOT/scripts/cognee.py" sync <vault> --dataset <数据集>`
+- **禁止手工往飞书「已分类」写文件**（含 `category_folders` 里任何 token）：「已分类」是 `scan-inbox.py` 的产物（`move_to_archive()`），手工放会绕过台账、md 生成与索引。见 `资料存放说明.md:25`
+- 手工往 `sources/` 丢文件只解决「原件落位」，**不含飞书归档**
+- `inbox/` 就是待处理队列：飞书拉下来的、`archive.py` 放进去的，都走同一条处理路径
 
 ### 转换（原始文件 → md）
 
