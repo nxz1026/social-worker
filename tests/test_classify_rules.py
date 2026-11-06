@@ -64,9 +64,9 @@ def test_tie_returns_none():
     assert _rule("花都惠民联合活动方案.docx") is None
 
 
-def test_fallback_shared():
-    r = _rule("2026-11-05-关于规范社区党建经费使用的通知.docx")
-    assert r and r["project"] == "shared" and r["category"] == "政策文件"
+def test_policy_without_project_goes_to_review():
+    """共享政策库已删除（2026-11-06）：判不出项目就交人工，不猜。"""
+    assert _rule("2026-11-05-关于规范社区党建经费使用的通知.docx") is None
 
 
 def test_other_never_fires():
@@ -149,7 +149,7 @@ if __name__ == "__main__":
         test_preview_cannot_override_filename_category,
         test_no_match_returns_none,
         test_tie_returns_none,
-        test_fallback_shared,
+        test_policy_without_project_goes_to_review,
         test_other_never_fires,
         test_replay,
     ):
