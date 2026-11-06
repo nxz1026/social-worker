@@ -5,127 +5,40 @@ description: 社工工作助手：检索 Cognee 知识库（政策文件、项�
 
 # social-work
 
-## 知识库（Cognee）
+`ROOT` = `/srv/social-work`（`SOCIAL_WORK_ROOT` 可覆盖）；服务端 `http://127.0.0.1:8000`。**只索引 md**，原始文件留 `sources/`。
 
-> 下文命令中的 `ROOT` = 服务端根目录，默认 `/srv/social-work`，由 `config/config.yaml` 的 `root` 决定（环境变量 `SOCIAL_WORK_ROOT` 可覆盖）。
-
-服务端 `http://127.0.0.1:8000`（容器 `social-work-cognee`）。客户端 `"$ROOT/scripts/cognee.py"` 包装官方 `cognee-cli`，自动带 API key。
-
-**只索引 md。** 原始 Office/图片留在 `sources/` 存档，不进库。
-
-| 数据集 | 内容 | md 位置 |
-|---|---|---|
-| `shared-policies` | 政策文件（全员共享） | `md-shared/` |
-| `huadu` | 花都项目 | `vault-huadu/md/` |
-| `huimin` | 惠民项目 | `vault-huimin/md/` |
-
-每个项目的 vault 是独立 Obsidian 仓库，经 Syncthing 双向同步到客户端。
-
-### 收到文件 → 归档
-
-**只调 `archive.py` 一条命令**，不要手工分步（漏飞书归档/台账/cognify 是三处常见漏点）：
-
-```bash
-python3 "$ROOT/scripts/archive.py" --file <路径> [--project huimin] [--action auto|ocr|archive_only]
-```
-
-- 它内部做：定项目（给了就用，没给按规则判，**判不了报错退出不猜**）→ 放进 `inbox/` 对应位置（目录即授权）→ 跑 `scan-inbox.py` → 校验台账与 md
-- 文件已在 `sources/projects/<项目>/`：跑 `convert-md.py --project <项目>` → `"$ROOT/scripts/cognee.py" sync <vault> --dataset <数据集>`
-- **禁止手工往飞书「已分类」写文件**（含 `category_folders` 里任何 token）：「已分类」是 `scan-inbox.py` 的产物（`move_to_archive()`），手工放会绕过台账、md 生成与索引。见 `资料存放说明.md:25`
-- 手工往 `sources/` 丢文件只解决「原件落位」，**不含飞书归档**
-- `inbox/` 就是待处理队列：飞书拉下来的、`archive.py` 放进去的，都走同一条处理路径
-
-### 转换（原始文件 → md）
-
-```bash
-python3 "$ROOT/scripts/convert-md.py" --project all              # 增量
-python3 "$ROOT/scripts/convert-md.py" --project huimin --force   # 强制重转
-```
-
-- docx → pandoc；xlsx/pptx/pdf/csv → docling（容器内）；图片/音视频直接复制到 `vault-<proj>/media/`
-- 产物落 `vault-<proj>/md/<源文件相对目录>/<文档名>/<文档名>.md`
-- 按 `entities.yaml` 自动插 `[[实体]]` 链接（改完名册重跑即可）
-- **转完必须 `cognify`，否则检索不到**
-
-### 飞书收件箱（自动）
-
-用户往飞书「社工知识库 / 未分类」丢文件，服务器每 15 分钟自动：分类 → 转 md → 归档原件 → 建索引。
-
-```bash
-python3 "$ROOT/scripts/scan-inbox.py"             # 手动跑一次
-python3 "$ROOT/scripts/scan-inbox.py" --dry-run   # 只报计划
-```
-
-- 分类先走代码规则层（`config/project_aliases.yaml` + `config/category_keywords.yaml` + `rule_weights.yaml`），判不了才调 LLM；规则判错率 0，改关键词不用改代码
-- **图片按所在目录分流**（`config/image_policy.yaml`）：`要OCR/` → 本地 OCR 后转 md；`要识图/` → 视觉模型（默认关）；**根目录默认只存档**——不 OCR、不调视觉模型、不生成 md。要检索图片上的字，让用户把图片放进「未分类/要OCR/」
-- 分类结果落 `sources/projects/<项目>/<类别>/` + `vault-<项目>/md/<类别>/`
-- 台账 `state/manifest.yaml`（file_token + sha256），重复扫描不重复入库
-- 置信度 < 0.7 落 `_待确认/`，需人工归位后重跑
-- 审计：每次运行写 `state/audit/YYYY-MM-DD.jsonl`；`python3 "$ROOT/scripts/audit.py" --date <日期>` 看人读摘要；每天 22:00 自动发飞书汇总
-- 失败处理：转换/归档失败会写 `state/errors/open.yaml` 并**立刻发飞书告警**；`python3 "$ROOT/scripts/fallback.py" --list` 看待处理项，`--date` 生成清单
-- 定时任务状态：`systemctl --user status social-work-scan.timer social-work-audit.timer`
-
-### 飞书机器人（dsh-im）
-
-用户也可能直接私聊飞书机器人（Mimir）发文件/图片，或说一句「这个归花都」。
-
-- 插件 `@xmanrui/dsh-im`；配置 `~/.dsh/integrations/dsh-feishu/config.json`
-- 机器人收到的文件在 DSH 会话工作区，归档走上面「收到文件 → 归档」
-- 排障：`journalctl --user -u dsh-web -n 50 | grep -i feishu`
-
-### 命令
+## 命令（都在 `"$ROOT/scripts/`）
 
 | 命令 | 用途 |
 |---|---|
-| `"$ROOT/scripts/cognee.py" search "<查询>" --dataset <名>` | 检索（**必须指定 dataset**） |
-| `"$ROOT/scripts/cognee.py" add <文件> --dataset <名>` | 入库单个 md（**不支持目录**）。⚠️ 同一文件再 add 一次会**新建条目而非更新**，要更新用 `sync` |
-| `"$ROOT/scripts/cognee.py" cognify --dataset <名>` | 重建知识图谱 |
-| `"$ROOT/scripts/cognee.py" sync <vault> --dataset <名>` | 全量同步 md 目录（**幂等**，可反复跑；先加 `--dry-run` 看计划） |
-| `"$ROOT/scripts/cognee.py" datasets` | 列出数据集 |
+| `archive.py --file <路径>` | **收到文件只调这条**（定项目 → 放 `inbox/` → 转 md → 入库 → 校验） |
+| `scan-inbox.py [--dry-run]` | 手动跑一次收件箱（15 分钟自动） |
+| `convert-md.py --project all` | 原始文件 → md（docx→pandoc，xlsx/pptx/pdf→docling） |
+| `cognee.py search "<查询>" --dataset <名>` | 检索（`--type` 默认 auto） |
+| `cognee.py sync <vault> --dataset <名>` | 同步 md → 库（**幂等**，先 `--dry-run`） |
+| `audit.py --date <日期>` | 审计摘要（每天 22:00 自动发飞书） |
+| `fallback.py --list` | 待兜底清单 |
 
-### 检索参数
+## 数据集
 
-`--type` 默认 `auto`，按查询形态自动选（日期 → `TEMPORAL`；带引号 → `CHUNKS_LEXICAL`；其余 → `CHUNKS`）。**默认就够用**；只有要自然语言回答（会引用来源）才显式传 `GRAPH_COMPLETION`。
-
-`--auto-dataset` 按查询里的项目关键词自动选数据集；跨项目问题别加它（判不了时会搜全部）。
-
-规则：
-
-1. **检索必须指定 `--dataset`**：不带时 Cognee 只搜「最相关的一个」数据集（dataset routing，默认 top_k=1），跨项目问题会漏
-2. 回答政策/法规/项目资料问题前必须先 `search`，用检索结果，不凭记忆
-3. 新增/更新资料：先 `convert-md.py` 转 md，再 `"$ROOT/scripts/cognee.py" sync <vault> --dataset <数据集>`（**幂等**，自动删旧版本/孤儿/重复条目，未变的跳过）。`add` + `cognify` 只适合单文件应急
-4. 文件权限 644、目录 755（容器 uid 1000 要能读）。**写盘后立刻 `chmod`**：`write` 工具默认产出 `-rw-------`，容器读不到
-5. md/txt 直接复制；docx 走 pandoc；xlsx/pptx/pdf 走 docling；图片只复制不转
-6. 图片默认**只存档**（原件进 `sources/`，副本进 vault `media/`），不进 Cognee；要检索图片文字，让用户把图片放进飞书「未分类/要OCR/」。含服务对象面部/证件的图片不要放进「要OCR/」「要识图/」
-7. 只要原文用 `CHUNKS`；`GRAPH_COMPLETION`/`TEMPORAL` 走 LLM 且默认多一次分析调用（`AUTO_FEEDBACK`），更慢更贵
-8. 写入 vault 的文件同样要 `chmod 644`，否则客户端 Syncthing 同步过去、Cognee 也读不到
-
-## 路由规则
-
-| 关键词 | 类型 | 模板 |
+| 数据集 | 内容 | md 位置 |
 |---|---|---|
-| 个案记录、服务记录、接案、结案、访后记录 | case-record | templates/case-record.md |
-| 家访提纲、探访提纲、访前准备 | home-visit-outline | templates/home-visit-outline.md |
-| 服务计划、个案计划、干预方案 | service-plan | templates/service-plan.md |
-| 活动方案、社区活动、小组活动 | activity-plan | templates/activity-plan.md |
-| 项目申报、立项申请、资助申请 | project-application | templates/project-application.md |
-| 评估报告、结项报告、成效评估 | evaluation-report | templates/evaluation-report.md |
+| `shared-policies` | 政策文件 | `md-shared/` |
+| `huadu` | 花都项目 | `vault-huadu/md/` |
+| `huimin` | 惠民项目 | `vault-huimin/md/` |
 
-匹配失败或未启用：列出六种类型及启用状态，让用户选。
+## 用在哪
 
-## 生成流程
+- 政策/法规/项目资料/个案记录提问 → 先 `search`，用检索结果，不凭记忆
+- 用户发来文件 → `archive.py`
+- 生成文书 → 读 `templates/<type>.md` + `review-checklists/<type>.yaml`，先 `search` 取政策与案例，按模板填充、引用标来源、不补造事实，输出草稿 + 复核清单
 
-1. 路由 → 查 `enabled-skills.yaml`；未启用则问用户是否开启
-2. 读 `templates/<type>.md` + `review-checklists/<type>.yaml`
-3. 脱敏确认：含真实姓名/证件号/电话/精确地址 → 提醒用户先换编号，不代为脱敏
-4. `search` 取政策与历史案例作依据
-5. 按模板填充；引用标来源；不补造事实
-6. 输出草稿 + 复核清单（用户逐项确认）
+路由：个案/服务记录→`case-record`｜家访提纲→`home-visit-outline`｜服务计划→`service-plan`｜活动方案→`activity-plan`｜项目申报→`project-application`｜评估报告→`evaluation-report`；匹配失败就列出六种类型让用户选。
 
 ## 硬约束
 
-- 正文上限 14,000 字
-- 不编造政策文号、统计数据、案例细节
-- 引用给可核查来源（标题+发布方+日期或 URL）
-- 服务对象陈述与专业判断分段写
-- 风险线索、待核实信息、后续计划单独成段
+- **禁止手工往飞书「已分类」写文件**（绕过台账与索引）
+- 图片默认**只存档**，不进 Cognee；要检索图片文字让用户放「未分类/要OCR/」
+- 含真实姓名/证件号/电话/精确地址 → 提醒用户先脱敏，不代为脱敏
+- 不编造政策文号、统计数据、案例细节；引用给可核查来源；正文 ≤14,000 字
+- 文件权限 644、目录 755，**写盘后立刻 `chmod`**
