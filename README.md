@@ -12,6 +12,7 @@
 ```
 social-worker/
 ├── config/
+│   ├── config.yaml                # M8 服务端配置：root / 容器名 / 数据集 / LLM
 │   ├── feishu-flow.yaml.example   # 飞书目录 token / 项目 / 类别映射（填值后改名去掉 .example）
 │   ├── entities.yaml              # 实体名册：转换时自动插 [[链接]]
 │   ├── project_aliases.yaml       # M2 规则层：项目 → 关键词（改词不用改代码）
@@ -43,11 +44,21 @@ social-worker/
 │   ├── 资料存放说明.md             # 飞书端 + 服务器端目录结构、数据流、FAQ
 │   └── 流程review.md              # 流程 review：哪些该用代码，哪些留给 LLM
 ├── docker-compose.yml             # cognee + syncthing
-├── Dockerfile                     # 官方镜像 + 本地 OCR + Office loader
+├── Dockerfile                     # 官方镜像 + 本地 OCR + Office loader + 模型预热
 ├── syncthing-add-device.sh        # 把客户端注册进 vault 同步
 ├── .env.example                   # 服务端配置模板
 ├── .gitignore                     # 排除密钥、真实配置、运行时数据
 └── tests/
+    ├── test_repo.py               # 结构自检：脚本可编译、配置可解析、无密钥泄漏
+    ├── test_sync.py               # M6 sync 幂等 / 去重 / 非文本条目保留
+    ├── test_classify_rules.py     # M2 规则层 + 真实归档文件回放
+    ├── test_image_policy.py       # M1 图片闸门 + 审计（含端到端）
+    ├── test_audit.py              # M3 审计摘要 + 通知
+    ├── test_retry.py              # M4 重试
+    ├── test_error_queue.py        # M4 错误队列
+    ├── test_fallback.py           # M4 待兜底清单
+    ├── test_archive.py            # M5 一条命令归档（端到端）
+    └── test_search.py             # M7 检索参数自动选择
 ```
 
 ## 数据流
@@ -86,8 +97,9 @@ Obsidian（客户端）           →  人看、人改（Syncthing 双向）
 # 1. 配置
 cp .env.example .env && $EDITOR .env
 cp config/feishu-flow.yaml.example config/feishu-flow.yaml && $EDITOR config/feishu-flow.yaml
+# config/config.yaml 是服务端配置（root / 容器名 / 数据集 / LLM），默认值已指向 /srv/social-work
 
-# 2. 起服务
+# 2. 起服务（首次构建会下载并预热 docling + cognee 模型，镜像约 7 GB）
 docker compose up -d --build
 
 # 3. 健康检查
