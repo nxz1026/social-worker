@@ -8,8 +8,10 @@
   cognee.py datasets
   cognee.py status
 
-鉴权：读 /srv/social-work/.cognee-key 里的 API key（X-Api-Key）。
-路径：add 时自动把 /srv/social-work/ 映射为容器内 /host/social-work/。
+鉴权：读配置里的 key_file（默认 <root>/.cognee-key）里的 API key（X-Api-Key）。
+路径：add 时自动把服务端 root 映射为容器内 container_root
+      （默认 /srv/social-work → /host/social-work）。
+配置：config/config.yaml，可用 --config 指定；SOCIAL_WORK_ROOT 覆盖 root。
 """
 import argparse
 import json
@@ -18,12 +20,21 @@ import sys
 import urllib.request
 from pathlib import Path
 
-KEY_FILE = "/srv/social-work/.cognee-key"
-CONTAINER = "social-work-cognee"
+from config import load_config
+
 CLI = "/app/.venv/bin/cognee-cli"
 API_URL = "http://127.0.0.1:8000"
-HOST_ROOT = "/srv/social-work"
-CONTAINER_ROOT = "/host/social-work"
+
+CFG = None
+
+
+def get_config():
+    """延迟加载，--help 时不必依赖配置文件存在。"""
+    global CFG
+    if CFG is None:
+        CFG = load_config()
+    return CFG
+
 
 SEARCH_TYPES = [
     "CHUNKS", "CHUNKS_LEXICAL", "SUMMARIES", "GRAPH_COMPLETION",
@@ -33,18 +44,18 @@ SEARCH_TYPES = [
 
 
 def load_key():
+    key_file = get_config().key_file
     try:
-        with open(KEY_FILE) as f:
-            key = f.read().strip()
+        key = key_file.read_text(encoding="utf-8").strip()
     except FileNotFoundError:
-        sys.exit(f"缺少 {KEY_FILE}，请先在服务端创建 API key")
+        sys.exit(f"缺少 {key_file}，请先在服务端创建 API key")
     if not key:
-        sys.exit(f"{KEY_FILE} 为空")
+        sys.exit(f"{key_file} 为空")
     return key
 
 
 def run(args, key, timeout=900):
-    cmd = ["docker", "exec", "-e", f"COGNEE_API_KEY={key}", CONTAINER,
+    cmd = ["docker", "exec", "-e", f"COGNEE_API_KEY={key}", get_config().container,
            CLI, "--api-url", API_URL] + args
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     if proc.returncode != 0:
@@ -54,12 +65,16 @@ def run(args, key, timeout=900):
 
 
 def to_container(path):
-    """相对路径按 /srv/social-work 解析，再映射成容器内路径。"""
+    """相对路径按服务端 root 解析，再映射成容器内路径。"""
+    cfg = get_config()
+    host_root = cfg.root
     if not path.startswith("/"):
-        path = HOST_ROOT + "/" + path.lstrip("./")
-    if path.startswith(HOST_ROOT):
-        return CONTAINER_ROOT + path[len(HOST_ROOT):]
-    return path
+        path = str(host_root / path.lstrip("./"))
+    try:
+        rel = Path(path).relative_to(host_root)
+    except ValueError:
+        return path
+    return str(Path(cfg.container_root) / rel)
 
 
 def extract_results(data, out):
@@ -205,7 +220,7 @@ def cmd_sync(args, key):
 
     added = 0
     for m in mds:
-        r = subprocess.run(["docker", "exec", "-e", f"COGNEE_API_KEY={key}", CONTAINER,
+        r = subprocess.run(["docker", "exec", "-e", f"COGNEE_API_KEY={key}", get_config().container,
                             CLI, "--api-url", API_URL, "add", to_container(str(m)),
                             "--dataset-name", args.dataset],
                            capture_output=True, text=True)
@@ -215,7 +230,7 @@ def cmd_sync(args, key):
             added += 1
     print(f"入库 {added}/{len(mds)}")
 
-    r = subprocess.run(["docker", "exec", "-e", f"COGNEE_API_KEY={key}", CONTAINER,
+    r = subprocess.run(["docker", "exec", "-e", f"COGNEE_API_KEY={key}", get_config().container,
                         CLI, "--api-url", API_URL, "cognify", "--datasets", args.dataset],
                        capture_output=True, text=True)
     print((r.stdout or r.stderr).strip()[:300])
@@ -223,6 +238,7 @@ def cmd_sync(args, key):
 
 def main():
     p = argparse.ArgumentParser(description="Cognee 客户端（包装 cognee-cli）")
+    p.add_argument("--config", metavar="PATH", help="配置文件路径（默认 config/config.yaml）")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     s = sub.add_parser("search", help="检索知识库")
@@ -253,6 +269,11 @@ def main():
     st.set_defaults(func=cmd_status)
 
     args = p.parse_args()
+    global CFG
+    try:
+        CFG = load_config(args.config)
+    except FileNotFoundError as exc:
+        sys.exit(f"! {exc}")
     args.func(args, load_key())
 
 

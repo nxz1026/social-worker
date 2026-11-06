@@ -1,0 +1,19 @@
+# 服务端路径与容器名（配置收口）
+#
+# 查找顺序：SOCIAL_WORK_CONFIG → <repo>/config/config.yaml → /srv/social-work/config/config.yaml
+# SOCIAL_WORK_ROOT 覆盖 root。换机器时只改这里，不要改脚本。
+
+root: /srv/social-work          # 服务端根目录，可用环境变量 SOCIAL_WORK_ROOT 覆盖
+container: social-work-cognee   # cognee 容器名
+container_root: /host/social-work
+key_file: .cognee-key            # 相对 root
+audit_retention_days: 90
+datasets:
+  shared: shared-policies
+  huadu: huadu
+  huimin: huimin
+llm:
+  provider: openai
+  model: <模型名>
+  endpoint: ""
+  api_key_env: LLM_API_KEY

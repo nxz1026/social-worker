@@ -9,14 +9,20 @@
 """
 from __future__ import annotations
 
+import os
 import py_compile
 import re
+import sys
+from contextlib import contextmanager
 from pathlib import Path
 
 import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
-SCRIPTS = ["convert-md.py", "scan-inbox.py", "cognee.py"]
+SCRIPTS = ["config.py", "convert-md.py", "scan-inbox.py", "cognee.py"]
+
+sys.path.insert(0, str(ROOT / "scripts"))
+import config as sw_config  # noqa: E402
 
 # 飞书 folder token 形态：27-28 位 base62
 FEISHU_TOKEN = re.compile(r"\b[A-Za-z0-9]{27,28}\b")
@@ -25,6 +31,31 @@ SECRET = re.compile(
     r"\b(ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]{10,})\b"
 )
 SKIP_DIRS = {".git", "__pycache__", ".pytest_cache", "tests"}
+
+# 脚本里不该再出现写死的服务端根目录 / 容器名赋值（文档字符串里的说明文字不算）
+HARDCODED = re.compile(
+    r"(?m)^\s*(ROOT|HOST_ROOT|KEY_FILE|CONTAINER|COGNEE_CONTAINER)\s*=\s*[^\n]*"
+    r"[\"'](?:/srv/social-work|social-work-cognee)[\"']"
+)
+
+
+@contextmanager
+def _env(**overrides):
+    """临时设置/清除环境变量。"""
+    saved = {key: os.environ.get(key) for key in overrides}
+    try:
+        for key, value in overrides.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+        yield
+    finally:
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
 
 def test_scripts_compile():
@@ -71,6 +102,56 @@ def test_gitignore_covers_runtime_data():
         assert entry in gi, f".gitignore 缺少 {entry}"
 
 
+def test_config_yaml_complete():
+    """config/config.yaml 存在且字段齐全。"""
+    path = ROOT / "config" / "config.yaml"
+    assert path.is_file(), "config/config.yaml 必须存在"
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert isinstance(data, dict), "config/config.yaml 必须是映射"
+    for key in ("root", "container", "container_root", "key_file",
+                "audit_retention_days", "datasets", "llm"):
+        assert key in data, f"config/config.yaml 缺少 {key}"
+    assert isinstance(data["root"], str)
+    assert isinstance(data["container"], str)
+    assert isinstance(data["container_root"], str)
+    assert isinstance(data["key_file"], str)
+    assert isinstance(data["audit_retention_days"], int)
+    assert isinstance(data["datasets"], dict)
+    assert isinstance(data["llm"], dict)
+
+
+def test_config_defaults():
+    """默认值与改造前完全一致，现有定时任务不受影响。"""
+    with _env(SOCIAL_WORK_ROOT=None, SOCIAL_WORK_CONFIG=None):
+        cfg = sw_config.load_config()
+    assert cfg.root == Path("/srv/social-work")
+    assert cfg.container == "social-work-cognee"
+    assert cfg.container_root == "/host/social-work"
+    assert cfg.key_file == Path("/srv/social-work/.cognee-key")
+    assert cfg.audit_retention_days == 90
+    assert cfg.datasets["shared"] == "shared-policies"
+    assert cfg.datasets["huadu"] == "huadu"
+    assert cfg.datasets["huimin"] == "huimin"
+
+
+def test_config_root_env_override():
+    """SOCIAL_WORK_ROOT 覆盖 root，key_file 跟着 root 走。"""
+    with _env(SOCIAL_WORK_ROOT="/tmp/x", SOCIAL_WORK_CONFIG=None):
+        cfg = sw_config.load_config()
+    assert cfg.root == Path("/tmp/x")
+    assert cfg.key_file == Path("/tmp/x/.cognee-key")
+
+
+def test_scripts_use_config():
+    """三个脚本不再写死根目录/容器名，统一走 load_config()。"""
+    for name in SCRIPTS:
+        if name == "config.py":
+            continue
+        text = (ROOT / "scripts" / name).read_text(encoding="utf-8")
+        assert not HARDCODED.search(text), f"{name} 仍在硬编码服务端路径/容器名"
+        assert "load_config(" in text, f"{name} 未使用 load_config()"
+
+
 if __name__ == "__main__":
     for fn in (
         test_scripts_compile,
@@ -78,6 +159,10 @@ if __name__ == "__main__":
         test_skill_has_frontmatter,
         test_no_real_secrets_tracked,
         test_gitignore_covers_runtime_data,
+        test_config_yaml_complete,
+        test_config_defaults,
+        test_config_root_env_override,
+        test_scripts_use_config,
     ):
         fn()
         print(f"ok  {fn.__name__}")

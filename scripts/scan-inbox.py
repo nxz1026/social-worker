@@ -18,6 +18,9 @@
   python3 scan-inbox.py --dry-run       # 只报计划
   python3 scan-inbox.py --no-cognify    # 不重建图谱
   python3 scan-inbox.py --verbose       # 打印分类理由
+  python3 scan-inbox.py --config <path> # 指定配置文件（默认 config/config.yaml）
+
+路径与容器名来自 config/config.yaml（见 scripts/config.py）。
 """
 
 import argparse
@@ -36,12 +39,14 @@ from pathlib import Path
 
 import yaml
 
-ROOT = Path("/srv/social-work")
+from config import load_config
+
+SCRIPT_DIR = Path(__file__).resolve().parent
 
 
 def _load_convert_md():
     """convert-md.py 带连字符，不能直接 import，用 importlib 加载。"""
-    spec = importlib.util.spec_from_file_location("convert_md", ROOT / "scripts" / "convert-md.py")
+    spec = importlib.util.spec_from_file_location("convert_md", SCRIPT_DIR / "convert-md.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -57,12 +62,32 @@ convert_docling = _cm.convert_docling
 normalize_images = _cm.normalize_images
 insert_links = _cm.insert_links
 
-CONFIG_PATH = ROOT / "feishu-flow.yaml"
-MANIFEST_PATH = ROOT / "state" / "manifest.yaml"
-INBOX = ROOT / "inbox"
-PENDING = ROOT / "sources" / "_待确认"
-COGNEE_PY = Path("/home/ubuntu/.dsh/skills/social-work/scripts/cognee.py")
+CFG = None
+ROOT = None
+CONFIG_PATH = None
+MANIFEST_PATH = None
+INBOX = None
+PENDING = None
+COGNEE_CONTAINER = None
+COGNEE_PY = SCRIPT_DIR / "cognee.py"
 TZ = timezone(timedelta(hours=8))
+
+
+def _apply_config(path: str | None = None) -> None:
+    """加载配置并刷新模块级路径（--config 覆盖时再次调用）。"""
+    global CFG, ROOT, CONFIG_PATH, MANIFEST_PATH, INBOX, PENDING, COGNEE_CONTAINER
+    CFG = load_config(path)
+    ROOT = CFG.root
+    CONFIG_PATH = ROOT / "feishu-flow.yaml"
+    MANIFEST_PATH = ROOT / "state" / "manifest.yaml"
+    INBOX = ROOT / "inbox"
+    PENDING = ROOT / "sources" / "_待确认"
+    COGNEE_CONTAINER = CFG.container
+    # 转换器模块的 root/container 也同步（scan-inbox 直接调用它的转换函数）
+    _cm.apply_config(CFG)
+
+
+_apply_config()
 
 CLASSIFY_PROMPT = """你是社工知识库的分类助手。根据文件名和内容摘要，判断这份文件属于哪个项目、哪个类别。
 
@@ -96,8 +121,6 @@ result, _ = engine(sys.argv[1])
 for item in (result or []):
     print(item[1])
 """
-
-COGNEE_CONTAINER = "social-work-cognee"
 
 
 def log(msg: str) -> None:
@@ -416,7 +439,15 @@ def main() -> int:
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--no-cognify", action="store_true")
     ap.add_argument("--verbose", action="store_true")
+    ap.add_argument("--config", metavar="PATH", help="配置文件路径（默认 config/config.yaml）")
     args = ap.parse_args()
+
+    if args.config:
+        try:
+            _apply_config(args.config)
+        except FileNotFoundError as exc:
+            log(f"  ! {exc}")
+            return 1
 
     cfg = load_yaml(CONFIG_PATH, {})
     if not cfg:

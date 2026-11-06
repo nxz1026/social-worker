@@ -19,6 +19,9 @@
   python3 convert-md.py --no-links         # 不插链接
   python3 convert-md.py --no-media         # 不复制独立图片/音视频
   python3 convert-md.py --prune            # 删掉源文件已不存在的 md
+  python3 convert-md.py --config <path>    # 指定配置文件（默认 config/config.yaml）
+
+路径与容器名来自 config/config.yaml（见 scripts/config.py）。
 """
 
 import argparse
@@ -35,13 +38,34 @@ from pathlib import Path
 
 import yaml
 
-ROOT = Path("/srv/social-work")
-PROJECTS = {
-    "huadu": {"vault": ROOT / "vault-huadu", "sources": ROOT / "sources/projects/huadu"},
-    "huimin": {"vault": ROOT / "vault-huimin", "sources": ROOT / "sources/projects/huimin"},
-}
-# 共享资料不属于任何项目，单独一个目录（不进 vault，只给 Cognee 索引）
-SHARED = {"vault": ROOT / "md-shared", "sources": ROOT / "sources/_shared"}
+from config import load_config
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+
+CFG = None
+ROOT = None
+PROJECTS: dict = {}
+SHARED: dict = {}
+CONTAINER_ROOT: Path | None = None
+COGNEE_CONTAINER: str | None = None
+
+
+def apply_config(cfg) -> None:
+    """把配置对象落到模块级路径（scan-inbox 复用本模块时也会调用）。"""
+    global CFG, ROOT, PROJECTS, SHARED, CONTAINER_ROOT, COGNEE_CONTAINER
+    CFG = cfg
+    ROOT = cfg.root
+    CONTAINER_ROOT = Path(cfg.container_root)
+    COGNEE_CONTAINER = cfg.container
+    PROJECTS = {
+        "huadu": {"vault": ROOT / "vault-huadu", "sources": ROOT / "sources/projects/huadu"},
+        "huimin": {"vault": ROOT / "vault-huimin", "sources": ROOT / "sources/projects/huimin"},
+    }
+    # 共享资料不属于任何项目，单独一个目录（不进 vault，只给 Cognee 索引）
+    SHARED = {"vault": ROOT / "md-shared", "sources": ROOT / "sources/_shared"}
+
+
+apply_config(load_config())
 
 # 需要转换的文档格式 → 转换器
 CONVERTIBLE = {
@@ -61,7 +85,6 @@ MEDIA = {
 # 图片子集：入库时额外做 OCR
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tif", ".tiff"}
 
-COGNEE_CONTAINER = "social-work-cognee"
 DOCLING = "/app/.venv/bin/python"
 
 DOCLING_SCRIPT = r"""
@@ -197,10 +220,20 @@ def convert_pandoc(src: Path, outdir: Path, outname: str) -> str:
     return (outdir / outname).read_text(encoding="utf-8")
 
 
+def to_container(path: Path) -> Path:
+    """宿主机路径 → 容器内路径（root 映射到 container_root）。"""
+    p = Path(path)
+    try:
+        rel = p.relative_to(ROOT)
+    except ValueError:
+        raise RuntimeError(f"{p} 不在服务端根目录 {ROOT} 下，无法映射到容器内路径")
+    return CONTAINER_ROOT / rel
+
+
 def convert_docling(src: Path, outdir: Path, outname: str) -> str:
     """在 Cognee 容器里跑 docling，产物经 docker cp 取回。"""
-    # 容器里 /srv/social-work 挂在 /host/social-work
-    container_src = Path("/host") / src.relative_to("/srv")
+    # 宿主机 root 在容器里挂在 container_root（默认 /srv/social-work → /host/social-work）
+    container_src = to_container(src)
     tmp = f"/tmp/conv-{uuid.uuid4().hex[:12]}"
     run = subprocess.run(
         ["docker", "exec", "-i", COGNEE_CONTAINER, DOCLING, "-",
@@ -327,7 +360,15 @@ def main() -> int:
     ap.add_argument("--no-links", action="store_true")
     ap.add_argument("--no-media", action="store_true")
     ap.add_argument("--prune", action="store_true")
+    ap.add_argument("--config", metavar="PATH", help="配置文件路径（默认 config/config.yaml）")
     args = ap.parse_args()
+
+    if args.config:
+        try:
+            apply_config(load_config(args.config))
+        except FileNotFoundError as exc:
+            print(f"  ! {exc}")
+            return 1
 
     if args.project == "all":
         items = [(k, v) for k, v in PROJECTS.items()] + [("shared", SHARED)]

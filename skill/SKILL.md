@@ -7,6 +7,8 @@ description: 社工工作助手：检索 Cognee 知识库（政策文件、项�
 
 ## 知识库（Cognee）
 
+> 下文命令中的 `ROOT` = 服务端根目录，默认 `/srv/social-work`，由 `config/config.yaml` 的 `root` 决定（环境变量 `SOCIAL_WORK_ROOT` 可覆盖）。
+
 服务端 `http://127.0.0.1:8000`（容器 `social-work-cognee`）。客户端 `scripts/cognee.py` 包装官方 `cognee-cli`，自动带 API key。
 
 **只索引 md。** 原始 Office/图片留在 `sources/` 存档，不进库。
@@ -36,8 +38,8 @@ description: 社工工作助手：检索 Cognee 知识库（政策文件、项�
 ### 转换（原始文件 → md）
 
 ```bash
-python3 /srv/social-work/scripts/convert-md.py --project all              # 增量
-python3 /srv/social-work/scripts/convert-md.py --project huimin --force   # 强制重转
+python3 "$ROOT/scripts/convert-md.py" --project all              # 增量
+python3 "$ROOT/scripts/convert-md.py" --project huimin --force   # 强制重转
 ```
 
 - docx → pandoc；xlsx/pptx/pdf/csv → docling（容器内）；图片/音视频直接复制到 `vault-<proj>/media/`
@@ -50,8 +52,8 @@ python3 /srv/social-work/scripts/convert-md.py --project huimin --force   # 强�
 用户往飞书「社工知识库 / 未分类」丢文件，服务器每 15 分钟自动：分类 → 转 md → 归档原件 → 建索引。
 
 ```bash
-python3 /srv/social-work/scripts/scan-inbox.py             # 手动跑一次
-python3 /srv/social-work/scripts/scan-inbox.py --dry-run   # 只报计划
+python3 "$ROOT/scripts/scan-inbox.py"             # 手动跑一次
+python3 "$ROOT/scripts/scan-inbox.py" --dry-run   # 只报计划
 ```
 
 - 分类结果落 `sources/projects/<项目>/<类别>/` + `vault-<项目>/md/<类别>/`
