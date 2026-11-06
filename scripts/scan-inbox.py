@@ -41,6 +41,11 @@ import yaml
 
 from config import load_config
 
+# M4：错误队列 / 通知 / 重试（同目录模块）
+import error_queue as _eq  # noqa: E402
+import notify as _notify  # noqa: E402
+import retry as _retry  # noqa: E402
+
 SCRIPT_DIR = Path(__file__).resolve().parent
 
 
@@ -205,13 +210,53 @@ def lark(args: list[str], timeout: int = 1800) -> dict:
 
 
 def pull_inbox(inbox_token: str) -> list[dict]:
-    data = lark(["drive", "+pull", "--local-dir", "inbox", "--folder-token", inbox_token])
+    data = _retry.retry(
+        lambda: lark(["drive", "+pull", "--local-dir", "inbox", "--folder-token", inbox_token]),
+        label="拉取未分类", log=lambda m: print(m, flush=True))
     return (data.get("data") or {}).get("items") or []
 
 
 def move_to_archive(file_token: str, dest_folder: str) -> None:
-    lark(["drive", "+move", "--file-token", file_token, "--type", "file",
-          "--folder-token", dest_folder])
+    _retry.retry(
+        lambda: lark(["drive", "+move", "--file-token", file_token, "--type", "file",
+                      "--folder-token", dest_folder]),
+        label="移入已分类", log=lambda m: print(m, flush=True))
+
+
+def _enqueue(rel, message, sink, root=None, log=None, **extra) -> None:
+    """写错误队列；是**新的**错误才加进 `sink`（用于事后一次性告警）。
+
+    队列挂掉不该拖垮归档 —— 只告警。
+    """
+    try:
+        entry, is_new = _eq.add(root or ROOT, file=rel, error=message, extra=extra, log=log)
+        if is_new:
+            sink.append(entry)
+    except Exception as exc:  # noqa: BLE001
+        if log:
+            log(f"  ! 错误队列入队失败：{exc}")
+
+
+def _alert_errors(entries, root=None, log=None) -> None:
+    """有新的未处理错误 → **立刻**发飞书，不等用户来查。
+
+    通知失败不影响主流程（`_notify.send` 本身不抛异常，这里再兜一层）。
+    """
+    if not entries:
+        return
+    lines = [f"⚠️ 社工知识库：{len(entries)} 个文件处理失败，需要你看一下", ""]
+    for e in entries[:10]:
+        lines.append(f"· {e.get('file')} — {e.get('error')}")
+    if len(entries) > 10:
+        lines.append(f"… 另有 {len(entries) - 10} 条")
+    lines += ["", "明细：python3 scripts/fallback.py --list"]
+    try:
+        ok = _notify.send("\n".join(lines), root or ROOT)
+        if log:
+            log("  ✓ 已发飞书告警" if ok else "  ! 飞书告警发送失败")
+    except Exception as exc:  # noqa: BLE001
+        if log:
+            log(f"  ! 飞书告警异常：{exc}")
 
 
 # ---------- 内容提取 ----------
@@ -542,6 +587,12 @@ def main() -> int:
 
     processed = skipped = 0
     touched: set[str] = set()
+    new_errors: list = []  # M4：本次新产生的错误，收尾时一次性告警
+    # M4：已经报错过的文件不再重复处理（否则坏文件每 15 分钟重试一次，永久刷日志）
+    try:
+        open_error_files = {e.get("file") for e in _eq.list_open(ROOT)}
+    except Exception:
+        open_error_files = set()
 
     for it in items:
         token = it.get("file_token", "")
@@ -556,6 +607,11 @@ def main() -> int:
         prev = manifest["files"].get(token)
         if prev and prev.get("sha256") == digest and prev.get("status") in {"done", "pending_review"}:
             log(f"  = 跳过（已处理）{rel}")
+            skipped += 1
+            continue
+
+        if rel in open_error_files:
+            log(f"  = 跳过（已有未处理错误）{rel} —— 处理后用 fallback.py --list 查看")
             skipped += 1
             continue
 
@@ -589,9 +645,11 @@ def main() -> int:
                     conv = extract(src, tmpdir)
                 except Exception as exc:
                     log(f"  ! 转换失败：{exc}")
+                    brief = _eq.brief_error(exc)
                     record_audit(converter=None, project=None, category=None,
                                  confidence=None, status="error",
-                                 error=f"转换失败：{exc}")
+                                 error=f"转换失败：{brief}")
+                    _enqueue(rel, f"转换失败：{brief}", new_errors, log=log)
                     continue
             if conv["converter"] in {"pandoc", "docling"}:
                 log(f"     converter={conv['converter']}  文本 {len(conv['text'])} 字")
@@ -606,8 +664,19 @@ def main() -> int:
             if decision["confidence"] < min_conf and decision["project"]:
                 log(f"  ! 置信度 {decision['confidence']:.2f} < {min_conf}，转待确认")
                 decision["project"] = ""
-            status = archive_one(src, token, digest, decision, cfg, manifest, conv,
-                                 args.dry_run, llm, action=action)
+            try:
+                status = archive_one(src, token, digest, decision, cfg, manifest, conv,
+                                     args.dry_run, llm, action=action)
+            except Exception as exc:  # noqa: BLE001 - 单文件失败不拖垮整轮
+                log(f"  ! 归档失败：{exc}")
+                brief = _eq.brief_error(exc)
+                record_audit(converter=conv.get("converter"),
+                             project=decision.get("project", ""),
+                             category=decision.get("category", ""),
+                             confidence=decision.get("confidence"),
+                             status="error", error=f"归档失败：{brief}")
+                _enqueue(rel, f"归档失败：{brief}", new_errors, log=log)
+                continue
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -630,6 +699,10 @@ def main() -> int:
 
     log(f"\n完成：处理 {processed}，跳过 {skipped}")
 
+    # M4：有**新**错误就立刻告警，不等用户来查（通知失败不影响返回码）
+    if new_errors:
+        _alert_errors(new_errors, log=log)
+
     if args.no_cognify or args.dry_run or not touched:
         return 0
 
@@ -640,9 +713,16 @@ def main() -> int:
         md_root = ROOT / pcfg["vault"]
         if not md_root.is_dir():
             continue
-        r = subprocess.run([sys.executable, str(COGNEE_PY), "sync", str(md_root),
-                            "--dataset", pcfg["dataset"]],
-                           capture_output=True, text=True)
+        try:
+            r = _retry.retry(
+                lambda p=pcfg, m=md_root: subprocess.run(
+                    [sys.executable, str(COGNEE_PY), "sync", str(m), "--dataset", p["dataset"]],
+                    capture_output=True, text=True),
+                label=f"Cognee 同步 {pcfg['dataset']}", log=log)
+        except Exception as exc:  # noqa: BLE001
+            log(f"  ! Cognee 同步失败：{exc}")
+            _enqueue(f"dataset:{pcfg['dataset']}", f"Cognee 同步失败：{exc}", [], log=log)
+            continue
         out = (r.stdout or r.stderr).strip()
         log(f"  {pcfg['dataset']}: {out[:300]}")
     return 0

@@ -26,6 +26,9 @@ social-worker/
 │   ├── audit_log.py               # 审计日志写入口：state/audit/YYYY-MM-DD.jsonl
 │   ├── audit.py                   # M3 审计摘要：读审计日志出人读汇总，--send 发飞书
 │   ├── notify.py                  # M3/M4 飞书通知统一出口（失败只返回 False）
+│   ├── retry.py                   # M4 重试封装：暂时性故障指数退避，不可重试的立刻抛
+│   ├── error_queue.py             # M4 错误队列：state/errors/open.yaml + 每日 jsonl
+│   ├── fallback.py                # M4 待兜底清单：汇总待处理项成 md，供 LLM 处理
 │   ├── convert-md.py              # 原始文件 → vault 里的 md
 │   ├── scan-inbox.py              # 飞书未分类 → 分类 → 转 md → 归档 → 入库（定时跑）
 │   └── cognee.py                  # 包装 cognee-cli：search / add / cognify / sync

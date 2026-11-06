@@ -62,6 +62,7 @@ python3 "$ROOT/scripts/scan-inbox.py" --dry-run   # 只报计划
 - 台账 `state/manifest.yaml`（file_token + sha256），重复扫描不重复入库
 - 置信度 < 0.7 落 `_待确认/`，需人工归位后重跑
 - 审计：每次运行写 `state/audit/YYYY-MM-DD.jsonl`；`python3 "$ROOT/scripts/audit.py" --date <日期>` 看人读摘要；每天 22:00 自动发飞书汇总
+- 失败处理：转换/归档失败会写 `state/errors/open.yaml` 并**立刻发飞书告警**；`python3 "$ROOT/scripts/fallback.py" --list` 看待处理项，`--date` 生成清单
 - 定时任务状态：`systemctl --user status social-work-scan.timer social-work-audit.timer`
 
 ### 飞书机器人（dsh-im）

@@ -244,6 +244,40 @@ SKILL.md 只保留一句：「检索用 `cognee.py search`；默认 `CHUNKS`，�
 `src.stat()` 抛 `FileNotFoundError` 而丢记录（异常被吞掉只剩一行「审计写入失败」）。
 改为在循环开头取好 `size`。
 
+### A11. 错误处理与 LLM 兜底（M4）—— 不静默失败
+
+> ✅ **已修（M4，2026-11-06）**：新增 `scripts/retry.py` / `scripts/error_queue.py` /
+> `scripts/fallback.py`。测试见 `tests/test_retry.py`、`tests/test_error_queue.py`、
+> `tests/test_fallback.py`。
+
+**现状（改前）**：转换失败只在 stdout 打一行 `! 转换失败`，然后 `continue`。
+没有落盘、没有告警、没有重试。用户只会看到「文件一直没出现」，无从查起。
+而飞书 API 超时、Cognee 502 这类**暂时性**故障，一次失败就被当成永久失败。
+
+**实现（M4 实际落地）**：
+
+- **重试**（`retry.py`）：异常消息里出现 `timed out` / `502` / `503` / `504` /
+  `connection` / `reset` / `refused` / `rate limit` → 指数退避重试 3 次（2s / 4s）。
+  **格式不支持、文件损坏、权限不足**不在列 —— 立刻抛，不浪费重试。
+  包住了 `pull_inbox` / `move_to_archive` / `cognee sync` 三处。
+- **错误队列**（`error_queue.py`）：`state/errors/open.yaml`（未处理）+
+  `state/errors/YYYY-MM-DD.jsonl`（全量流水）。同一 `(file, error)` 只入队一次。
+- **主动告警**：本轮出现**新**错误就立刻发飞书（`_alert_errors`），不等用户来查。
+  重复运行不会重复告警。
+- **坏文件不无限重试**：已有未处理错误的文件下一轮直接跳过 —— 否则一个坏文件
+  每 15 分钟重试一次，永久刷日志。
+- **兜底清单**（`fallback.py`）：把当天 `status ∈ {pending_review, error, unsupported,
+  failed}` 的审计记录 + 未处理错误汇总成一份 md，写死处理规则（只能判断/改名/写说明，
+  不能决定隐私、不能直接往 `sources/` 写原件），LLM 处理完用 `--log` 写回
+  `state/fallback_log.jsonl`。
+
+**验收（已跑）**：真放一个损坏 PDF 进飞书「未分类」→ 全流程走通
+「报错 → 审计 → 入队 → **飞书告警**」；第二次跑 → `= 跳过（已有未处理错误）`；
+`fallback.py --list` / `--date` 正确列出待兜底项并给出真实文件位置。
+
+**顺带修的观感问题**：docling 的异常消息带着整段 traceback（几十行），
+直接进错误队列和飞书会把人淹没 → `error_queue.brief_error()` 只取第一行（真正原因所在）。
+
 ## 3. B 类：应保留 LLM 判断 + skill 约束
 
 | 环节 | 为什么不能代码化 |
@@ -309,5 +343,5 @@ social-worker/
 | 5 | repo 化 + 测试 + `.gitignore` | 结构性收口 |
 | 6 | CHANGELOG 自动记（A5）、`_待确认` 自动归位（A7） | 锦上添花 |
 
-**实际落地（2026-11-06）**：M8 配置收口 → M6 `sync` 去重 → M2 分类规则层 → M1 图片闸门 → M3 审计摘要 + 22:00 飞书汇总。
-剩余：M4 错误处理/告警/兜底 → M5 `archive.py` → M7 检索参数下沉 → M9 测试补全 + skill 整体压缩。
+**实际落地（2026-11-06）**：M8 配置收口 → M6 `sync` 去重 → M2 分类规则层 → M1 图片闸门 → M3 审计摘要 + 22:00 飞书汇总 → M4 错误处理/告警/兜底。
+剩余：M5 `archive.py` → M7 检索参数下沉 → M9 测试补全 + skill 整体压缩。
