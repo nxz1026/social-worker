@@ -7,6 +7,8 @@
 - 文件名是人工起的标签，权重高（默认 10）
 - 正文预览是原始内容，提及多、噪声高，权重低（默认 1）
 - 必须唯一最高分才算命中；并列最高 → 判不了
+- 例外：正文「自报家门」的词（发票/红头文件等，见 config 的 strong）
+  直接定类别 —— 文件名常写活动名不写单据类型，正文说的更准
 
 配置在 config/ 下三个 yaml，改关键词不用改代码。
 """
@@ -31,9 +33,10 @@ def load_rules(config_dir) -> dict:
 
     fallback = proj_raw.pop("fallback", None) or {}
     projects = {k: v for k, v in proj_raw.items() if isinstance(v, list)}
+    strong = categories.pop("strong", None) or {}
     w = dict(DEFAULTS)
     w.update(weights)
-    return {"projects": projects, "categories": categories,
+    return {"projects": projects, "categories": categories, "strong": strong,
             "fallback": fallback, "weights": w}
 
 
@@ -76,10 +79,12 @@ def classify_rule(name, preview, rules: dict, projects=None, categories=None,
 
     proj_kw = rules.get("projects") or {}
     cat_kw = rules.get("categories") or {}
+    strong_kw = rules.get("strong") or {}
     if projects:
         proj_kw = {k: v for k, v in proj_kw.items() if k in projects}
     if categories:
         cat_kw = {k: v for k, v in cat_kw.items() if k in categories}
+        strong_kw = {k: v for k, v in strong_kw.items() if k in categories}
 
     wf = (rules.get("weights") or {}).get("filename", DEFAULTS["filename"])
     wp = (rules.get("weights") or {}).get("preview", DEFAULTS["preview"])
@@ -90,7 +95,10 @@ def classify_rule(name, preview, rules: dict, projects=None, categories=None,
 
     c_scores = {k: _hits(name, kw) * wf + _hits(preview, kw) * wp
                 for k, kw in cat_kw.items()}
-    category = _best(c_scores)
+    # 正文「自报家门」：文档自己说明了自己是什么（发票/红头文件），
+    # 比文件名可信 —— 文件名常写活动名，不写单据类型。
+    s_scores = {k: _hits(preview, kw) for k, kw in strong_kw.items()}
+    category = _best(s_scores) or _best(c_scores)
 
     # 兜底：没判出项目，但类别命中 fallback 规则 → 用 fallback 指定的项目
     if project is None and category is not None:
@@ -104,4 +112,6 @@ def classify_rule(name, preview, rules: dict, projects=None, categories=None,
     if category is None and require_category:
         return None
     return {"project": project, "category": category, "confidence": 1.0,
-            "reason": "rule", "scores": {"project": p_scores, "category": c_scores}}
+            "reason": "rule",
+            "scores": {"project": p_scores, "category": c_scores,
+                       "strong": s_scores}}

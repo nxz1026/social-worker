@@ -30,10 +30,11 @@ def _rule(name, preview=""):
 
 
 def test_load_rules():
-    for key in ("projects", "categories", "fallback", "weights"):
+    for key in ("projects", "categories", "strong", "fallback", "weights"):
         assert key in RULES, key
     assert RULES["projects"]["huadu"], "huadu 关键词不能为空"
     assert RULES["categories"]["项目执行"], "项目执行关键词不能为空"
+    assert RULES["strong"]["发票票据"], "strong 发票票据关键词不能为空"
 
 
 def test_filename_only():
@@ -73,6 +74,29 @@ def test_other_never_fires():
     assert _rule("2026-11-05-其他事项说明.docx") is None
 
 
+def test_strong_keyword_in_preview_wins():
+    """正文自报「发票」→ 发票票据，不管文件名写的是活动。
+
+    真实案例：花都第三期活动礼品_...80.00.pdf 是一张电子发票，
+    但文件名里只有「活动」（项目执行关键词），旧规则会判成项目执行。
+    """
+    r = _rule("花都第三期活动礼品_成都市益嘉仁社会工作服务中心80.00.pdf",
+              "电子发票（普通发票） 发票号码：26512000004964697871 "
+              "开票日期：2026年11月06日 价税合计（大写） 捌拾圆整 ¥80.00")
+    assert r and r["project"] == "huadu" and r["category"] == "发票票据", r
+
+
+def test_strong_does_not_fire_on_activity_words():
+    """「方案」「活动」「会议」不是自报词，不能推翻文件名里的「推文」。"""
+    r = _rule("2026-11-05-公众号推文-惠民.docx", "活动 方案 会议 培训 总结")
+    assert r and r["category"] == "项目执行", r
+
+
+def test_strong_tie_returns_none():
+    """两个类别的自报词同分 → 判不了，交 LLM。"""
+    assert _rule("2026-11-05-票据.docx", "发票 红头文件") is None
+
+
 # ---------- 真实回放（验收数据） ----------
 
 REPLAY = [
@@ -80,6 +104,9 @@ REPLAY = [
     ("花都社区世纪光华小区特殊人群关爱入户名单.xlsx", "huadu", "日常工作佐证"),
     ("2026-11-03-公众号推文-B版-温暖生活.docx", "huimin", "项目执行"),
     ("2026-11-05-公众号推文-惠民.docx", "huimin", "项目执行"),
+    ("花都第三期活动礼品_成都市益嘉仁社会工作服务中心80.00.pdf", "huadu", "发票票据"),
+    ("花都_2026_11_05_微议事_第三期活动_织围巾成都市益嘉仁社会工作服务中心_20261106110243.pdf",
+     "huadu", "发票票据"),
 ]
 
 
@@ -151,6 +178,9 @@ if __name__ == "__main__":
         test_tie_returns_none,
         test_policy_without_project_goes_to_review,
         test_other_never_fires,
+        test_strong_keyword_in_preview_wins,
+        test_strong_does_not_fire_on_activity_words,
+        test_strong_tie_returns_none,
         test_replay,
     ):
         fn()

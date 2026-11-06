@@ -20,3 +20,10 @@ RUN /usr/local/bin/pip --python /app/.venv/bin/python install --no-cache-dir \
  && /usr/local/bin/pip --python /app/.venv/bin/python uninstall -y opencv-python \
  && /usr/local/bin/pip --python /app/.venv/bin/python install --no-cache-dir \
         opencv-python-headless
+
+# 预热 docling 模型权重（~500 MB）：构建时跑一次真实转换，把布局/表格模型拉进镜像。
+# 不预热的话模型落在容器可写层，docker compose up -d --force-recreate 一重建就丢，
+# 下次转换得重新联网下载（构建时 HOME=/app，缓存落在 /app/.cache/huggingface）。
+RUN /app/.venv/bin/python -c "from PIL import Image; Image.new('RGB', (900, 1200), 'white').save('/tmp/warmup.pdf')" \
+ && /app/.venv/bin/python -c "from docling.document_converter import DocumentConverter; DocumentConverter().convert('/tmp/warmup.pdf')" \
+ && rm -f /tmp/warmup.pdf
