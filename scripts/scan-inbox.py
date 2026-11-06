@@ -559,9 +559,25 @@ def main() -> int:
             skipped += 1
             continue
 
-        log(f"\n--- {rel} ({src.stat().st_size} B) ---")
+        size = src.stat().st_size
+        log(f"\n--- {rel} ({size} B) ---")
         tmpdir = Path(tempfile.mkdtemp(prefix="scan-"))
         started = datetime.now(TZ)
+        action = None
+
+        def record_audit(**kw) -> None:
+            """写一条审计记录。失败只告警 —— 审计挂掉不该拖垮归档。"""
+            base = {
+                "file": rel, "sha256": digest, "size": size,
+                "action": action or "normal", "md_path": None, "data_id": None,
+                "duration_ms": int((datetime.now(TZ) - started).total_seconds() * 1000),
+            }
+            base.update(kw)
+            try:
+                _al.append(ROOT, base)
+            except Exception as exc:
+                log(f"  ! 审计写入失败：{exc}")
+
         try:
             action = _ip.decide_action(rel, src.suffix.lower(), image_policy, IMAGE_EXTS)
             if action == "archive_only":
@@ -573,6 +589,9 @@ def main() -> int:
                     conv = extract(src, tmpdir)
                 except Exception as exc:
                     log(f"  ! 转换失败：{exc}")
+                    record_audit(converter=None, project=None, category=None,
+                                 confidence=None, status="error",
+                                 error=f"转换失败：{exc}")
                     continue
             if conv["converter"] in {"pandoc", "docling"}:
                 log(f"     converter={conv['converter']}  文本 {len(conv['text'])} 字")
@@ -601,24 +620,13 @@ def main() -> int:
                 # 飞书侧已归档，清掉本地副本，下次扫描才干净
                 src.unlink()
         save_yaml(MANIFEST_PATH, manifest)
-        # 审计日志：每个处理过的文件一条（M1 起）
-        try:
-            _al.append(ROOT, {
-                "file": rel,
-                "sha256": digest,
-                "size": src.stat().st_size,
-                "converter": conv.get("converter"),
-                "project": decision.get("project", ""),
-                "category": decision.get("category", ""),
-                "confidence": decision.get("confidence"),
-                "action": action or "normal",
-                "md_path": manifest["files"].get(token, {}).get("md"),
-                "data_id": None,
-                "duration_ms": int((datetime.now(TZ) - started).total_seconds() * 1000),
-                "status": status,
-            })
-        except Exception as exc:
-            log(f"  ! 审计写入失败：{exc}")
+        # 审计日志：每个处理过的文件一条
+        record_audit(converter=conv.get("converter"),
+                     project=decision.get("project", ""),
+                     category=decision.get("category", ""),
+                     confidence=decision.get("confidence"),
+                     md_path=manifest["files"].get(token, {}).get("md"),
+                     status=status)
 
     log(f"\n完成：处理 {processed}，跳过 {skipped}")
 

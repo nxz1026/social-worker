@@ -213,6 +213,37 @@ SKILL.md 只保留一句：「检索用 `cognee.py search`；默认 `CHUNKS`，�
 反而增加人工负担；而分类 LLM 调用（约 1-2k token）远小于 OCR 推理。
 **判不了项目的图片仍会落 `_待确认/`**，不会瞎猜。
 
+### A10. 每日审计与通知（M3）—— 从「静默失败」到「看得见」
+
+> ✅ **已修（M3，2026-11-06）**：新增 `scripts/audit.py` + `scripts/notify.py`，
+> 写入口是 M1 就位好的 `scripts/audit_log.py`。测试见 `tests/test_audit.py`。
+
+**现状（改前）**：`scan-inbox.py` 全程只 `log()` 打到 stdout，没有任何持久记录。
+定时任务跑完就没了 —— 文件处理失败、落 `_待确认`、转换报错，用户完全不知道，
+只能等「怎么还没出现」才发现。更糟的是 `extract()` 抛异常时直接 `continue`，
+**连日志都没有**。
+
+**实现（M3 实际落地）**：
+
+- **审计日志**：每处理一个文件写一条 `state/audit/YYYY-MM-DD.jsonl`，字段
+  `ts / file / sha256 / size / converter / project / category / confidence /
+  action / md_path / data_id / duration_ms / status`。
+  **转换失败也会记一条** `status=error`，不再静默。
+- **人读摘要**：`audit.py --date <日期>` 输出「收到 N 个文件 / 文档 N（成功 N，转换器分布）/
+  图片 N（只存档/OCR/识图）/ 项目分布 / 类别分布 / 失败清单 / 待兜底清单」。
+  项目名显示中文标签（读 `feishu-flow.yaml` 的 `projects.<key>.label`）。
+- **每天 22:00 自动发飞书**：`social-work-audit.timer`
+  （`OnCalendar=*-*-* 22:00:00 Asia/Shanghai`，systemd 自己换算成 UTC —— 系统时区是 `Etc/UTC`）。
+- **通知统一出口** `notify.py`：`send()` 失败只返回 `False`，**不抛异常** ——
+  通知挂掉不该拖垮归档主流程。收件人取 `config/notify.yaml`，缺失时回落到
+  `~/.dsh/integrations/dsh-feishu/config.json` 的 `ownerOpenIds`。
+
+**保留期**：`audit_log.prune()` 默认 90 天（`config/config.yaml` 的 `audit_retention_days`）。
+
+**顺带修的 bug**：审计写在 `src.unlink()` **之后**，成功归档的文件会因
+`src.stat()` 抛 `FileNotFoundError` 而丢记录（异常被吞掉只剩一行「审计写入失败」）。
+改为在循环开头取好 `size`。
+
 ## 3. B 类：应保留 LLM 判断 + skill 约束
 
 | 环节 | 为什么不能代码化 |
@@ -278,5 +309,5 @@ social-worker/
 | 5 | repo 化 + 测试 + `.gitignore` | 结构性收口 |
 | 6 | CHANGELOG 自动记（A5）、`_待确认` 自动归位（A7） | 锦上添花 |
 
-**实际落地（2026-11-06）**：M8 配置收口 → M6 `sync` 去重 → M2 分类规则层 → M1 图片闸门。
-剩余：M3 审计摘要 + M4 错误处理/告警/兜底 → M5 `archive.py` → M7 检索参数下沉 → M9 测试补全。
+**实际落地（2026-11-06）**：M8 配置收口 → M6 `sync` 去重 → M2 分类规则层 → M1 图片闸门 → M3 审计摘要 + 22:00 飞书汇总。
+剩余：M4 错误处理/告警/兜底 → M5 `archive.py` → M7 检索参数下沉 → M9 测试补全 + skill 整体压缩。

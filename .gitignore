@@ -21,6 +21,9 @@ _synctest/
 config/feishu-flow.yaml
 *.local.yaml
 
+# 通知收件人含个人 open_id，只提交 .example
+config/notify.yaml
+
 # ---------- Python ----------
 __pycache__/
 *.py[cod]

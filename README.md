@@ -17,12 +17,15 @@ social-worker/
 │   ├── project_aliases.yaml       # M2 规则层：项目 → 关键词（改词不用改代码）
 │   ├── category_keywords.yaml     # M2 规则层：六类 → 关键词
 │   ├── rule_weights.yaml          # M2 规则层：文件名/正文预览权重
-│   └── image_policy.yaml          # M1 图片闸门：目录 → 动作（要OCR/要识图/只存档）
+│   ├── image_policy.yaml          # M1 图片闸门：目录 → 动作（要OCR/要识图/只存档）
+│   └── notify.yaml.example        # M3 通知收件人 open_id（填值后改名去掉 .example）
 ├── scripts/
 │   ├── config.py                  # 配置加载：config/config.yaml + 环境变量覆盖
 │   ├── classify_rules.py          # M2 分类规则层：判不了才走 LLM（纯函数，无路径依赖）
 │   ├── image_policy.py            # M1 图片闸门：按目录决定 ocr/vision/只存档（纯函数）
 │   ├── audit_log.py               # 审计日志写入口：state/audit/YYYY-MM-DD.jsonl
+│   ├── audit.py                   # M3 审计摘要：读审计日志出人读汇总，--send 发飞书
+│   ├── notify.py                  # M3/M4 飞书通知统一出口（失败只返回 False）
 │   ├── convert-md.py              # 原始文件 → vault 里的 md
 │   ├── scan-inbox.py              # 飞书未分类 → 分类 → 转 md → 归档 → 入库（定时跑）
 │   └── cognee.py                  # 包装 cognee-cli：search / add / cognify / sync

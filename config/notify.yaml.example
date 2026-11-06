@@ -1,0 +1,10 @@
+# 飞书通知收件人（open_id 列表）。
+#
+# 复制成同目录的 notify.yaml 后填真实值 —— notify.yaml 不入库（含个人 open_id）。
+# 文件缺失或没有有效 open_id 时，回落到
+# ~/.dsh/integrations/dsh-feishu/config.json 里 bots[].ownerOpenIds。
+#
+# 谁收得到：M3 每日 22:00 审计汇总；M4 失败即时告警。
+
+to:
+  - ou_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
