@@ -339,6 +339,47 @@ Cognee 能检索到；`--dry-run` 对 docx / 图片 / 定不了项目的文件�
 3. 哪些判断必须 LLM 做（写文书、政策理解、兜底判断）
 4. 边界（禁写「已分类」、图片只存档、脱敏、不编造、权限）
 
+### A15. 转换能力缺口：PDF 转不了、图片 OCR 是空的（2026-11-06 补）
+
+> ✅ **已修（2026-11-06）**：改 `Dockerfile` 重建镜像，PDF 转换与图片 OCR 都通了。
+
+**怎么发现的**：拿一份真实 PDF 走 `archive.py` 全链路测试（用户要求「只监督不参与」）。
+流水线本身表现正确——规则判定、错误入队、审计、飞书告警、`archive.py` 校验全部按设计走
+（M1/M2/M4 的验收点全部命中）——但**转换本身失败**，`docling` 报错。
+
+**两个既有缺口**（都不是这次改动引入的，是原镜像从就没装全）：
+
+| 缺口 | 表现 | 根因 |
+|---|---|---|
+| 缺 `torchvision` | `docling` 报 `ModuleNotFoundError: No module named 'torchvision'`，**连带文本层的 PDF 都转不了** | docling 的表格结构模型 v2 直接 `import torchvision.transforms`，而 `docling-slim[...]` 的 extra 里不含模型依赖 |
+| 缺 `rapidocr` | 图片 OCR **静默返回空字符串**，不报错 | 镜像装的是 `rapidocr-onnxruntime`（只提供 `rapidocr_onnxruntime` 模块），而 `OCR_SCRIPT` 和 docling 的 rapidocr 引擎都要 `import rapidocr`；`ocr_image()` 在失败时 `return ""` |
+
+**修法**（`Dockerfile`）：
+
+```dockerfile
+RUN pip install "rapidocr>=3.9.1,<4" "docling-ibm-models>=3.9.1,<5" \
+        "docling-slim[convert-core,format-office,format-pdf,format-markdown]>=2.115,<3" \
+ && pip install --no-deps --index-url https://download.pytorch.org/whl/cpu "torchvision==0.29.1" \
+ && pip uninstall -y opencv-python && pip install opencv-python-headless
+```
+
+**三个踩坑**（都已写进 Dockerfile 注释）：
+
+1. **torchvision 必须和 torch 同源**。镜像里 torch 是 `2.14.1+cpu`（CPU 构建，`uv` 装的），
+   装 PyPI 的 torchvision 0.29.2（CUDA 构建）会报 `RuntimeError: operator torchvision::nms does not exist`。
+   必须从 `download.pytorch.org/whl/cpu` 装 `0.29.1+cpu`。
+2. **`docling-ibm-models` 也得装**。表格模型 v1 在 `__init__` 里 import 它，
+   跟 `do_table_structure` 开不开无关，缺了 PDF 一进来就 `ModuleNotFoundError`。
+3. **`OCR_SCRIPT` 的 API 跟着 rapidocr 大版本变**。3.x 返回 `RapidOCROutput`（`.txts` 是文本元组），
+   旧版返回 `(result, elapse)`。已改成两种都认。
+
+**验证**：PDF 走 `archive.py` 全链路成功（规则判定 → 转换 → 入库 → 台账 → md → 检索命中）；
+`ocr_image()` 对真实照片返回 18 行文字。
+
+**遗留风险（未处理）**：docling 的模型权重（约 600 MB）是**运行时**从 HuggingFace 下载到
+容器可写层（`/app/.cache/huggingface`）的，`docker compose up -d --force-recreate` 会丢掉、
+下次转换重新下载。要彻底解决得把模型预热进镜像（会让镜像大 ~600 MB），这次没做。
+
 ## 3. B 类：应保留 LLM 判断 + skill 约束
 
 | 环节 | 为什么不能代码化 |
@@ -404,7 +445,7 @@ social-worker/
 | 5 | repo 化 + 测试 + `.gitignore` | 结构性收口 |
 | 6 | CHANGELOG 自动记（A5）、`_待确认` 自动归位（A7） | 锦上添花 |
 
-**实际落地（2026-11-06）**：M8 配置收口 → M6 `sync` 去重 → M2 分类规则层 → M1 图片闸门 → M3 审计摘要 + 22:00 飞书汇总 → M4 错误处理/告警/兜底 → M5 `archive.py` → M7 检索参数下沉 → M9 skill 压缩（131→44 行）。
+**实际落地（2026-11-06）**：M8 配置收口 → M6 `sync` 去重 → M2 分类规则层 → M1 图片闸门 → M3 审计摘要 + 22:00 飞书汇总 → M4 错误处理/告警/兜底 → M5 `archive.py` → M7 检索参数下沉 → M9 skill 压缩（131→44 行）→ A15 转换能力缺口（PDF / 图片 OCR）。
 
 **全部完成**。测试 103 项全过；代码、配置、文档、skill 均在 `github.com/nxz1026/social-worker`。
 遗留：无（2026-11-06 已清 `shared-policies` 数据集与空的 `md-shared/`，并停删坏掉的

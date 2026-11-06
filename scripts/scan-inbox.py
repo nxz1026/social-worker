@@ -148,10 +148,17 @@ CLASSIFY_PROMPT = """你是社工知识库的分类助手。根据文件名和�
 OCR_SCRIPT = r"""
 import sys
 from rapidocr import RapidOCR
+
 engine = RapidOCR()
-result, _ = engine(sys.argv[1])
-for item in (result or []):
-    print(item[1])
+out = engine(sys.argv[1])
+
+# rapidocr 3.x 返回 RapidOCROutput（.txts 是文本元组）；旧版返回 (result, elapse)
+txts = getattr(out, "txts", None)
+if txts is None:
+    txts = out[0] if isinstance(out, tuple) else []
+
+for txt in (txts or []):
+    print(txt)
 """
 
 
