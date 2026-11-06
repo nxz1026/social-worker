@@ -60,8 +60,26 @@ def _load_classify_rules():
     return module
 
 
+def _load_image_policy():
+    """加载同目录的 image_policy.py（M1 图片闸门）。"""
+    spec = importlib.util.spec_from_file_location("image_policy", SCRIPT_DIR / "image_policy.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _load_audit_log():
+    """加载同目录的 audit_log.py（审计日志写入口）。"""
+    spec = importlib.util.spec_from_file_location("audit_log", SCRIPT_DIR / "audit_log.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 _cm = _load_convert_md()
 _cr = _load_classify_rules()
+_ip = _load_image_policy()
+_al = _load_audit_log()
 CONVERTIBLE = _cm.CONVERTIBLE
 TEXTUAL = _cm.TEXTUAL
 MEDIA = _cm.MEDIA
@@ -348,13 +366,39 @@ def auto_image_name(src: Path, title: str) -> str:
     return stem + src.suffix.lower()
 
 
+def unique_dest(dest: Path, digest: str) -> Path:
+    """同名但内容不同时加序号，避免覆盖（只存档图片按日期命名，同一天多张会撞名）。"""
+    if not dest.exists():
+        return dest
+    try:
+        if sha256_of(dest) == digest:
+            return dest                      # 同一个文件，覆盖无害
+    except OSError:
+        pass
+    for i in range(2, 1000):
+        cand = dest.with_name(f"{dest.stem}-{i}{dest.suffix}")
+        if not cand.exists():
+            return cand
+        try:
+            if sha256_of(cand) == digest:
+                return cand
+        except OSError:
+            pass
+    return dest.with_name(f"{dest.stem}-{os.getpid()}{dest.suffix}")
+
+
 def archive_one(src: Path, token: str, digest: str, decision: dict, cfg: dict,
-                manifest: dict, conv: dict, dry_run: bool, llm: dict) -> str:
+                manifest: dict, conv: dict, dry_run: bool, llm: dict,
+                action: str | None = None) -> str:
     projects = cfg["projects"]
     project = decision["project"]
     category = decision["category"]
-    # 日常工作佐证图片：只归档，不进 md / Cognee，文件名自动命名
-    work_photo = bool(project) and category == WORK_PHOTO_CATEGORY and src.suffix.lower() in IMAGE_EXTS
+    # 只归档：日常工作佐证图片，或 M1 判定 archive_only 的图片。
+    # 两者都不进 md / Cognee，文件名自动命名。
+    work_photo = src.suffix.lower() in IMAGE_EXTS and (
+        action == "archive_only"
+        or (bool(project) and category == WORK_PHOTO_CATEGORY)
+    )
     name = auto_image_name(src, decision.get("title", "")) if work_photo else src.name
     url = cfg["feishu"]["url_template"].format(token=token)
     label = projects[project]["label"] if project else "待确认"
@@ -381,21 +425,27 @@ def archive_one(src: Path, token: str, digest: str, decision: dict, cfg: dict,
         return "dry-run"
 
     md_dir.mkdir(parents=True, exist_ok=True)
-    # 原件落位
+    # 原件落位（只存档图片按日期命名，同一天多张会撞名 → unique_dest 加序号）
     dest_dir = ROOT / original_dir
     dest_dir.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(src, dest_dir / name)
+    dest = unique_dest(dest_dir / name, digest) if work_photo else dest_dir / name
+    shutil.copy2(src, dest)
     # lark-cli 落地的文件是 600，Cognee 容器 uid=1000 读不到
-    os.chmod(dest_dir / name, 0o644)
+    os.chmod(dest, 0o644)
+    if dest.name != name:
+        name = dest.name
+        entry["name"] = name
 
     if work_photo:
-        # 只归档：vault-<项目>/media/日常工作佐证/<自动命名>，不生成 md
-        media_dir = vault / "media" / category
-        media_dir.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src, media_dir / name)
-        os.chmod(media_dir / name, 0o644)
-        entry["media"] = str((media_dir / name).relative_to(ROOT))
-        log(f"     → {entry['media']}")
+        # 只归档：有项目才往 vault media 放副本，不生成 md
+        if project:
+            media_dir = vault / "media" / category
+            media_dir.mkdir(parents=True, exist_ok=True)
+            media = unique_dest(media_dir / name, digest)
+            shutil.copy2(src, media)
+            os.chmod(media, 0o644)
+            entry["media"] = str(media.relative_to(ROOT))
+            log(f"     → {entry['media']}")
     # md 落位
     elif conv["converter"] == "media":
         media_dir = md_dir / "media"
@@ -467,14 +517,21 @@ def main() -> int:
     llm = load_llm()
 
     # M2 规则层：判得了就省一次 LLM 调用；判不了（没命中/并列）才走 LLM
+    # M1 图片策略：按目录决定图片是 OCR / 识图 / 只存档
     rules = None
-    try:
-        rules_dir = CFG.path.parent if getattr(CFG, "path", None) else (ROOT / "config")
-        if rules_dir.is_dir():
+    image_policy = None
+    rules_dir = CFG.path.parent if getattr(CFG, "path", None) else (ROOT / "config")
+    if rules_dir.is_dir():
+        try:
             rules = _cr.load_rules(rules_dir)
             log(f"· 规则层已加载：{rules_dir}")
-    except Exception as exc:
-        log(f"  ! 规则层加载失败，本次全部走 LLM：{exc}")
+        except Exception as exc:
+            log(f"  ! 规则层加载失败，本次全部走 LLM：{exc}")
+        try:
+            image_policy = _ip.load_policy(rules_dir)
+            log(f"· 图片策略：默认 {image_policy.get('default')}")
+        except Exception as exc:
+            log(f"  ! 图片策略加载失败，本次不拦图片：{exc}")
 
     log("=== 拉取飞书未分类 ===")
     items = pull_inbox(cfg["feishu"]["inbox"])
@@ -504,12 +561,19 @@ def main() -> int:
 
         log(f"\n--- {rel} ({src.stat().st_size} B) ---")
         tmpdir = Path(tempfile.mkdtemp(prefix="scan-"))
+        started = datetime.now(TZ)
         try:
-            try:
-                conv = extract(src, tmpdir)
-            except Exception as exc:
-                log(f"  ! 转换失败：{exc}")
-                continue
+            action = _ip.decide_action(rel, src.suffix.lower(), image_policy, IMAGE_EXTS)
+            if action == "archive_only":
+                # M1 闸门：不 OCR、不调视觉模型，直接只存档
+                conv = {"converter": "media", "text": "", "outdir": tmpdir / "out"}
+                log("     · 只存档（archive_only）：跳过 OCR / 视觉模型")
+            else:
+                try:
+                    conv = extract(src, tmpdir)
+                except Exception as exc:
+                    log(f"  ! 转换失败：{exc}")
+                    continue
             if conv["converter"] in {"pandoc", "docling"}:
                 log(f"     converter={conv['converter']}  文本 {len(conv['text'])} 字")
             # 先跑 M2 规则层；判不了才调 LLM
@@ -523,7 +587,8 @@ def main() -> int:
             if decision["confidence"] < min_conf and decision["project"]:
                 log(f"  ! 置信度 {decision['confidence']:.2f} < {min_conf}，转待确认")
                 decision["project"] = ""
-            status = archive_one(src, token, digest, decision, cfg, manifest, conv, args.dry_run, llm)
+            status = archive_one(src, token, digest, decision, cfg, manifest, conv,
+                                 args.dry_run, llm, action=action)
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -536,6 +601,24 @@ def main() -> int:
                 # 飞书侧已归档，清掉本地副本，下次扫描才干净
                 src.unlink()
         save_yaml(MANIFEST_PATH, manifest)
+        # 审计日志：每个处理过的文件一条（M1 起）
+        try:
+            _al.append(ROOT, {
+                "file": rel,
+                "sha256": digest,
+                "size": src.stat().st_size,
+                "converter": conv.get("converter"),
+                "project": decision.get("project", ""),
+                "category": decision.get("category", ""),
+                "confidence": decision.get("confidence"),
+                "action": action or "normal",
+                "md_path": manifest["files"].get(token, {}).get("md"),
+                "data_id": None,
+                "duration_ms": int((datetime.now(TZ) - started).total_seconds() * 1000),
+                "status": status,
+            })
+        except Exception as exc:
+            log(f"  ! 审计写入失败：{exc}")
 
     log(f"\n完成：处理 {processed}，跳过 {skipped}")
 

@@ -19,9 +19,10 @@ from pathlib import Path
 import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
-SCRIPTS = ["config.py", "convert-md.py", "scan-inbox.py", "cognee.py", "classify_rules.py"]
-# 纯函数模块，不碰路径/容器，不需要 load_config()
-PURE_MODULES = {"classify_rules.py"}
+SCRIPTS = ["config.py", "convert-md.py", "scan-inbox.py", "cognee.py", "classify_rules.py",
+          "image_policy.py", "audit_log.py"]
+# 纯函数模块 / 只接收外部传入 root 的模块，不自己解析路径，不需要 load_config()
+PURE_MODULES = {"classify_rules.py", "image_policy.py", "audit_log.py"}
 
 sys.path.insert(0, str(ROOT / "scripts"))
 import config as sw_config  # noqa: E402

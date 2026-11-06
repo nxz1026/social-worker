@@ -1,0 +1,22 @@
+# 图片处置策略（M1 闸门）：目录即授权
+#
+# 飞书「未分类」下的图片按所在目录决定怎么处理：
+#   要OCR/     → ocr：本地 OCR 后转 md 入库（可检索文字）
+#   要识图/    → vision：视觉模型识别（成本高，默认关闭）
+#   其他(含根) → archive_only：只存档，不 OCR、不调视觉模型、不生成 md
+#
+# 文档（非图片）不受本策略影响，照旧分类入库。
+#
+# 为什么默认只存档：
+#   OCR 对每张图片都会跑一次（docker exec + 模型推理），而日常工作佐证类
+#   图片本来就不进 md，OCR 结果直接丢弃 —— 纯浪费。要检索图片里的文字，
+#   把图片放进「要OCR/」再跑 scan-inbox.py。
+
+rules:
+  - dir: "要OCR"
+    action: ocr
+  - dir: "要识图"
+    action: vision
+    enabled: false      # 2026-11-06 用户拍板：目前只开 OCR
+
+default: archive_only

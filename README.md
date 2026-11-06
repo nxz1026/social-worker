@@ -16,10 +16,13 @@ social-worker/
 │   ├── entities.yaml              # 实体名册：转换时自动插 [[链接]]
 │   ├── project_aliases.yaml       # M2 规则层：项目 → 关键词（改词不用改代码）
 │   ├── category_keywords.yaml     # M2 规则层：六类 → 关键词
-│   └── rule_weights.yaml          # M2 规则层：文件名/正文预览权重
+│   ├── rule_weights.yaml          # M2 规则层：文件名/正文预览权重
+│   └── image_policy.yaml          # M1 图片闸门：目录 → 动作（要OCR/要识图/只存档）
 ├── scripts/
 │   ├── config.py                  # 配置加载：config/config.yaml + 环境变量覆盖
 │   ├── classify_rules.py          # M2 分类规则层：判不了才走 LLM（纯函数，无路径依赖）
+│   ├── image_policy.py            # M1 图片闸门：按目录决定 ocr/vision/只存档（纯函数）
+│   ├── audit_log.py               # 审计日志写入口：state/audit/YYYY-MM-DD.jsonl
 │   ├── convert-md.py              # 原始文件 → vault 里的 md
 │   ├── scan-inbox.py              # 飞书未分类 → 分类 → 转 md → 归档 → 入库（定时跑）
 │   └── cognee.py                  # 包装 cognee-cli：search / add / cognify / sync
@@ -46,6 +49,11 @@ social-worker/
 飞书「未分类」（手机/电脑随时传）
    │  定时（15 分钟）scan-inbox.py 拉取
    ▼
+图片闸门（M1，按所在目录）
+   ├─ 要OCR/   → 本地 OCR 后转 md（可检索文字）
+   ├─ 要识图/  → 视觉模型（默认关闭）
+   └─ 其他(含根) → 只存档：不 OCR、不调视觉模型、不生成 md
+   ▼
 分类（M2 规则层先判：文件名×10 + 正文×1，唯一最高分才用；判不了才走 LLM）
    │
    ├─ 原件 → sources/projects/<项目>/<类别>/
@@ -60,6 +68,9 @@ Obsidian（客户端）           →  人看、人改（Syncthing 双向）
 ```
 
 两个 vault 物理隔离：**项目的所有东西（原始文件 + 笔记 + 生成的文书）都在各自项目里**。
+
+> 图片默认只存档：OCR / 视觉模型都是成本，必须用户把图片放进「要OCR/」才跑。
+> 详见 `config/image_policy.yaml` 与 `docs/流程review.md` A9。
 
 ## 部署
 

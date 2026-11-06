@@ -57,6 +57,7 @@ python3 "$ROOT/scripts/scan-inbox.py" --dry-run   # 只报计划
 ```
 
 - 分类先走代码规则层（`config/project_aliases.yaml` + `config/category_keywords.yaml` + `rule_weights.yaml`），判不了才调 LLM；规则判错率 0，改关键词不用改代码
+- **图片按所在目录分流**（`config/image_policy.yaml`）：`要OCR/` → 本地 OCR 后转 md；`要识图/` → 视觉模型（默认关）；**根目录默认只存档**——不 OCR、不调视觉模型、不生成 md。要检索图片上的字，让用户把图片放进「未分类/要OCR/」
 - 分类结果落 `sources/projects/<项目>/<类别>/` + `vault-<项目>/md/<类别>/`
 - 台账 `state/manifest.yaml`（file_token + sha256），重复扫描不重复入库
 - 置信度 < 0.7 落 `_待确认/`，需人工归位后重跑
@@ -100,7 +101,7 @@ python3 "$ROOT/scripts/scan-inbox.py" --dry-run   # 只报计划
 3. 新增/更新资料：先 `convert-md.py` 转 md，再 `"$ROOT/scripts/cognee.py" sync <vault> --dataset <数据集>`（**幂等**，自动删旧版本/孤儿/重复条目，未变的跳过）。`add` + `cognify` 只适合单文件应急
 4. 文件权限 644、目录 755（容器 uid 1000 要能读）。**写盘后立刻 `chmod`**：`write` 工具默认产出 `-rw-------`，容器读不到
 5. md/txt 直接复制；docx 走 pandoc；xlsx/pptx/pdf 走 docling；图片只复制不转
-6. 图片入库会先过视觉模型（英文描述）再叠本地 OCR；含服务对象面部/证件的图片不要入库
+6. 图片默认**只存档**（原件进 `sources/`，副本进 vault `media/`），不进 Cognee；要检索图片文字，让用户把图片放进飞书「未分类/要OCR/」。含服务对象面部/证件的图片不要放进「要OCR/」「要识图/」
 7. 只要原文用 `CHUNKS`；`GRAPH_COMPLETION`/`TEMPORAL` 走 LLM 且默认多一次分析调用（`AUTO_FEEDBACK`），更慢更贵
 8. 写入 vault 的文件同样要 `chmod 644`，否则客户端 Syncthing 同步过去、Cognee 也读不到
 

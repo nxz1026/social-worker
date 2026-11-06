@@ -177,6 +177,42 @@ SKILL.md 只保留一句：「检索用 `cognee.py search`；默认 `CHUNKS`，�
 | 图片 EXIF 日期命名 | `scan-inbox.py:auto_image_name/exif_date` |
 | 只对产出 md 的文件触发 cognify | `scan-inbox.py:476-477` |
 
+### A9. 图片处置闸门（M1）—— 成本最高的浪费
+
+> ✅ **已修（M1，2026-11-06）**：新增 `scripts/image_policy.py` + `config/image_policy.yaml`，
+> `scan-inbox.py` 在 `extract()` **之前**按目录分流。测试见 `tests/test_image_policy.py`。
+
+**现状（改前）**：`scan-inbox.py:extract()` 对每个图片都调 `ocr_image()`——
+`docker exec` 进容器 + 跑一次 OCR 模型推理。而 `日常工作佐证` 类图片走 `work_photo` 分支
+**只归档不生成 md**，OCR 结果直接丢弃。
+
+更糟的是 `.env` 里的 `IMAGE_OCR_ENABLED` / `IMAGE_EXTRACTION_ENABLED`
+（`.env:41-42`）**在代码里没有任何引用**（`grep -rn` 两侧 scripts 都是 0 条）——
+是死配置，OCR 实际上一直开着。
+
+**实现（M1 实际落地）**：
+
+```
+飞书「未分类」/<目录>/<文件>
+  要OCR/   → ocr          ：本地 OCR 后转 md 入库（可检索文字）
+  要识图/  → vision       ：视觉模型（默认 enabled: false）
+  其他(含根) → archive_only ：只存档，不 OCR、不调视觉模型、不生成 md
+```
+
+- **目录即授权**：要花钱的处理必须用户显式放进对应目录，根目录默认零成本。
+- 非图片文件完全不受影响（`decide_action` 只对 `IMAGE_EXTS` 生效）。
+- 策略文件缺失/损坏 → 兜底 `archive_only`（成本最低的一侧）。
+- `archive_only` 图片仍走分类（规则优先、LLM 兜底）以决定落位，但**不产 md、不入 Cognee**。
+- 顺带修了一个隐患：只存档图片按「拍摄日期」命名，同一天多张会撞名互相覆盖 →
+  新增 `unique_dest()`，同名不同内容时加 `-2`/`-3` 序号。
+
+**验收（已跑）**：根目录 10 张图 → OCR 调用 **0 次**，审计日志 10 条 `action=archive_only`。
+
+⚠️ **与计划的偏差**：计划写「不调用任何模型」，实际保留了分类用的 LLM 兜底。
+理由：没有分类结果就不知道该落哪个项目，图片会全部堆进 `_待确认/`，
+反而增加人工负担；而分类 LLM 调用（约 1-2k token）远小于 OCR 推理。
+**判不了项目的图片仍会落 `_待确认/`**，不会瞎猜。
+
 ## 3. B 类：应保留 LLM 判断 + skill 约束
 
 | 环节 | 为什么不能代码化 |
@@ -241,3 +277,6 @@ social-worker/
 | 4 | `--type` / dataset 下沉（A4/A6） | 小改动，立刻省 token |
 | 5 | repo 化 + 测试 + `.gitignore` | 结构性收口 |
 | 6 | CHANGELOG 自动记（A5）、`_待确认` 自动归位（A7） | 锦上添花 |
+
+**实际落地（2026-11-06）**：M8 配置收口 → M6 `sync` 去重 → M2 分类规则层 → M1 图片闸门。
+剩余：M3 审计摘要 + M4 错误处理/告警/兜底 → M5 `archive.py` → M7 检索参数下沉 → M9 测试补全。
