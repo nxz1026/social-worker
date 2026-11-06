@@ -14,6 +14,7 @@
 配置：config/config.yaml，可用 --config 指定；SOCIAL_WORK_ROOT 覆盖 root。
 """
 import argparse
+import hashlib
 import json
 import subprocess
 import sys
@@ -187,11 +188,75 @@ def _collect_mds(root):
     return out
 
 
+def md5_of(path):
+    """文件内容 md5（Cognee 的 contentHash 就是这个）。"""
+    h = hashlib.md5()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _fetch_entries(ds_id, key):
+    entries = _api(f"/api/v1/datasets/{ds_id}/data", key)
+    if isinstance(entries, dict):
+        entries = entries.get("data") or entries.get("items") or []
+    return entries
+
+
+def _is_text_entry(entry):
+    """只有文本条目（md 转出来的）参与镜像；图片等非文本条目保留。"""
+    return entry.get("extension") in (None, "txt")
+
+
+def plan_sync(entries, jobs):
+    """纯函数：算出这次 sync 该删什么、该加什么。
+
+    entries = 数据集现有条目（dict 列表）
+    jobs    = [(Path, contentHash)]，本地 md 及其内容 hash
+
+    规则：
+      - 文本条目里，name 在本地有、但 hash 对不上 → 删（内容变了的旧版本）
+      - 文本条目里，name 本地没有 → 删（md 已删/已移走）
+      - 非文本条目（图片等）→ 一律不动
+      - 本地 md 的 (name, hash) 已存在 → 跳过，不重加
+    """
+    target = {}
+    for m, h in jobs:
+        target.setdefault(m.stem, set()).add(h)
+
+    to_delete = []
+    seen = set()
+    for e in entries:
+        if not _is_text_entry(e):
+            continue
+        name = e.get("name")
+        h = e.get("contentHash")
+        if name not in target or h not in target[name]:
+            to_delete.append(e)          # 内容变了的旧版本，或 md 已删/已移走
+            continue
+        if (name, h) in seen:
+            to_delete.append(e)          # 同名同内容的重复条目，只留一条
+            continue
+        seen.add((name, h))
+
+    drop_ids = {e.get("id") for e in to_delete}
+    remaining = {}
+    for e in entries:
+        if e.get("id") in drop_ids:
+            continue
+        remaining.setdefault(e.get("name"), set()).add(e.get("contentHash"))
+
+    to_add = [(m, h) for m, h in jobs if h not in remaining.get(m.stem, set())]
+    return to_delete, to_add
+
+
 def cmd_sync(args, key):
     """把 <md-root> 下的 md 全量镜像进数据集（幂等，可反复跑）。
 
     Cognee 的 add 对同一文件的不同版本会建出新条目而不是更新，
-    所以先按文件名删掉旧条目再重加；数据集里没有对应 md 的条目也一并删掉。
+    所以按 (name, contentHash) 比对：内容变了的旧条目删掉重加，
+    没变的跳过。数据集里的非文本条目（图片等）不动。
     """
     root = Path(args.md_root)
     if not root.is_dir():
@@ -207,19 +272,25 @@ def cmd_sync(args, key):
         sys.exit(f"数据集不存在：{args.dataset}")
     ds_id = ds["id"]
 
-    entries = _api(f"/api/v1/datasets/{ds_id}/data", key)
-    if isinstance(entries, dict):
-        entries = entries.get("data") or entries.get("items") or []
-    stems = {m.stem for m in mds}
-    removed = 0
-    for e in entries:
-        if e.get("name") not in stems:
+    jobs = [(m, md5_of(m)) for m in mds]
+
+    to_delete, _ = plan_sync(_fetch_entries(ds_id, key), jobs)
+    for e in to_delete:
+        if args.dry_run:
+            print(f"  [dry-run] 删除 {e.get('name')}（现有 hash {e.get('contentHash')}）")
+        else:
             _api(f"/api/v1/datasets/{ds_id}/data/{e['id']}", key, method="DELETE")
-            removed += 1
-    print(f"清理旧条目 {removed} 个")
+    print(f"清理旧条目 {len(to_delete)} 个")
+
+    # 删完重取，得到数据集的真实剩余
+    _, to_add = plan_sync(_fetch_entries(ds_id, key), jobs)
 
     added = 0
-    for m in mds:
+    for m, _ in to_add:
+        if args.dry_run:
+            print(f"  [dry-run] 入库 {m}")
+            added += 1
+            continue
         r = subprocess.run(["docker", "exec", "-e", f"COGNEE_API_KEY={key}", get_config().container,
                             CLI, "--api-url", API_URL, "add", to_container(str(m)),
                             "--dataset-name", args.dataset],
@@ -228,7 +299,11 @@ def cmd_sync(args, key):
             print(f"  ! add 失败 {m.name}: {(r.stderr or r.stdout).strip()[:160]}")
         else:
             added += 1
-    print(f"入库 {added}/{len(mds)}")
+    print(f"入库 {added}/{len(mds)}（跳过未变 {len(mds) - len(to_add)}）")
+
+    if args.dry_run:
+        print("(dry-run，未执行 cognify)")
+        return
 
     r = subprocess.run(["docker", "exec", "-e", f"COGNEE_API_KEY={key}", get_config().container,
                         CLI, "--api-url", API_URL, "cognify", "--datasets", args.dataset],
@@ -263,6 +338,7 @@ def main():
     sy = sub.add_parser("sync", help="把 md 目录全量重建进数据集（幂等）")
     sy.add_argument("md_root")
     sy.add_argument("--dataset", required=True)
+    sy.add_argument("--dry-run", action="store_true", help="只报计划，不删不加的")
     sy.set_defaults(func=cmd_sync)
 
     st = sub.add_parser("status", help="检查服务端健康")
