@@ -26,14 +26,37 @@ import image_policy as _ip
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic", ".bmp", ".tiff", ".tif"}
 
 
-def decide_project(name, rules, projects, explicit):
-    """定项目。给了就用；没给就规则判；判不了返回 (None, decision)。"""
+def cheap_preview(path, limit=2000):
+    """便宜地取一段正文，只用于定项目。
+
+    不跑完整转换（PDF 走 docling 要几十秒，转两遍太亏）：
+    docx → pandoc 纯文本，pdf → pdftotext（扫描件取不到就返回空）。
+    """
+    cmd = {".docx": ["pandoc", str(path), "-t", "plain"],
+           ".pdf": ["pdftotext", str(path), "-"]}.get(Path(path).suffix.lower())
+    if not cmd:
+        return ""
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        return (r.stdout or "")[:limit]
+    except Exception:
+        return ""
+
+
+def decide_project(name, path, rules, projects, explicit):
+    """定项目。给了就用；没给先按文件名判，判不了读正文再判；都不行返回 (None, decision)。"""
     if explicit:
         return explicit, None
     decision = _cr.classify_rule(name, "", rules, projects=projects,
                                  require_category=False)
     if decision and decision.get("project"):
         return decision["project"], decision
+    preview = cheap_preview(path)
+    if preview:
+        decision = _cr.classify_rule(name, preview, rules, projects=projects,
+                                     require_category=False)
+        if decision and decision.get("project"):
+            return decision["project"], decision
     return None, decision
 
 
@@ -88,7 +111,7 @@ def verify(root, name):
 def main(argv=None):
     ap = argparse.ArgumentParser(description="一条命令归档（M5）")
     ap.add_argument("--file", required=True, help="要归档的文件（任意路径）")
-    ap.add_argument("--project", help="项目（huadu/huimin/shared）；不给则按规则判")
+    ap.add_argument("--project", help="项目（huadu/huimin）；不给则先按文件名判，判不了读正文再判")
     ap.add_argument("--action", default="auto",
                     choices=["auto", "archive_only", "ocr", "vision"],
                     help="图片处置动作；auto=按 config/image_policy.yaml")
@@ -114,10 +137,10 @@ def main(argv=None):
     projects = sorted(rules["projects"]) if isinstance(rules.get("projects"), dict) else None
     categories = sorted(rules["categories"]) if isinstance(rules.get("categories"), dict) else None
 
-    project, decision = decide_project(src.name, rules, projects, args.project)
+    project, decision = decide_project(src.name, src, rules, projects, args.project)
     if not project:
-        print(f"✗ 定不了项目（文件名里没有项目线索，规则层也没命中）")
-        print(f"  请加 --project huadu|huimin|shared")
+        print(f"✗ 定不了项目（文件名和正文里都没有项目线索）")
+        print(f"  请加 --project huadu|huimin")
         return 3
     print(f"· 项目：{project}" + ("（规则判定）" if decision else "（指定）"))
 

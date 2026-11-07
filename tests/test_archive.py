@@ -29,25 +29,60 @@ def _rules():
 
 # ---------- 定项目 ----------
 
-def test_project_explicit_wins():
-    assert ar.decide_project("随便什么.txt", _rules(), None, "huadu")[0] == "huadu"
+def test_project_explicit_wins(tmp_path):
+    assert ar.decide_project("随便什么.txt", tmp_path / "a.txt",
+                             _rules(), None, "huadu")[0] == "huadu"
 
 
-def test_project_from_filename():
-    project, decision = ar.decide_project("2026-11-06-惠民-活动方案.docx", _rules(), None, None)
+def test_project_from_filename(tmp_path):
+    project, decision = ar.decide_project("2026-11-06-惠民-活动方案.docx",
+                                          tmp_path / "x.docx", _rules(), None, None)
     assert project == "huimin"
     assert decision["reason"] == "rule"
 
 
-def test_project_undecidable_returns_none():
-    assert ar.decide_project("无项目线索.txt", _rules(), None, None)[0] is None
+def test_project_undecidable_returns_none(tmp_path):
+    assert ar.decide_project("无项目线索.txt", tmp_path / "a.txt",
+                             _rules(), None, None)[0] is None
 
 
-def test_project_filtered_by_known_projects():
+def test_project_filtered_by_known_projects(tmp_path):
     """projects 白名单会过滤掉配置里的未知 key。"""
-    project, _ = ar.decide_project("2026-11-06-惠民-x.docx", _rules(),
-                                   ["huadu", "huimin"], None)
+    project, _ = ar.decide_project("2026-11-06-惠民-x.docx", tmp_path / "x.docx",
+                                   _rules(), ["huadu", "huimin"], None)
     assert project == "huimin"
+
+
+def test_project_from_content_when_filename_has_no_clue(tmp_path, monkeypatch):
+    """文件名没线索时读正文再判一次（爱邻议事会第三期简报就是这种）。"""
+    f = tmp_path / "爱邻议事会第三期简报.docx"
+    f.write_text("x", encoding="utf-8")
+    monkeypatch.setattr(ar, "cheap_preview",
+                        lambda p: "11月5日，花都社区联同益嘉仁社工开展活动")
+    project, decision = ar.decide_project("爱邻议事会第三期简报.docx", f,
+                                          _rules(), None, None)
+    assert project == "huadu"
+    assert decision["reason"] == "rule"
+
+
+# ---------- 便宜取正文 ----------
+
+
+def test_cheap_preview_unsupported_ext(tmp_path):
+    f = tmp_path / "a.xlsx"
+    f.write_text("x", encoding="utf-8")
+    assert ar.cheap_preview(f) == ""
+
+
+def test_cheap_preview_handles_failure(tmp_path, monkeypatch):
+    f = tmp_path / "a.pdf"
+    f.write_text("x", encoding="utf-8")
+
+    def _boom(*a, **k):
+        raise FileNotFoundError("pdftotext")
+
+    monkeypatch.setattr(ar.subprocess, "run", _boom)
+    assert ar.cheap_preview(f) == ""
 
 
 # ---------- 动作与落位 ----------

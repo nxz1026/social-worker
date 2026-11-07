@@ -287,7 +287,7 @@ SKILL.md 只保留一句：「检索用 `cognee.py search`；默认 `CHUNKS`，�
 ### A12. `archive.py` 一条命令归档（M5）—— 堵手工漏洞
 
 > ✅ **已修（M5，2026-11-06）**：新增 `scripts/archive.py`，并把 `inbox/` 改成
-> 统一的待处理队列。测试见 `tests/test_archive.py`（13 项）。
+> 统一的待处理队列。测试见 `tests/test_archive.py`（16 项）。
 
 **现状（改前）**：DSH 侧归档一个文件要手工分四步 —— 放飞书「未分类」、跑 `scan-inbox.py`、
 （有时）补 `cognee sync`、（有时）手工往飞书「已分类」放。2026-11-06 那次
@@ -298,7 +298,8 @@ SKILL.md 只保留一句：「检索用 `cognee.py search`；默认 `CHUNKS`，�
 
 - `archive.py --file <路径> [--project] [--action]`：定项目 → 放进 `inbox/` 对应位置
   （`要OCR/` `要识图/` 目录即授权）→ 跑 `scan-inbox.py` → 校验台账与 md 存在。
-  **定项目判不了就报错退出，不猜**。
+  **定项目判不了就报错退出，不猜**；文件名判不了时先读正文再判一次
+  （`cheap_preview()`：docx→pandoc、pdf→pdftotext，不跑完整转换）。
 - **`inbox/` 成为统一待处理队列**：`scan-inbox.py` 除了拉飞书「未分类」，还会扫
   `inbox/` 里所有未处理文件。手工放进去的用 `local-<sha256前16位>` 当台账 key。
 - 本地文件（`archive.py` 放进 `inbox/` 的）飞书侧没有对应条目，早期版本只落服务器、
@@ -310,7 +311,8 @@ SKILL.md 只保留一句：「检索用 `cognee.py search`；默认 `CHUNKS`，�
 **验收（已跑）**：把一个 docx 放进 `inbox/` → `archive.py` → md 生成、台账有记录、
 Cognee 能检索到；`--dry-run` 对 docx / 图片 / 定不了项目的文件分别给出正确预览；
 2026-11-07 实测：本地文件进 `inbox/` → 自动出现在飞书「已分类/惠民/项目执行」，
-md 顶部有链接；测试 **106 项**全过。
+md 顶部有链接；另一份**文件名无项目线索**的 docx（爱邻议事会第三期简报）
+**不带 `--project` 也判出了 huadu**；测试 **109 项**全过。
 
 ### A13. 检索参数下沉（M7）—— 省 token
 
