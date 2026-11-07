@@ -106,6 +106,17 @@ def test_render_lists_failures():
     assert "失败 1" in text and "bad.pdf" in text
 
 
+def test_render_uses_note_as_reason():
+    """M10：未分类图片的审计记录带 note，22:00 汇总要原样说出原因（别只说「置信度低」）。"""
+    text = audit.render(audit.summarize([
+        _rec(file="乱七八糟.jpg", status="pending_review", project="",
+             category="日常工作佐证", action="archive_only", converter="media",
+             note="文件名无日期/单位"),
+    ]), "2026-11-06")
+    assert "待兜底 1" in text
+    assert "乱七八糟.jpg — 文件名无日期/单位" in text
+
+
 # ---------- notify ----------
 
 def test_load_targets_from_config(tmp_path):

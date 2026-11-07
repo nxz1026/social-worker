@@ -84,3 +84,40 @@ def test_record_log_accepts_json_string(tmp_path):
     fb.record_log(tmp_path, '{"file":"z.pdf","note":"ok"}')
     rec = json.loads((tmp_path / "state" / "fallback_log.jsonl").read_text("utf-8").strip())
     assert rec["file"] == "z.pdf"
+
+
+# ---------- M10：未分类原件的落点与原因 ----------
+
+def test_locate_finds_pending_category_dir(tmp_path):
+    """未分类原件落 sources/_待确认/<类别>/（不是 sources/projects/_待确认/）。"""
+    p = tmp_path / "sources" / "_待确认" / "日常工作佐证"
+    p.mkdir(parents=True)
+    (p / "x.jpg").write_bytes(b"x")
+    assert fb._locate(tmp_path, "x.jpg") == str(p / "x.jpg")
+
+
+def test_locate_prefers_inbox_copy(tmp_path):
+    """archive_one 是复制不是移动，inbox 里那份还在 → 优先报 inbox（人就在那儿动手）。"""
+    (tmp_path / "inbox").mkdir()
+    (tmp_path / "inbox" / "x.jpg").write_bytes(b"x")
+    p = tmp_path / "sources" / "_待确认" / "其他"
+    p.mkdir(parents=True)
+    (p / "x.jpg").write_bytes(b"x")
+    assert fb._locate(tmp_path, "x.jpg") == str(tmp_path / "inbox" / "x.jpg")
+
+
+def test_locate_explains_when_missing(tmp_path):
+    assert "未归档" in fb._locate(tmp_path, "nope.jpg")
+
+
+def test_collect_uses_note_as_problem(tmp_path):
+    """M10：审计记录里的 note 要成为兜底清单的「问题」列。"""
+    d = tmp_path / "state" / "audit"
+    d.mkdir(parents=True)
+    (d / "2026-11-06.jsonl").write_text(json.dumps({
+        "ts": "2026-11-06T10:00:00+08:00", "file": "乱七八糟.jpg",
+        "status": "pending_review", "project": "", "category": "日常工作佐证",
+        "note": "文件名无日期/单位", "action": "archive_only", "converter": "media",
+    }, ensure_ascii=False) + "\n", "utf-8")
+    items = fb.collect(tmp_path, "2026-11-06")
+    assert items[0]["problem"] == "文件名无日期/单位"

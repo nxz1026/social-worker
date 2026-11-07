@@ -55,9 +55,13 @@ def _locate(root, file, md_path=None):
     """尽量给出文件的真实位置；找不到就说明它还没归档。"""
     if md_path:
         return md_path
-    for cand in (root / "inbox" / file,
-                 root / "sources" / "projects" / "_待确认" / file,
-                 root / "sources" / "projects" / "_待确认" / "其他" / file):
+    # 未分类原件落 sources/_待确认/<类别>/（见 scan-inbox.py），类别目录名不固定，
+    # 逐个类别目录找一遍
+    pending = root / "sources" / "_待确认"
+    cands = [root / "inbox" / file, pending / file]
+    if pending.is_dir():
+        cands += [d / file for d in sorted(pending.iterdir()) if d.is_dir()]
+    for cand in cands:
         if cand.is_file():
             return str(cand)
     return "未归档（原件可能还在飞书「未分类」或本地 inbox/）"
@@ -74,7 +78,7 @@ def collect(root, date=None):
         status = rec.get("status")
         if status not in PENDING_STATUS:
             continue
-        problem = rec.get("error") or {
+        problem = rec.get("error") or rec.get("note") or {
             "pending_review": "分类置信度低 / 项目判定不了",
             "unsupported": "格式不支持",
             "failed": "处理失败",

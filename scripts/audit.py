@@ -121,8 +121,9 @@ def render(s: dict, date: str) -> str:
     if s["pending_review"]:
         lines.append(f"待兜底 {len(s['pending_review'])}")
         for r in s["pending_review"]:
-            lines.append(f"  [{hhmm(r.get('ts',''))}] {r.get('file','')} — "
-                         f"项目无法判定，落 _待确认/{r.get('category','')}/")
+            # note：M10 起手写/图片资料「文件名无日期/单位」也落这里，原因写在 note
+            why = r.get("note") or f"项目无法判定，落 _待确认/{r.get('category','')}/"
+            lines.append(f"  [{hhmm(r.get('ts',''))}] {r.get('file','')} — {why}")
     if not s["failed"] and not s["pending_review"]:
         lines.append("无失败、无待兜底")
     return "\n".join(lines)

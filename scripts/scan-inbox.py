@@ -6,9 +6,12 @@
   2. 逐文件：转 md（临时目录）→ 读内容 → LLM 分类（项目 + 类别）
   3. 原件 → sources/projects/<项目>/<类别>/
      md   → vault-<项目>/md/<类别>/<文档名>/<文档名>.md（顶部插原件链接）
-     图片 → vault-<项目>/md/<类别>/<文档名>/media/<图名> + 同目录 md（内嵌 + OCR）
-           例外：日常工作佐证 类图片只归档不进 md/Cognee，
-           命名 <拍摄日期>-<关键词1>-<关键词2>.<ext>（见 auto_image_name）
+     图片 → 只存档（默认 archive_only）：命名 <日期>-<单位>-<内容关键词>.<ext>，
+            源文件落 sources/projects/<项目>/<类别>/、副本落 vault media/，
+            并产一份「档案条目」md（只有日期 + 单位 + 源文件路径，不含 OCR 正文）
+            喂 Cognee 建关系；文件名里既没有日期也没有单位 → 落 _待确认（未分类），
+            由每天 22:00 的审计汇总提醒人工处理（见 name_parse.py）
+            「要OCR/」目录的图片仍走 OCR：md 内嵌图 + OCR 正文
   4. 飞书 +move → 已分类/<项目>/<类别>/
   5. 写 state/manifest.yaml（幂等 + 变更检测）
   6. cognee add + cognify
@@ -81,10 +84,19 @@ def _load_audit_log():
     return module
 
 
+def _load_name_parse():
+    """加载同目录的 name_parse.py（M10 文件名解析层）。"""
+    spec = importlib.util.spec_from_file_location("name_parse", SCRIPT_DIR / "name_parse.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 _cm = _load_convert_md()
 _cr = _load_classify_rules()
 _ip = _load_image_policy()
 _al = _load_audit_log()
+_np = _load_name_parse()
 CONVERTIBLE = _cm.CONVERTIBLE
 TEXTUAL = _cm.TEXTUAL
 MEDIA = _cm.MEDIA
@@ -419,14 +431,17 @@ def file_date(src: Path) -> str:
     return datetime.fromtimestamp(src.stat().st_mtime, TZ).strftime("%Y-%m-%d")
 
 
-def auto_image_name(src: Path, title: str) -> str:
-    """日常工作佐证图片命名：<拍摄日期>-<关键词1>-<关键词2>.<ext>。
+def auto_image_name(src: Path, title: str = "", name_date: str = "",
+                    unit_label: str = "", content_hint: str = "") -> str:
+    """只存档图片命名：<日期>-<单位>-<内容关键词>.<ext>。
 
-    日期优先取 EXIF 拍摄时间（汇报按工作日找图），无 EXIF 用文件 mtime。
-    title 来自分类调用里 LLM 给的图片主题词。
+    日期优先用文件名里解析到的（M10：手写资料只信文件名），其次 EXIF 拍摄时间，
+    最后文件 mtime；单位取文件名命中的项目关键词；内容关键词取文件名去掉日期/
+    单位/噪声后的残留，残留为空才用分类调用给的 title（规则层路径没有 title）。
     """
-    date = exif_date(src) or file_date(src)
-    stem = "-".join(x for x in (date, (title or "").strip()) if x) or "日常工作"
+    date = (name_date or "").strip() or exif_date(src) or file_date(src)
+    content = (content_hint or title or "").strip()
+    stem = "-".join(x for x in (date, (unit_label or "").strip(), content) if x) or "日常工作"
     stem = re.sub(r'[\\/:*?"<>|\s]+', "-", stem).strip("-")
     return stem + src.suffix.lower()
 
@@ -452,19 +467,63 @@ def unique_dest(dest: Path, digest: str) -> Path:
     return dest.with_name(f"{dest.stem}-{os.getpid()}{dest.suffix}")
 
 
+def image_entry_md(src: Path, name: str, decision: dict, cfg: dict,
+                   name_info: dict, original: str, ocr_text: str = "") -> str:
+    """手写/图片资料的「档案条目」正文（不含顶部原件链接，由 header 提供）。
+
+    只写文件名元数据：日期 + 单位 + 源文件路径。这两样是喂给 Cognee 的实体，
+    检索「某天 / 某个社区的照片」能回到原件 —— 不依赖 OCR 是否识别得出内容。
+    """
+    projects = cfg["projects"]
+    project = decision.get("project") or ""
+    label = projects[project]["label"] if project else "待确认"
+    info = name_info or {}
+    lines = [
+        f"# 档案条目：{name}", "",
+        f"- 日期：{info.get('date') or '未知'}",
+        f"- 单位：{info.get('unit_label') or label}",
+        f"- 项目：{label}（{project or '未定'}）",
+        f"- 类别：{decision.get('category', '')}",
+        f"- 原文件名：{src.name}",
+        f"- 源文件：{original}",
+        "- 资料类型：图片 / 手写资料，未做 OCR",
+    ]
+    if info.get("content"):
+        lines.append(f"- 内容关键词：{info['content']}")
+    if decision.get("title"):
+        lines.append(f"- 主题：{decision['title']}")
+    lines += ["", "> 本条目由文件名元数据生成（日期 + 单位 + 源文件路径），不含 OCR 正文",
+              "> —— 手写资料识别不可靠，找原件请按上面的「源文件」路径。"]
+    if ocr_text.strip():
+        lines += ["", "## OCR（仅「要OCR/」目录开启时才有）", "", ocr_text.strip()]
+    lines.append("")
+    return "\n".join(lines)
+
+
 def archive_one(src: Path, token: str, digest: str, decision: dict, cfg: dict,
                 manifest: dict, conv: dict, dry_run: bool, llm: dict,
-                action: str | None = None) -> str:
+                action: str | None = None, name_info: dict | None = None) -> str:
     projects = cfg["projects"]
     project = decision["project"]
     category = decision["category"]
+    name_info = name_info or {}
     # 只归档：日常工作佐证图片，或 M1 判定 archive_only 的图片。
-    # 两者都不进 md / Cognee，文件名自动命名。
+    # 命名与建索引只吃**文件名**元数据（M10），不依赖 OCR。
     work_photo = src.suffix.lower() in IMAGE_EXTS and (
         action == "archive_only"
         or (bool(project) and category == WORK_PHOTO_CATEGORY)
     )
-    name = auto_image_name(src, decision.get("title", "")) if work_photo else src.name
+    if work_photo and name_info and not _np.usable(name_info):
+        # 未分类：文件名里既没日期也没单位，不编造日期（否则 mtime 会冒充资料日期），
+        # 保持原文件名，人工在 _待确认/ 里一眼能对上
+        name = src.name
+    elif work_photo:
+        name = auto_image_name(src, decision.get("title", ""),
+                               name_date=name_info.get("date", ""),
+                               unit_label=name_info.get("unit_label", ""),
+                               content_hint=name_info.get("content", ""))
+    else:
+        name = src.name
     label = projects[project]["label"] if project else "待确认"
     is_local = token.startswith("local-")   # 手工放进 inbox/ 的，飞书侧没有对应文件
     if is_local:
@@ -478,7 +537,8 @@ def archive_one(src: Path, token: str, digest: str, decision: dict, cfg: dict,
         vault = ROOT / projects[project]["vault"]
         md_dir = unique_dir(vault / "md" / category, src.stem, token)
     else:
-        original_dir = f"_待确认/{category}"
+        # 未分类：原件落 sources/_待确认/<类别>/（与 PENDING、fallback.py 保持一致）
+        original_dir = f"sources/_待确认/{category}"
         md_dir = unique_dir(PENDING / "_md" / category, src.stem, token)
 
     entry = manifest["files"].setdefault(token, {})
@@ -506,7 +566,7 @@ def archive_one(src: Path, token: str, digest: str, decision: dict, cfg: dict,
         entry["name"] = name
 
     if work_photo:
-        # 只归档：有项目才往 vault media 放副本，不生成 md
+        # 只归档：有项目才往 vault media 放副本
         if project:
             media_dir = vault / "media" / category
             media_dir.mkdir(parents=True, exist_ok=True)
@@ -515,6 +575,13 @@ def archive_one(src: Path, token: str, digest: str, decision: dict, cfg: dict,
             os.chmod(media, 0o644)
             entry["media"] = str(media.relative_to(ROOT))
             log(f"     → {entry['media']}")
+            # M10：手写/图片资料按文件名元数据建「档案条目」，喂 Cognee 建日期+单位关系
+            body = image_entry_md(src, name, decision, cfg, name_info,
+                                  entry["original"], ocr_text=conv.get("text", ""))
+            md_file = md_dir / (src.stem + ".md")
+            md_file.write_text(header + body, encoding="utf-8")
+            entry["md"] = str(md_file.relative_to(ROOT))
+            log(f"     → {entry['md']}（文件名元数据条目）")
     # md 落位
     elif conv["converter"] == "media":
         media_dir = md_dir / "media"
@@ -543,6 +610,13 @@ def archive_one(src: Path, token: str, digest: str, decision: dict, cfg: dict,
     if not work_photo:
         entry["md"] = str(md_dir.relative_to(ROOT) / (src.stem + ".md"))
 
+    # 未分类图片不产 md：md_dir 是上面刚建的空壳，收掉，别在档案里留空目录
+    if not entry.get("md"):
+        try:
+            md_dir.rmdir()
+        except OSError:
+            pass
+
     # 飞书归档：飞书来源 +move（原文件搬过去）；本地来源 +upload（飞书侧没有对应条目）
     if project:
         dest_folder = cfg["category_folders"][projects[project]["label"]][category]
@@ -569,7 +643,10 @@ def archive_one(src: Path, token: str, digest: str, decision: dict, cfg: dict,
             log(f"  ! {name} 归档失败：{exc}")
     else:
         entry["status"] = "pending_review"
-        log(f"  ! {name} 置信度不足，落 _待确认/{category}/")
+        if decision.get("pending_reason"):
+            entry["note"] = decision["pending_reason"]
+        why = decision.get("pending_reason") or "置信度不足"
+        log(f"  ! {name} {why}，落 _待确认/{category}/")
     return entry["status"]
 
 
@@ -595,6 +672,7 @@ def main() -> int:
         log(f"缺少配置 {CONFIG_PATH}")
         return 1
     projects, categories = cfg["projects"], cfg["categories"]
+    project_labels = {k: v.get("label", k) for k, v in projects.items()}
     min_conf = float(cfg.get("min_confidence", 0.7))
     llm = load_llm()
 
@@ -673,6 +751,7 @@ def main() -> int:
         tmpdir = Path(tempfile.mkdtemp(prefix="scan-"))
         started = datetime.now(TZ)
         action = None
+        name_info = None   # M10：图片的文件名解析结果（日期 + 单位）
 
         def record_audit(**kw) -> None:
             """写一条审计记录。失败只告警 —— 审计挂掉不该拖垮归档。"""
@@ -704,12 +783,24 @@ def main() -> int:
                                  error=f"转换失败：{brief}")
                     _enqueue(rel, f"转换失败：{brief}", new_errors, log=log)
                     continue
+            # M10：只存档的图片先从**文件名**取日期与单位 —— 手写资料 OCR 不可靠，
+            # 归档与建索引都不依赖识别正文。取不到就落未分类（见下）。
+            if src.suffix.lower() in IMAGE_EXTS and action == "archive_only":
+                name_info = _np.parse(src.name, (rules or {}).get("projects") or {},
+                                      project_labels)
+                log(f"     · 文件名解析：{_np.describe(name_info)}")
             if conv["converter"] in {"pandoc", "docling"}:
                 log(f"     converter={conv['converter']}  文本 {len(conv['text'])} 字")
             # 先跑 M2 规则层；判不了才调 LLM
+            # 只存档图片：文件名是唯一可靠信息源（archive_only 不取正文，LLM 也无正文可看），
+            # 规则层只要求判出**项目**；类别没命中就给默认「日常工作佐证」，不再为此调 LLM。
+            is_photo = src.suffix.lower() in IMAGE_EXTS and action == "archive_only"
             decision = None
             if rules is not None:
-                decision = _cr.classify_rule(rel, conv["text"], rules, projects, categories)
+                decision = _cr.classify_rule(rel, conv["text"], rules, projects, categories,
+                                             require_category=not is_photo)
+                if decision and is_photo and not decision.get("category"):
+                    decision["category"] = WORK_PHOTO_CATEGORY
                 if decision:
                     log(f"  · 规则判定 {decision['project']} / {decision['category']}")
             if not decision:
@@ -717,9 +808,16 @@ def main() -> int:
             if decision["confidence"] < min_conf and decision["project"]:
                 log(f"  ! 置信度 {decision['confidence']:.2f} < {min_conf}，转待确认")
                 decision["project"] = ""
+            if name_info is not None and not _np.usable(name_info):
+                # 连文件名都读不出日期也读不出单位 → 未分类，
+                # 交给每天 22:00 的审计汇总提醒人工处理（不再猜）
+                log("  ! 文件名里既没有日期也没有单位，落未分类（_待确认）")
+                decision["project"] = ""
+                decision["category"] = decision.get("category") or "其他"
+                decision["pending_reason"] = "文件名无日期/单位"
             try:
                 status = archive_one(src, token, digest, decision, cfg, manifest, conv,
-                                     args.dry_run, llm, action=action)
+                                     args.dry_run, llm, action=action, name_info=name_info)
             except Exception as exc:  # noqa: BLE001 - 单文件失败不拖垮整轮
                 log(f"  ! 归档失败：{exc}")
                 brief = _eq.brief_error(exc)
@@ -735,7 +833,8 @@ def main() -> int:
 
         if status != "dry-run":
             processed += 1
-            # 日常工作佐证图片不产 md，不触发 Cognee 重建
+            # 有 md 才要重建图谱。M10 起只存档图片也产「档案条目」md（日期+单位），
+            # 所以图片同样会触发 Cognee 同步。
             if decision["project"] and manifest["files"][token].get("md"):
                 touched.add(projects[decision["project"]]["dataset"])
             if status == "done":
@@ -748,6 +847,7 @@ def main() -> int:
                      category=decision.get("category", ""),
                      confidence=decision.get("confidence"),
                      md_path=manifest["files"].get(token, {}).get("md"),
+                     note=decision.get("pending_reason"),
                      status=status)
 
     log(f"\n完成：处理 {processed}，跳过 {skipped}")

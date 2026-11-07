@@ -24,6 +24,7 @@ social-worker/
 │   ├── config.py                  # 配置加载：config/config.yaml + 环境变量覆盖
 │   ├── classify_rules.py          # M2 分类规则层：判不了才走 LLM（纯函数，无路径依赖）
 │   ├── image_policy.py            # M1 图片闸门：按目录决定 ocr/vision/只存档（纯函数）
+│   ├── name_parse.py              # M10 文件名解析：取日期/单位/内容关键词（纯函数，零依赖）
 │   ├── audit_log.py               # 审计日志写入口：state/audit/YYYY-MM-DD.jsonl
 │   ├── audit.py                   # M3 审计摘要：读审计日志出人读汇总，--send 发飞书
 │   ├── notify.py                  # M3/M4 飞书通知统一出口（失败只返回 False）
@@ -53,6 +54,8 @@ social-worker/
     ├── test_sync.py               # M6 sync 幂等 / 去重 / 非文本条目保留
     ├── test_classify_rules.py     # M2 规则层 + 真实归档文件回放
     ├── test_image_policy.py       # M1 图片闸门 + 审计（含端到端）
+    ├── test_name_parse.py         # M10 文件名解析：日期/单位/内容（纯函数）
+    ├── test_image_archive.py      # M10 图片归档端到端：命名 + 档案条目 + 未分类
     ├── test_audit.py              # M3 审计摘要 + 通知
     ├── test_retry.py              # M4 重试
     ├── test_error_queue.py        # M4 错误队列
@@ -70,7 +73,9 @@ social-worker/
 图片闸门（M1，按所在目录）
    ├─ 要OCR/   → 本地 OCR 后转 md（可检索文字）
    ├─ 要识图/  → 视觉模型（默认关闭）
-   └─ 其他(含根) → 只存档：不 OCR、不调视觉模型、不生成 md
+   └─ 其他(含根) → 只存档：不 OCR、不调视觉模型；按文件名取日期+单位，
+                    改名 <日期>-<单位>-<内容关键词>.<ext>，再产一条「档案条目」md（M10）
+                    文件名里连日期和单位都没有 → sources/_待确认/<类别>/（保留原名，等人工）
    ▼
 分类（M2 规则层先判：文件名×10 + 正文×1，唯一最高分才用；
        正文「自报家门」的词如发票/红头文件直接定类别；判不了才走 LLM）
@@ -89,7 +94,10 @@ Obsidian（客户端）           →  人看、人改（Syncthing 双向）
 两个 vault 物理隔离：**项目的所有东西（原始文件 + 笔记 + 生成的文书）都在各自项目里**。
 
 > 图片默认只存档：OCR / 视觉模型都是成本，必须用户把图片放进「要OCR/」才跑。
-> 详见 `config/image_policy.yaml` 与 `docs/流程review.md` A9。
+> 手写资料不指望 OCR（M10）：靠**文件名**里的日期 + 单位建关系——图片命名成
+> `<日期>-<单位>-<内容关键词>.<ext>`，并产一条只含这些元数据的「档案条目」md 喂 Cognee
+> （md 里写着原件路径，检索回到原件）；文件名里日期和单位都没有 → 落 `sources/_待确认/`，
+> 当天 22:00 的兜底清单里带原因提醒。详见 `docs/资料存放说明.md` 与 `config/image_policy.yaml`。
 
 ## 部署
 
@@ -121,7 +129,8 @@ python3 scripts/scan-inbox.py               # 真跑
 
 ## 重要约束
 
-- **只索引 md。** 原始 Office / 图片留在 `sources/` 存档，不进库。
+- **只索引 md。** 原始 Office / 图片留在 `sources/` 存档，原文件本身不进库；图片另产一条
+  只含文件名元数据的「档案条目」md（M10），进库的是这条条目，不是图片。
 - **禁止手工往飞书「已分类」写文件。** 那是 `scan-inbox.py` 的产物，手工放会绕过台账、md 生成与索引。
 - **含服务对象面部 / 证件的图片不要入库。**
 - 文件权限 644、目录 755（Cognee 容器 uid=1000 要能读）。

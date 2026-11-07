@@ -179,8 +179,10 @@ def test_root_images_skip_ocr(tmp_path, monkeypatch):
     assert len(lines) == 10
     assert {x["action"] for x in lines} == {"archive_only"}
 
-    # 附带：10 个文件都落到了 _待确认（文件名无项目关键词，规则判不了）
-    assert len(list((tmp_path / "_待确认" / "其他").iterdir())) == 10
+    # 附带：10 个文件都落到了 sources/_待确认/<类别>/（文件名无项目关键词，规则判不了）
+    # 落点必须与 PENDING 常量、fallback._locate 一致 —— 以前写成 `_待确认/` 会落到部署根
+    # 目录下另起一个目录，兜底清单按 sources/_待确认/ 找就找不到原件。
+    assert len(list((tmp_path / "sources" / "_待确认" / "其他").iterdir())) == 10
 
 
 if __name__ == "__main__":
