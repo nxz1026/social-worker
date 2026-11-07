@@ -269,105 +269,169 @@ def _is_text_entry(entry):
 
 
 def plan_sync(entries, jobs):
-    """纯函数：算出这次 sync 该删什么、该加什么。
+    """纯函数：算出这次 sync 该加什么、该改什么、该删什么。
 
     entries = 数据集现有条目（dict 列表）
     jobs    = [(Path, contentHash)]，本地 md 及其内容 hash
 
+    返回 (to_add, to_update, to_delete)：
+      - to_add    = [(Path, hash)]，本地新出现、库里没有
+      - to_update = [(entry, Path, hash)]，同名但内容变了（entry 是库里的旧条目）
+      - to_delete = [entry]，本地 md 已删/已移走，或同名同内容的重复条目
+
     规则：
-      - 文本条目里，name 在本地有、但 hash 对不上 → 删（内容变了的旧版本）
-      - 文本条目里，name 本地没有 → 删（md 已删/已移走）
       - 非文本条目（图片等）→ 一律不动
-      - 本地 md 的 (name, hash) 已存在 → 跳过，不重加
+      - 同名同内容的重复条目只留一条
+      - 同名同内容的多份本地 md 只入一条（避免重复入库）
     """
     target = {}
     for m, h in jobs:
         target.setdefault(m.stem, set()).add(h)
 
-    to_delete = []
-    seen = set()
+    to_add, to_update, to_delete = [], [], []
+    seen = set()          # 已确认保留的 (name, hash)
+    claimed = set()       # jobs 下标，已被「保留条目」或「更新」认领
     for e in entries:
         if not _is_text_entry(e):
             continue
-        name = e.get("name")
-        h = e.get("contentHash")
-        if name not in target or h not in target[name]:
-            to_delete.append(e)          # 内容变了的旧版本，或 md 已删/已移走
+        name, h = e.get("name"), e.get("contentHash")
+        if name in target and h in target[name] and (name, h) not in seen:
+            seen.add((name, h))
+            for i, (m, jh) in enumerate(jobs):
+                if i not in claimed and m.stem == name and jh == h:
+                    claimed.add(i)
+                    break
             continue
-        if (name, h) in seen:
-            to_delete.append(e)          # 同名同内容的重复条目，只留一条
+        # 该删或该改：同名的新 job 还没被认领 → 算「改」
+        if name in target:
+            for i, (m, jh) in enumerate(jobs):
+                if i not in claimed and m.stem == name and jh != h:
+                    claimed.add(i)
+                    to_update.append((e, m, jh))
+                    break
+            else:
+                to_delete.append(e)
+        else:
+            to_delete.append(e)
+
+    # 库里已保留同名同内容、或本地多份完全相同的 md，都不必再入
+    added = set()
+    for i, (m, h) in enumerate(jobs):
+        if i in claimed or (m.stem, h) in seen or (m.stem, h) in added:
             continue
-        seen.add((name, h))
-
-    drop_ids = {e.get("id") for e in to_delete}
-    remaining = {}
-    for e in entries:
-        if e.get("id") in drop_ids:
-            continue
-        remaining.setdefault(e.get("name"), set()).add(e.get("contentHash"))
-
-    to_add = [(m, h) for m, h in jobs if h not in remaining.get(m.stem, set())]
-    return to_delete, to_add
+        added.add((m.stem, h))
+        to_add.append((m, h))
+    return to_add, to_update, to_delete
 
 
-def cmd_sync(args, key):
+def sync_dataset(md_root, dataset, key, dry_run=False, log=None):
     """把 <md-root> 下的 md 全量镜像进数据集（幂等，可反复跑）。
 
     Cognee 的 add 对同一文件的不同版本会建出新条目而不是更新，
     所以按 (name, contentHash) 比对：内容变了的旧条目删掉重加，
     没变的跳过。数据集里的非文本条目（图片等）不动。
+
+    返回 {"added": int, "updated": int, "deleted": int,
+          "cognified": bool, "error": str|None}。
     """
-    root = Path(args.md_root)
+    log = log or print
+    root = Path(md_root)
+    st = {"added": 0, "updated": 0, "deleted": 0, "cognified": False, "error": None}
     if not root.is_dir():
-        sys.exit(f"目录不存在：{root}")
+        st["error"] = f"目录不存在：{root}"
+        return st
     mds = _collect_mds(root)
     if not mds:
-        print(f"{root} 下没有 md")
-        return
+        log(f"{root} 下没有 md")
+        return st
 
     dss = _api("/api/v1/datasets", key)
-    ds = next((d for d in dss if d.get("name") == args.dataset), None)
+    ds = next((d for d in dss if d.get("name") == dataset), None)
     if not ds:
-        sys.exit(f"数据集不存在：{args.dataset}")
+        st["error"] = f"数据集不存在：{dataset}"
+        return st
     ds_id = ds["id"]
 
     jobs = [(m, md5_of(m)) for m in mds]
+    to_add, to_update, to_delete = plan_sync(_fetch_entries(ds_id, key), jobs)
 
-    to_delete, _ = plan_sync(_fetch_entries(ds_id, key), jobs)
-    for e in to_delete:
-        if args.dry_run:
-            print(f"  [dry-run] 删除 {e.get('name')}（现有 hash {e.get('contentHash')}）")
-        else:
-            _api(f"/api/v1/datasets/{ds_id}/data/{e['id']}", key, method="DELETE")
-    print(f"清理旧条目 {len(to_delete)} 个")
+    if dry_run:
+        for e in to_delete:
+            log(f"  [dry-run] 删除 {e.get('name')}（现有 hash {e.get('contentHash')}）")
+        for e, m, h in to_update:
+            log(f"  [dry-run] 更新 {e.get('name')} → {m}")
+        for m, h in to_add:
+            log(f"  [dry-run] 入库 {m}")
+        st["deleted"] = len(to_delete)
+        st["updated"] = len(to_update)
+        st["added"] = len(to_add)
+        log("(dry-run，未执行 cognify)")
+        return st
+
+    # 先删旧条目：内容变了的旧版本 + 本地已无对应 md 的孤儿
+    stale = list(to_delete) + [e for e, _, _ in to_update]
+    for e in stale:
+        _api(f"/api/v1/datasets/{ds_id}/data/{e['id']}", key, method="DELETE")
+    log(f"清理旧条目 {len(stale)} 个")
 
     # 删完重取，得到数据集的真实剩余
-    _, to_add = plan_sync(_fetch_entries(ds_id, key), jobs)
+    to_add, _, _ = plan_sync(_fetch_entries(ds_id, key), jobs)
 
     added = 0
     for m, _ in to_add:
-        if args.dry_run:
-            print(f"  [dry-run] 入库 {m}")
-            added += 1
-            continue
         r = subprocess.run(["docker", "exec", "-e", f"COGNEE_API_KEY={key}", get_config().container,
                             CLI, "--api-url", API_URL, "add", to_container(str(m)),
-                            "--dataset-name", args.dataset],
+                            "--dataset-name", dataset],
                            capture_output=True, text=True)
         if r.returncode != 0:
-            print(f"  ! add 失败 {m.name}: {(r.stderr or r.stdout).strip()[:160]}")
+            log(f"  ! add 失败 {m.name}: {(r.stderr or r.stdout).strip()[:160]}")
         else:
             added += 1
-    print(f"入库 {added}/{len(mds)}（跳过未变 {len(mds) - len(to_add)}）")
+    log(f"入库 {added}/{len(mds)}（跳过未变 {len(mds) - len(to_add)}）")
 
-    if args.dry_run:
-        print("(dry-run，未执行 cognify)")
-        return
+    st["deleted"] = len(to_delete)
+    st["updated"] = len(to_update)
+    st["added"] = added
+    if stale or to_add:
+        st["cognified"] = cognify(dataset, key, log=log)
+    return st
 
+
+def cognify(dataset, key, log=None):
+    """重建数据集的知识图谱，返回是否成功。"""
+    log = log or print
     r = subprocess.run(["docker", "exec", "-e", f"COGNEE_API_KEY={key}", get_config().container,
-                        CLI, "--api-url", API_URL, "cognify", "--datasets", args.dataset],
+                        CLI, "--api-url", API_URL, "cognify", "--datasets", dataset],
                        capture_output=True, text=True)
-    print((r.stdout or r.stderr).strip()[:300])
+    log((r.stdout or r.stderr).strip()[:300])
+    return r.returncode == 0
+
+
+def delete_by_name(dataset, name, key, dry_run=False, log=None):
+    """删掉数据集里指定 name 的文本条目，返回删了几个。"""
+    log = log or print
+    dss = _api("/api/v1/datasets", key)
+    ds = next((d for d in dss if d.get("name") == dataset), None)
+    if not ds:
+        raise RuntimeError(f"数据集不存在：{dataset}")
+    ds_id = ds["id"]
+    n = 0
+    for e in _fetch_entries(ds_id, key):
+        if not _is_text_entry(e) or e.get("name") != name:
+            continue
+        if dry_run:
+            log(f"  [dry-run] 删除 {name}")
+        else:
+            _api(f"/api/v1/datasets/{ds_id}/data/{e['id']}", key, method="DELETE")
+        n += 1
+    return n
+
+
+def cmd_sync(args, key):
+    """把 <md-root> 下的 md 全量镜像进数据集（幂等，可反复跑）。"""
+    st = sync_dataset(args.md_root, args.dataset, key, dry_run=args.dry_run, log=print)
+    if st.get("error"):
+        sys.exit(f"! {st['error']}")
 
 
 def main():

@@ -34,7 +34,9 @@ social-worker/
 │   ├── convert-md.py              # 原始文件 → vault 里的 md
 │   ├── archive.py                 # M5 一条命令归档：定项目 → 放 inbox/ → 跑 scan-inbox → 校验
 │   ├── scan-inbox.py              # inbox/ 队列 → 分类 → 转 md → 归档 → 入库（定时跑）
-│   └── cognee.py                  # 包装 cognee-cli：search / add / cognify / sync
+│   ├── cognee.py                  # 包装 cognee-cli：search / add / cognify / sync
+│   ├── reconcile.py               # 对账：vault md ↔ Cognee / 飞书 / 台账（删改自动传播）
+│   ├── delete.py                  # 删除：trash（可恢复）/ purge，台账与库同步
 ├── skill/                         # DSH skill 源（部署到 ~/.dsh/skills/social-work/，改完要同步）
 │   ├── SKILL.md
 │   ├── enabled-skills.yaml
@@ -126,6 +128,31 @@ python3 scripts/scan-inbox.py               # 真跑
 |---|---|---|
 | `huadu` | 花都项目 | `vault-huadu/md/` |
 | `huimin` | 惠民项目 | `vault-huimin/md/` |
+
+## 删除 / 修改流程
+
+**vault 是真相源。** 在 Obsidian 里删掉或改掉一份 md，定时跑的 `scan-inbox.py` 会对账
+（`scripts/reconcile.py`）把变化传播到 Cognee、飞书和台账：
+
+- **改了内容** → 台账 `md_sha256` 更新，Cognee 里旧条目删掉重入（内容真变了才算变更；
+  老台账缺 `md_sha256` 时只补字段，不算变更）
+- **删了 md** → 台账标 `status: deleted`（记 `deleted_at` / `delete_mode: auto`），
+  Cognee 里对应条目删除，飞书「已分类」里的文档移入回收站
+- **删完又放回来**（md 重新出现）→ 台账回 `status: done`、记 `restored_at`，
+  飞书「已分类」用 `sources/` 原件重新上传一份（`restore_feishu`，新 token；恢复失败会记
+  错误、保持 `deleted` 下轮重试）；对账只处理
+  `status: done` 的条目，`pending` / `pending_review` / `unsupported`（转换中）不动
+
+LLM 渠道（skill / 对话里要删东西）用 `delete.py`，**默认 `--mode trash`**：
+
+```bash
+python3 scripts/delete.py <文档名|token|md 路径>            # 预览，什么都不改
+python3 scripts/delete.py <标识> --mode trash --yes          # 真删：md 移入 .trash/<日期>/，可恢复
+python3 scripts/delete.py <标识> --mode purge --yes          # 彻底删：md 直接删掉，不可恢复
+```
+
+`delete.py` 会同步删掉 Cognee 条目 + 飞书文档 + 台账记录。**不要手工删 vault md**——
+删除走 `delete.py`，默认 trash 可恢复；手工删会绕过台账，留下 Cognee / 飞书残条目。
 
 ## 重要约束
 

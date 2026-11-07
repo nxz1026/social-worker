@@ -419,6 +419,44 @@ HuggingFace 下载到容器可写层（`/app/.cache/huggingface`）的，`docker
 验证方式：`docker run --rm --entrypoint sh cognee-ocr:local -c 'du -sh /app/.cache/huggingface/hub/*'`
 ——fresh container（不含可写层）里五个仓库的文件数与运行时逐仓库一致。镜像 4.28 GB → 6.94 GB。
 
+### A16. 删/改对账：vault → Cognee / 飞书 / 台账（2026-11-07）
+
+**起因**：之前只有「进」没有「出」——归档进来的 md 进了 Cognee 和飞书，但用户在 Obsidian 里
+删了或改了 md，库和飞书「已分类」里的旧条目会一直留着，检索照样命中已经不存在的文档。
+
+**做法**：**vault 是真相源**，`scan-inbox.py` 末尾对每个项目跑 `scripts/reconcile.py`。
+
+| 现象 | 对账动作 |
+|---|---|
+| md 内容变了（`sha256` ≠ 台账 `md_sha256`） | 台账更新 `md_sha256`，Cognee 旧条目删掉重入 |
+| md 消失 | 台账标 `status: deleted` + `deleted_at`/`delete_mode: auto`，Cognee 条目删除，飞书文档移入回收站 |
+| md 又回来了 | 台账回 `status: done` + `restored_at`，飞书「已分类」用 `sources/` 原件重新上传一份（`restore_feishu`，新 token） |
+| 台账缺 `md_sha256`（老数据） | 只补字段，**不算变更**（避免上线当天全库 churn） |
+| `status` 为 `pending` / `pending_review` / `unsupported` | 跳过（转换中，md 本来就不该在） |
+
+**两种删除入口**：
+
+- **Obsidian 里删 md** → 对账自动传播（`delete_mode: auto`），不用通知任何人。
+- **LLM / 对话渠道** → `scripts/delete.py <标识>`，默认 `--mode trash`：
+  - `trash`：md 移进 `<vault>/.trash/<YYYY-MM-DD>/`，台账标 `deleted`，Cognee 条目删、
+    飞书文档移入回收站 → **可恢复**（md 放回原位，下一轮对账自动 `restored`）。
+  - `purge`：md 直接删掉，**不可恢复**。
+  - 默认 dry-run（只预览）；`--yes` 才真删；多个匹配退出码 2，找不到退出码 1。
+
+**边界处理**（spec 参考实现里的坑，已修）：
+
+1. 台账 `md_sha256` 是 sha256，对账必须用 `sha256_of` 比对——误用 md5 会导致每轮都判「changed」。
+2. `reconcile.py --dry-run` 不能写台账（否则预览也会改状态）。
+3. `restore_feishu` 失败（返回空 token）时记 `errors` 并**保持 `status: deleted` 下轮重试**，
+   不静默把飞书文档丢掉（spec 参考实现会直接标 done）。
+4. `delete.py` 的 `trash_md` 取 `md_rel` 相对 vault 的路径时，项目没配 vault 会 ValueError → 回退。
+5. `cognee.py plan_sync` 三段划分要跳过「本地重复 jobs」和「库里已保留的同名同内容条目」，
+   否则同名同内容的 md 会被重复入库。
+
+**验证**：`tests/test_reconcile.py`（md_state 四态 + 恢复语义 + 台账传播）、
+`tests/test_delete.py`（trash / purge / dry-run / 多匹配 / 找不到）、
+`tests/test_sync.py`（三段返回 + 同名同内容只入一条）。
+
 ## 3. B 类：应保留 LLM 判断 + skill 约束
 
 | 环节 | 为什么不能代码化 |
@@ -485,6 +523,9 @@ social-worker/
 | 6 | CHANGELOG 自动记（A5）、`_待确认` 自动归位（A7） | 锦上添花 |
 
 **实际落地（2026-11-06）**：M8 配置收口 → M6 `sync` 去重 → M2 分类规则层 → M1 图片闸门 → M3 审计摘要 + 22:00 飞书汇总 → M4 错误处理/告警/兜底 → M5 `archive.py` → M7 检索参数下沉 → M9 skill 压缩（131→44 行）→ A15 转换能力缺口（PDF / 图片 OCR）。
+
+**A16（2026-11-07）**：删/改对账（`scripts/reconcile.py` + `scripts/delete.py`）——vault 变 →
+Cognee / 飞书 / 台账自动传播；trash 可恢复、purge 不可恢复。见 A16 节。
 
 **全部完成**。测试 103 项全过；代码、配置、文档、skill 均在 `github.com/nxz1026/social-worker`。
 遗留：无（2026-11-06 已清 `shared-policies` 数据集与空的 `md-shared/`，并停删坏掉的

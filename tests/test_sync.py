@@ -40,34 +40,39 @@ def test_md5_is_stable_and_content_sensitive():
 
 
 def test_second_run_is_noop():
-    """连跑两次：第二次什么都不删、什么都不加。"""
+    """连跑两次：第二次什么都不加、什么都不改、什么都不删。"""
     with tempfile.TemporaryDirectory() as d:
         j = make_job(d, "doc.md", "v1")
         entries = [entry("e1", "doc", j[1])]
-        to_delete, to_add = plan_sync(entries, [j])
-    assert to_delete == []
+        to_add, to_update, to_delete = plan_sync(entries, [j])
     assert to_add == []
+    assert to_update == []
+    assert to_delete == []
 
 
 def test_changed_content_replaces_old_entry():
-    """同名 md 内容变了 → 删旧条目、加新内容（本次踩的 bug）。"""
+    """同名 md 内容变了 → 旧条目进 to_update（删旧条目重加），不是 to_delete。"""
     with tempfile.TemporaryDirectory() as d:
         old = make_job(d, "doc.md", "v1")
         entries = [entry("e1", "doc", old[1])]
         new = make_job(d, "doc.md", "v2")
-        to_delete, to_add = plan_sync(entries, [new])
-    assert [e["id"] for e in to_delete] == ["e1"]
-    assert [str(m) for m, _ in to_add] == [str(new[0])]
+        to_add, to_update, to_delete = plan_sync(entries, [new])
+    assert to_delete == []
+    assert [e["id"] for e, _, _ in to_update] == ["e1"]
+    assert [str(m) for _, m, _ in to_update] == [str(new[0])]
+    assert to_add == []
 
 
 def test_orphan_entry_removed():
     """数据集里有、本地 md 已删/已移走 → 删掉。"""
     with tempfile.TemporaryDirectory() as d:
         j = make_job(d, "keep.md", "x")
-        entries = [entry("e1", "keep", j[1]), entry("e2", "gone", "abc")]
-        to_delete, to_add = plan_sync(entries, [j])
-    assert [e["id"] for e in to_delete] == ["e2"]
+        e2 = entry("e2", "gone", "abc")
+        entries = [entry("e1", "keep", j[1]), e2]
+        to_add, to_update, to_delete = plan_sync(entries, [j])
+    assert to_delete == [e2]
     assert to_add == []
+    assert to_update == []
 
 
 def test_duplicate_entry_deduped():
@@ -75,9 +80,10 @@ def test_duplicate_entry_deduped():
     with tempfile.TemporaryDirectory() as d:
         j = make_job(d, "doc.md", "v1")
         entries = [entry("e1", "doc", j[1]), entry("e2", "doc", j[1])]
-        to_delete, to_add = plan_sync(entries, [j])
+        to_add, to_update, to_delete = plan_sync(entries, [j])
     assert [e["id"] for e in to_delete] == ["e2"]
     assert to_add == []
+    assert to_update == []
 
 
 def test_non_text_entries_preserved():
@@ -89,19 +95,21 @@ def test_non_text_entries_preserved():
             entry("img1", "photo", "deadbeef", ext="jpg"),
             entry("img2", "报销单", "cafebabe", ext="png"),
         ]
-        to_delete, to_add = plan_sync(entries, [j])
-    assert to_delete == []
+        to_add, to_update, to_delete = plan_sync(entries, [j])
     assert to_add == []
+    assert to_update == []
+    assert to_delete == []
 
 
 def test_missing_hash_treated_as_stale():
-    """老条目没有 contentHash → 当作过期，删掉重建。"""
+    """老条目没有 contentHash → 算「改」：删旧条目重加，不重复入库。"""
     with tempfile.TemporaryDirectory() as d:
         j = make_job(d, "doc.md", "v1")
         entries = [entry("e1", "doc", None)]
-        to_delete, to_add = plan_sync(entries, [j])
-    assert [e["id"] for e in to_delete] == ["e1"]
-    assert len(to_add) == 1
+        to_add, to_update, to_delete = plan_sync(entries, [j])
+    assert [e["id"] for e, _, _ in to_update] == ["e1"]
+    assert len(to_add) == 0
+    assert to_delete == []
 
 
 def test_same_stem_in_two_dirs():
@@ -110,9 +118,10 @@ def test_same_stem_in_two_dirs():
         a = make_job(d, "sub1/doc.md", "aaa")
         b = make_job(d, "sub2/doc.md", "bbb")
         entries = [entry("e1", "doc", a[1]), entry("e2", "doc", b[1])]
-        to_delete, to_add = plan_sync(entries, [a, b])
-    assert to_delete == []
+        to_add, to_update, to_delete = plan_sync(entries, [a, b])
     assert to_add == []
+    assert to_update == []
+    assert to_delete == []
 
 
 def test_new_file_added():
@@ -120,9 +129,27 @@ def test_new_file_added():
         old = make_job(d, "old.md", "x")
         entries = [entry("e1", "old", old[1])]
         new = make_job(d, "new.md", "y")
-        to_delete, to_add = plan_sync(entries, [old, new])
+        to_add, to_update, to_delete = plan_sync(entries, [old, new])
     assert to_delete == []
-    assert [str(m) for m, _ in to_add] == [str(new[0])]
+    assert to_update == []
+    assert to_add == [new]
+
+
+def test_identical_jobs_added_once():
+    """本地多份同名同内容的 md（或库里已保留同名同内容）只入一条，避免重复入库。"""
+    with tempfile.TemporaryDirectory() as d:
+        a = make_job(d, "sub1/doc.md", "same")
+        b = make_job(d, "sub2/doc.md", "same")
+        assert a[1] == b[1]
+        # 库里什么都没有：只该加一条
+        to_add, to_update, to_delete = plan_sync([], [a, b])
+        assert len(to_add) == 1
+        assert to_update == [] and to_delete == []
+        # 库里已有同名同内容：两条本地 md 都不该再入
+        entries = [entry("e1", "doc", a[1])]
+        to_add, to_update, to_delete = plan_sync(entries, [a, b])
+        assert to_add == []
+        assert to_update == [] and to_delete == []
 
 
 if __name__ == "__main__":
@@ -136,6 +163,7 @@ if __name__ == "__main__":
         test_missing_hash_treated_as_stale,
         test_same_stem_in_two_dirs,
         test_new_file_added,
+        test_identical_jobs_added_once,
     ):
         fn()
         print(f"ok  {fn.__name__}")

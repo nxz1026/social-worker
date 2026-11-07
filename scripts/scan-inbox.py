@@ -114,6 +114,7 @@ INBOX = None
 PENDING = None
 COGNEE_CONTAINER = None
 COGNEE_PY = SCRIPT_DIR / "cognee.py"
+RECONCILE_PY = SCRIPT_DIR / "reconcile.py"
 TZ = timezone(timedelta(hours=8))
 
 
@@ -647,6 +648,8 @@ def archive_one(src: Path, token: str, digest: str, decision: dict, cfg: dict,
             entry["note"] = decision["pending_reason"]
         why = decision.get("pending_reason") or "置信度不足"
         log(f"  ! {name} {why}，落 _待确认/{category}/")
+    if entry.get("md"):
+        entry["md_sha256"] = sha256_of(ROOT / entry["md"])
     return entry["status"]
 
 
@@ -716,7 +719,6 @@ def main() -> int:
     manifest.setdefault("files", {})
 
     processed = skipped = 0
-    touched: set[str] = set()
     new_errors: list = []  # M4：本次新产生的错误，收尾时一次性告警
     # M4：已经报错过的文件不再重复处理（否则坏文件每 15 分钟重试一次，永久刷日志）
     try:
@@ -833,10 +835,6 @@ def main() -> int:
 
         if status != "dry-run":
             processed += 1
-            # 有 md 才要重建图谱。M10 起只存档图片也产「档案条目」md（日期+单位），
-            # 所以图片同样会触发 Cognee 同步。
-            if decision["project"] and manifest["files"][token].get("md"):
-                touched.add(projects[decision["project"]]["dataset"])
             if status == "done":
                 # 飞书侧已归档，清掉本地副本，下次扫描才干净
                 src.unlink()
@@ -856,28 +854,24 @@ def main() -> int:
     if new_errors:
         _alert_errors(new_errors, log=log)
 
-    if args.no_cognify or args.dry_run or not touched:
+    if args.no_cognify or args.dry_run:
         return 0
 
-    log("\n=== Cognee 重建 ===")
+    # 对账：vault 是真相源，用户在 Obsidian 里的增/改/删都从这里传播
+    log("\n=== 对账（vault → Cognee / 飞书 / 台账）===")
     for project, pcfg in projects.items():
-        if pcfg["dataset"] not in touched:
-            continue
-        md_root = ROOT / pcfg["vault"]
-        if not md_root.is_dir():
-            continue
         try:
             r = _retry.retry(
-                lambda p=pcfg, m=md_root: subprocess.run(
-                    [sys.executable, str(COGNEE_PY), "sync", str(m), "--dataset", p["dataset"]],
+                lambda p=pcfg: subprocess.run(
+                    [sys.executable, str(RECONCILE_PY), "--dataset", p["dataset"]],
                     capture_output=True, text=True),
-                label=f"Cognee 同步 {pcfg['dataset']}", log=log)
+                label=f"对账 {pcfg['dataset']}", log=log)
         except Exception as exc:  # noqa: BLE001
-            log(f"  ! Cognee 同步失败：{exc}")
-            _enqueue(f"dataset:{pcfg['dataset']}", f"Cognee 同步失败：{exc}", [], log=log)
+            log(f"  ! 对账失败：{exc}")
+            _enqueue(f"dataset:{pcfg['dataset']}", f"对账失败：{exc}", [], log=log)
             continue
         out = (r.stdout or r.stderr).strip()
-        log(f"  {pcfg['dataset']}: {out[:300]}")
+        log(f"  {pcfg['dataset']}: {out[-300:]}")
     return 0
 
 

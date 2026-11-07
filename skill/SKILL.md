@@ -15,6 +15,8 @@ description: 社工工作助手：检索 Cognee 知识库（政策文件、项�
 | `scan-inbox.py [--dry-run]` | 手动补跑（15 分钟自动） |
 | `cognee.py search "<查询>" --dataset <名>` | 检索（`--type` 默认 auto） |
 | `cognee.py sync <vault> --dataset <名>` | 同步 md → 库（幂等，先 `--dry-run`） |
+| `delete.py <标识> [--mode trash\|purge] --yes` | 删除一个已归档文档（默认预览，`--yes` 才真删） |
+| `reconcile.py [--dry-run]` | 手动对账（vault → Cognee / 飞书 / 台账） |
 | `audit.py --date <日期>` | 看审计（22:00 自动发飞书） |
 | `fallback.py --list` | 看待兜底 |
 
@@ -31,6 +33,7 @@ description: 社工工作助手：检索 Cognee 知识库（政策文件、项�
 ## 硬约束
 
 - **禁止手工往飞书「已分类」写文件**（绕过台账与索引；`archive.py` 会自动补传一份）
+- **删除走 `delete.py`**，不要手工删 vault md（对账会自动传播，手工删会留下 Cognee/飞书残条目）
 - 图片默认**只存档**，**原图不进 Cognee**；M10 起按**文件名**取日期 + 单位，改名
   `<日期>-<单位>-<内容关键词>.<ext>` 并产一条「档案条目」md 进图谱；文件名里日期与单位都没有 →
   落 `sources/_待确认/<类别>/`，22:00 汇总提醒。要检索图片上的字，让用户放「未分类/要OCR/」
