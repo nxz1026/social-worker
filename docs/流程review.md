@@ -301,12 +301,16 @@ SKILL.md 只保留一句：「检索用 `cognee.py search`；默认 `CHUNKS`，�
   **定项目判不了就报错退出，不猜**。
 - **`inbox/` 成为统一待处理队列**：`scan-inbox.py` 除了拉飞书「未分类」，还会扫
   `inbox/` 里所有未处理文件。手工放进去的用 `local-<sha256前16位>` 当台账 key。
-- 本地文件的 md 顶部**不带飞书链接**（没有 file_token），也不去飞书「已分类」找对应条目 ——
-  避免了 `url_template.format(token="local-xxx")` 拼出一个假链接。
+- 本地文件（`archive.py` 放进 `inbox/` 的）飞书侧没有对应条目，早期版本只落服务器、
+  不回飞书 —— 2026-11-06 用户发现「发票在飞书里找不到」。**2026-11-07 补上**：
+  `scan-inbox.py` 处理完用 `upload_to_archive()`（`lark-cli drive +upload`）传一份到
+  「已分类/<项目>/<类别>/」，md 顶部补原件链接，台账记 `feishu_token`。
+  飞书来源的仍走 `+move`（搬原文件，不重复上传）。
 
 **验收（已跑）**：把一个 docx 放进 `inbox/` → `archive.py` → md 生成、台账有记录、
 Cognee 能检索到；`--dry-run` 对 docx / 图片 / 定不了项目的文件分别给出正确预览；
-测试 **92 项**全过。
+2026-11-07 实测：本地文件进 `inbox/` → 自动出现在飞书「已分类/惠民/项目执行」，
+md 顶部有链接；测试 **106 项**全过。
 
 ### A13. 检索参数下沉（M7）—— 省 token
 

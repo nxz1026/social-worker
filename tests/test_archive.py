@@ -109,7 +109,7 @@ def test_verify_no_manifest_entry(tmp_path):
 # ---------- 端到端：本地文件进 inbox/ 被处理 ----------
 
 def test_local_file_in_inbox_gets_archived(tmp_path, monkeypatch):
-    """手工放进 inbox/ 的文件也要被处理（M5 的核心）。"""
+    """手工放进 inbox/ 的文件也要被处理（M5 的核心），并上传一份到飞书「已分类」。"""
     si = _load("scan_inbox_local", "scan-inbox.py")
 
     inbox = tmp_path / "inbox"
@@ -137,6 +137,13 @@ def test_local_file_in_inbox_gets_archived(tmp_path, monkeypatch):
                         lambda *a, **k: {"project": "", "category": "其他",
                                          "confidence": 0.1, "title": ""})
     monkeypatch.setattr(si, "move_to_archive", lambda *a, **k: None)
+    uploads = []
+
+    def _fake_upload(rel, folder):
+        uploads.append((rel, folder))
+        return "tok-123"
+
+    monkeypatch.setattr(si, "upload_to_archive", _fake_upload)
     monkeypatch.setattr(sys, "argv", ["scan-inbox.py", "--no-cognify"])
 
     buf = io.StringIO()
@@ -151,14 +158,21 @@ def test_local_file_in_inbox_gets_archived(tmp_path, monkeypatch):
     assert len(keys) == 1
     rec = manifest["files"][keys[0]]
     assert rec["project"] == "huimin"
-    assert rec["status"] == "done"          # 本地文件没有飞书可移，直接 done
+    assert rec["status"] == "done"          # 上传成功后 done
     assert (tmp_path / rec["md"]).is_file()
+    # 本地文件也上传一份到飞书「已分类」
+    assert uploads == [("sources/projects/huimin/项目执行/2026-11-06-惠民-本地放入.txt",
+                        CONFIG["category_folders"]["惠民"]["项目执行"])]
+    assert rec["feishu_token"] == "tok-123"
+    # md 顶部补上了原件链接
+    head = (tmp_path / rec["md"]).read_text(encoding="utf-8").splitlines()[0]
+    assert "](https://x.feishu.cn/file/tok-123)" in head
     # 处理完 inbox/ 里的副本要清掉
     assert not (inbox / "2026-11-06-惠民-本地放入.txt").exists()
 
 
-def test_local_file_md_has_no_feishu_link(tmp_path, monkeypatch):
-    """本地文件 md 顶部不该有飞书链接（没有 file_token）。"""
+def test_local_file_md_has_no_feishu_link_when_upload_fails(tmp_path, monkeypatch):
+    """上传失败（拿不到 token）时 md 顶部保持无链接。"""
     si = _load("scan_inbox_hdr", "scan-inbox.py")
 
     inbox = tmp_path / "inbox"
@@ -185,6 +199,7 @@ def test_local_file_md_has_no_feishu_link(tmp_path, monkeypatch):
                         lambda *a, **k: {"project": "", "category": "其他",
                                          "confidence": 0.1, "title": ""})
     monkeypatch.setattr(si, "move_to_archive", lambda *a, **k: None)
+    monkeypatch.setattr(si, "upload_to_archive", lambda rel, folder: "")
     monkeypatch.setattr(sys, "argv", ["scan-inbox.py", "--no-cognify"])
     with redirect_stdout(io.StringIO()):
         assert si.main() == 0

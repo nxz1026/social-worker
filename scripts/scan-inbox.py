@@ -230,6 +230,19 @@ def move_to_archive(file_token: str, dest_folder: str) -> None:
         label="移入已分类", log=lambda m: print(m, flush=True))
 
 
+def upload_to_archive(rel_path: str, dest_folder: str) -> str:
+    """本地文件上传一份到飞书「已分类」，返回 file_token（拿不到返回空串）。
+
+    本地文件（archive.py 放进 inbox/ 的）飞书侧没有对应条目，
+    只能 +upload 新建一份；飞书来源的走 +move。
+    """
+    data = _retry.retry(
+        lambda: lark(["drive", "+upload", "--file", rel_path, "--folder-token", dest_folder]),
+        label="上传已分类", log=lambda m: print(m, flush=True))
+    return ((data.get("data") or {}).get("file_token")
+            or data.get("file_token") or "")
+
+
 def _enqueue(rel, message, sink, root=None, log=None, **extra) -> None:
     """写错误队列；是**新的**错误才加进 `sink`（用于事后一次性告警）。
 
@@ -530,20 +543,30 @@ def archive_one(src: Path, token: str, digest: str, decision: dict, cfg: dict,
     if not work_photo:
         entry["md"] = str(md_dir.relative_to(ROOT) / (src.stem + ".md"))
 
-    # 飞书归档（手工放进来的文件飞书侧没有对应条目，跳过）
-    if project and not is_local:
+    # 飞书归档：飞书来源 +move（原文件搬过去）；本地来源 +upload（飞书侧没有对应条目）
+    if project:
         dest_folder = cfg["category_folders"][projects[project]["label"]][category]
         try:
-            move_to_archive(token, dest_folder)
+            if is_local:
+                ft = upload_to_archive(str(dest.relative_to(ROOT)), dest_folder)
+                if ft:
+                    entry["feishu_token"] = ft
+                    # md 顶部补原件链接（和飞书来源的 md 保持一致）
+                    md_file = md_dir / (src.stem + ".md")
+                    if md_file.exists():
+                        url = cfg["feishu"]["url_template"].format(token=ft)
+                        txt = md_file.read_text(encoding="utf-8")
+                        md_file.write_text(
+                            txt.replace(f"> 原件：{name}", f"> 原件：[{name}]({url})", 1),
+                            encoding="utf-8")
+            else:
+                move_to_archive(token, dest_folder)
             entry["status"] = "done"
             entry["archived_at"] = datetime.now(TZ).isoformat(timespec="seconds")
         except Exception as exc:
             entry["status"] = "pending"
-            entry["error"] = f"mv 失败：{exc}"
+            entry["error"] = f"归档失败：{exc}"
             log(f"  ! {name} 归档失败：{exc}")
-    elif project:
-        entry["status"] = "done"
-        entry["archived_at"] = datetime.now(TZ).isoformat(timespec="seconds")
     else:
         entry["status"] = "pending_review"
         log(f"  ! {name} 置信度不足，落 _待确认/{category}/")
