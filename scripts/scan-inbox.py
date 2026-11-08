@@ -707,6 +707,8 @@ def main() -> int:
     for p in sorted(INBOX.rglob("*")):
         if not p.is_file():
             continue
+        if p.name.endswith(".meta.json"):
+            continue   # archive.py 写的项目元数据，不是待归档文件
         rel = p.relative_to(INBOX).as_posix()
         if rel in seen:
             continue
@@ -797,8 +799,25 @@ def main() -> int:
             # 只存档图片：文件名是唯一可靠信息源（archive_only 不取正文，LLM 也无正文可看），
             # 规则层只要求判出**项目**；类别没命中就给默认「日常工作佐证」，不再为此调 LLM。
             is_photo = src.suffix.lower() in IMAGE_EXTS and action == "archive_only"
+            # 读 archive.py 写的元数据（指定项目时强制，类别仍自动判）
+            forced_project = None
+            meta_path = src.with_name(src.name + ".meta.json")
+            if meta_path.is_file():
+                try:
+                    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                    forced_project = meta.get("project")
+                    if forced_project:
+                        log(f"  · 指定项目（元数据）：{forced_project}")
+                except Exception:
+                    pass
             decision = None
-            if rules is not None:
+            if forced_project:
+                d = classify(rel, conv["text"], llm, projects, categories, args.verbose)
+                d["project"] = forced_project
+                d["reason"] = "forced"
+                decision = d
+                log(f"  · 指定项目 {forced_project} / {decision['category']}")
+            elif rules is not None:
                 decision = _cr.classify_rule(rel, conv["text"], rules, projects, categories,
                                              require_category=not is_photo)
                 if decision and is_photo and not decision.get("category"):

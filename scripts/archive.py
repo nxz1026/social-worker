@@ -13,6 +13,7 @@ DSH 侧只调这一条，不再手工分步（落 sources/ + 转 md + 入库 + �
 from __future__ import annotations
 
 import argparse
+import json
 import shutil
 import subprocess
 import sys
@@ -160,6 +161,13 @@ def main(argv=None):
     if src.resolve() != dest.resolve():
         shutil.copy2(src, dest)
         print(f"  已复制（{src.stat().st_size} 字节）")
+
+    # 指定项目时写元数据，scan-inbox 会尊重它（项目强制，类别仍自动判）
+    if args.project:
+        meta = dest.with_name(dest.name + ".meta.json")
+        meta.write_text(json.dumps({"project": args.project}, ensure_ascii=False),
+                        encoding="utf-8")
+        print(f"  元数据：{meta.name}（project={args.project}）")
 
     t0 = time.time()
     print("\n=== 跑 scan-inbox.py ===")

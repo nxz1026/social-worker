@@ -71,8 +71,16 @@ def llm_chat(prompt: str, max_tokens: int = 4000) -> str:
         endpoint.rstrip("/") + "/chat/completions",
         data=json.dumps(body).encode(),
         headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=300) as resp:
-        data = json.loads(resp.read().decode())
+    try:
+        with urllib.request.urlopen(req, timeout=240) as resp:
+            data = json.loads(resp.read().decode())
+    except Exception as exc:
+        # 区分超时与其它错误，便于上层返回 504/500
+        # urllib 超时会包成 URLError(reason=socket.timeout)
+        reason = getattr(exc, "reason", exc)
+        if isinstance(reason, TimeoutError) or "timed out" in str(exc).lower():
+            raise TimeoutError(str(exc)) from exc
+        raise
     return data["choices"][0]["message"]["content"]
 
 
@@ -377,9 +385,15 @@ def generate(body: dict, request: Request, user=Depends(current_user),
 - 正文 ≤14,000 字
 - 直接输出文书正文，不要额外说明"""
 
+    import socket
+    import traceback
     try:
         content = llm_chat(prompt)
+    except (TimeoutError, socket.timeout) as exc:
+        traceback.print_exc()
+        raise HTTPException(504, f"生成超时（LLM 未在限时内返回）：{exc}")
     except Exception as exc:
+        traceback.print_exc()
         raise HTTPException(500, f"生成失败：{exc}")
     audit(conn, user["id"], "generate", target=doc_type,
           detail={"context": context[:200]}, ip=request.client.host)
