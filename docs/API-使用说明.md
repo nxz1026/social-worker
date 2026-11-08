@@ -1,93 +1,126 @@
-# 社工文档服务 API 使用说明
+# 社工文档服务 API 使用说明（客户端 Agent 版）
 
-面向本机 Agent / 外部程序。服务地址 `https://140.83.62.161/sw-api/api`（自签证书，curl 加 `-k`）。
+面向调用方 Agent / 程序。服务 `https://140.83.62.161/sw-api/api`，自签证书（客户端跳过校验）。所有响应为 JSON。
 
 ## 认证
 
-```bash
-# 登录拿 token（12 小时有效）
-TOKEN=$(curl -sk -X POST https://140.83.62.161/sw-api/api/login \
-  -H 'Content-Type: application/json' \
-  -d '{"username":"<用户名>","password":"<密码>"}' \
-  | python3 -c "import sys,json;print(json.load(sys.stdin)['token'])")
-
-# 后续请求带 Header
-curl -sk https://140.83.62.161/sw-api/api/me -H "x-token: $TOKEN"
+```
+POST /api/login  body: {"username","password"}
+→ {"token": "...", "username": "...", "role": "admin|editor|viewer"}
 ```
 
-## 端点
+后续每个请求带 Header `x-token: <token>`。token 12 小时有效；收到 401 → 重新登录。
 
-| 方法 | 路径 | 说明 | 权限 |
+## 端点契约
+
+| 方法 | 路径 | 权限 | 说明 |
 |---|---|---|---|
-| POST | `/api/login` | 登录 → token | — |
-| GET | `/api/me` | 当前用户 + 角色 + 项目 | 登录 |
-| GET | `/api/docs?project=&category=&q=` | 文档列表 | 登录 |
-| GET | `/api/docs/{token}` | 文档详情（含内容） | 登录 + 项目 |
-| POST | `/api/docs` | 上传归档（multipart） | editor/admin |
-| PATCH | `/api/docs/{token}` | 修改内容 | editor/admin |
-| DELETE | `/api/docs/{token}` | 删除（trash 模式） | editor/admin |
-| GET | `/api/search?q=&project=` | 知识库检索 | 登录 |
-| POST | `/api/generate` | 文书生成 | 登录 |
-| GET | `/api/admin/users` | 用户列表 | admin |
-| POST | `/api/admin/users` | 建号 | admin |
-| PATCH | `/api/admin/users/{id}` | 改角色/项目/禁用 | admin |
-| GET | `/api/admin/audit` | 审计日志 | admin |
+| POST | `/api/login` | — | 登录拿 token |
+| GET | `/api/me` | 登录 | 当前用户 + role + projects |
+| GET | `/api/docs?project=&category=&q=` | 登录 | 文档列表；不带 project 返回**全部授权项目** |
+| GET | `/api/docs/{token}` | 登录 + 项目 | 详情（含 content）；已删除返回 404 |
+| POST | `/api/docs` | editor/admin | 上传归档（multipart：`file`、可选 `project`） |
+| PATCH | `/api/docs/{token}` | editor/admin | 修改内容（JSON：`{"content": "..."}`） |
+| DELETE | `/api/docs/{token}` | editor/admin | 删除（trash 模式，可恢复） |
+| GET | `/api/search?q=&project=` | 登录 | 知识库检索 |
+| POST | `/api/generate` | 登录 | 文书生成（JSON：`{"type","context"}`） |
+| GET | `/api/admin/users` | admin | 用户列表 |
+| POST | `/api/admin/users` | admin | 建号（`{"username","password","role","projects"}`） |
+| PATCH | `/api/admin/users/{id}` | admin | 改角色/项目/禁用 |
+| GET | `/api/admin/audit?limit=` | admin | 审计日志 |
 
-## 权限模型
+**权限模型**：admin 全部项目；editor 授权项目可增删改查；viewer 授权项目只读。跨项目访问返回 403。
 
-| 角色 | 查 | 增 | 改 | 删 | 项目 |
-|---|---|---|---|---|---|
-| admin | ✓ | ✓ | ✓ | ✓ | 全部 |
-| editor | ✓ | ✓ | ✓ | ✓ | 授权项目 |
-| viewer | ✓ | ✗ | ✗ | ✗ | 授权项目 |
+## 行为约定（调用方必读）
 
-跨项目访问返回 403。
+| 操作 | 耗时 | 说明 |
+|---|---|---|
+| 上传归档 | 30–70s | 同步返回（含分类入库）；`project` 未传则按文件名+内容自动判 |
+| 检索 | 10–90s | 超时返回 `{"ok":true,"output":"","note":"检索超时..."}` |
+| 文书生成 | 约 60s | 长 context 可能更久；超时返回 504 |
+| PATCH | 1–3 分钟 | 触发索引重建（同步阻塞） |
+| DELETE | 20–30s | trash 模式；删后详情 404 |
 
-## 示例
-
-### 归档文件
-```bash
-curl -sk -X POST https://140.83.62.161/sw-api/api/docs \
-  -H "x-token: $TOKEN" \
-  -F "file=@/path/文件.docx" -F "project=huimin"
-```
-
-### 检索
-```bash
-curl -sk "https://140.83.62.161/sw-api/api/search?q=%E4%BD%8E%E4%BF%9D&project=huadu" \
-  -H "x-token: $TOKEN"
-```
-
-### 生成文书
-```bash
-curl -sk -X POST https://140.83.62.161/sw-api/api/generate \
-  -H "x-token: $TOKEN" -H 'Content-Type: application/json' \
-  -d '{"type":"活动方案","context":"惠民社区为老服务活动"}'
-# 类型：个案记录/家访提纲/服务计划/活动方案/项目申报/评估报告
-# 耗时约 60 秒
-```
-
-### 建号（admin）
-```bash
-curl -sk -X POST https://140.83.62.161/sw-api/api/admin/users \
-  -H "x-token: $TOKEN" -H 'Content-Type: application/json' \
-  -d '{"username":"zhangsan","password":"初始密码","role":"editor","projects":["huimin"]}'
-```
+**幂等性**：
+- 重复上传同内容文件 → 同一 token（内容哈希）
+- 重复登录 → 新 token（旧 token 仍有效）
+- PATCH/DELETE 幂等
 
 ## 错误码
 
-| 码 | 含义 |
-|---|---|
-| 400 | 参数错误 |
-| 401 | 未登录 / token 过期 |
-| 403 | 无权限（角色不足或跨项目） |
-| 404 | 文档不存在 |
-| 409 | 用户名已存在 |
-| 500 | 服务端错误 |
+| 码 | 含义 | 调用方处理 |
+|---|---|---|
+| 400 | 参数错误 | 检查 body/字段 |
+| 401 | 未登录 / token 过期 | 重新登录 |
+| 403 | 角色不足或跨项目 | 换账号或申请权限 |
+| 404 | 文档不存在 / 已删除 | 视为已删除 |
+| 409 | 用户名已存在 | 换用户名 |
+| 500 | 服务端错误 | 重试或报告 |
+| 504 | 生成超时 | 重试 |
+
+## 调用示例（Python 标准库）
+
+```python
+import json, urllib.request, ssl
+
+BASE = "https://140.83.62.161/sw-api/api"
+ctx = ssl.create_default_context(); ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE
+
+def call(method, path, token=None, body=None, raw=None):
+    url = BASE + path
+    data = None
+    headers = {}
+    if body is not None:
+        data = json.dumps(body).encode(); headers["Content-Type"] = "application/json"
+    if raw is not None:
+        data = raw
+    if token:
+        headers["x-token"] = token
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=300, context=ctx) as r:
+            return r.status, json.loads(r.read().decode())
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read().decode())
+
+# 登录
+st, d = call("POST", "/api/login", body={"username": "xxx", "password": "xxx"})
+token = d["token"]
+
+# 归档文件（multipart 用 curl 更省事）
+# 检索
+st, d = call("GET", "/api/search?q=共治行动&project=huadu", token=token)
+print(d["output"])
+
+# 生成文书
+st, d = call("POST", "/api/generate", token=token,
+             body={"type": "活动方案", "context": "惠民社区为老服务活动"})
+print(d["content"])
+```
+
+**上传（curl）**：
+```bash
+curl -sk -X POST "$BASE/docs" -H "x-token: $TOKEN" \
+  -F "file=@/path/文件.docx" -F "project=huimin"
+```
+
+## 常见任务
+
+**归档一份文件**
+1. `POST /api/docs`（带 file + project）
+2. 返回 output 含"台账有记录"→ 成功；含"置信度不足"→ 落 `_待确认`（需人工）
+
+**检索并生成文书**
+1. `GET /api/search?q=<主题>&project=<项目>` 取素材
+2. `POST /api/generate` body `{type, context}` → content
+
+**删除文档**
+1. `DELETE /api/docs/{token}`
+2. 详情返回 404（已删）；彻底删除需本机 `reconcile --purge`
 
 ## 注意
 
-- 自签证书：curl 必须加 `-k`
-- 文书生成耗时约 60s（longcat 推理模型）
-- 删除是 trash 模式（md 移入 `.trash`，可恢复）；彻底删除需本机 `reconcile --purge`
-- 归档的文件名要起描述性名（日期+项目+内容关键词），便于检索
+- 归档文件名起描述性名（日期+项目+内容关键词），便于检索
+- `project` 参数会被内容判定覆盖时以内容为准；如需强制，归档后检查 `detected_project`
+- 检索/生成失败时先看 `note` 字段（超时提示）
+- 服务端为单机部署，高并发下耗时上升；建议串行调用
