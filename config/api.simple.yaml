@@ -1,0 +1,107 @@
+# ============================================================================
+# 社工文档服务 API 配置模板（详细说明版）
+#
+# 用法：
+#   cp config/api.simple.yaml config/api.yaml     # 再按需改值
+#   config/api.yaml 已在 .gitignore，本地部署值不会进仓；本模板只做参考，不参与加载。
+#
+# 加载顺序（api/settings.py）：
+#   1. 环境变量 SOCIALWORK_API_CONFIG 指向的文件
+#   2. 仓库/部署目录下的 config/api.yaml
+#   3. 内置默认值（与本模板一致）
+#
+# 环境变量优先级高于配置文件：
+#   SOCIAL_WORK_ROOT      覆盖 server.root
+#   SOCIALWORK_TEMPLATES  覆盖 server.templates_dir
+#   SOCIALWORK_DB_DSN     覆盖 db.dsn
+#   PORT                  覆盖 server.port
+#
+# 凭证（LLM 的 endpoint / model / api_key）不在本文件，仍在服务端 .env。
+# ============================================================================
+
+server:
+  # uvicorn 监听地址。
+  # 默认 127.0.0.1：只允许本机访问，外部统一走 nginx 反代（https://<host>/sw-api/）。
+  # 只有需要容器或其他机器直连时才改成 0.0.0.0，改前先确认防火墙与鉴权。
+  host: 127.0.0.1
+
+  # 监听端口。环境变量 PORT 可覆盖。
+  # 默认 8001，与 systemd 单元、nginx upstream 对应；改了要同步改 nginx。
+  port: 8001
+
+  # 服务端根目录：台账 state/manifest.yaml、sources/、vault-*/、scripts/ 都在它下面。
+  # 环境变量 SOCIAL_WORK_ROOT 可覆盖。换机器只改这一处，不要改代码。
+  root: /srv/social-work
+
+  # 文书模板目录：6 套模板（activity-plan.md 等）所在位置。
+  # 默认是 DSH skill 的部署目录；环境变量 SOCIALWORK_TEMPLATES 可覆盖。
+  templates_dir: ~/.dsh/skills/social-work/templates
+
+  # CORS 允许来源。默认 ["*"]：服务只监听 127.0.0.1，且每个请求都要 x-token。
+  # 若前面有浏览器前端并希望收紧，改成具体域名，如 ["https://example.com"]。
+  cors_origins:
+    - "*"
+
+  # 时区偏移（小时），用于 token 过期时间与审计时间戳。
+  # 默认 8（东八区）。不要改成 0，否则审计记录会差 8 小时。
+  timezone_offset_hours: 8
+
+auth:
+  # 登录 token 有效期（小时）。默认 12。
+  # 过期后接口返回 401，客户端重新调 /api/login 即可；改大不会延长已签发的 token。
+  token_ttl_hours: 12
+
+db:
+  # PostgreSQL 连接串（libpq 格式）。
+  # 留空 = 读环境变量 SOCIALWORK_DB_DSN；两者都为空时服务启动失败（避免明文密码进仓）。
+  # 推荐本文件保持空，在 systemd 单元里设置：
+  #   Environment="SOCIALWORK_DB_DSN=host=127.0.0.1 port=5432 dbname=socialwork user=admin password=***"
+  # 格式示例：host=127.0.0.1 port=5432 dbname=socialwork user=admin password=xxx
+  dsn: ""
+
+# 授权项目清单。admin 可访问全部；editor / viewer 的 projects 只能从这里取。
+# 必须与 config/config.yaml 的 datasets 键一致，否则文档归属与检索数据集会对不上。
+# 新增项目：这里加一项 + config/config.yaml 的 datasets 加一项 + 建 vault-<项目>/ 目录。
+projects:
+  - huadu
+  - huimin
+
+llm:
+  # 单次生成的输出上限（tokens，推理与正文共用）。默认 16000。
+  # LongCat 是推理模型，实测 reasoning 会吃掉数千 tokens；给小了正文会被截断
+  # （finish_reason=length，接口返回 truncated=true）。调小省成本但容易半篇；
+  # 调大受模型上下文上限约束。
+  max_tokens: 16000
+
+  # 调上游 LLM 的超时（秒）。默认 240。
+  # 超时返回 504。生成一份 3000 字以上的文书通常 2–4 分钟，不建议低于 180。
+  timeout_seconds: 240
+
+  # 采样温度。默认 0.3，偏稳定、少发挥。
+  # 文书场景不建议超过 0.7，否则容易编造政策文号、统计数据与案例细节。
+  temperature: 0.3
+
+search:
+  # 单个数据集的检索超时（秒）。默认 90。
+  # 不带 project 时按项目串行检索，总耗时约为 项目数 × 单次耗时；
+  # 某个数据集超时会被跳过，全部超时才返回 note 字段。
+  timeout_seconds: 90
+
+  # 每个数据集检索结果保留的字符数（取输出尾部）。默认 4000。
+  # 调大可召回更多片段，但 /api/search 的响应体也会变大。
+  snippet_chars: 4000
+
+  # 生成文书时喂给模型的素材总长（字符）。默认 3000。
+  # 太短素材不足，太长会挤占正文预算（与 max_tokens 共同决定是否截断）。
+  material_chars: 3000
+
+tasks:
+  # 上传归档超时（秒）：分类 + 转 md + 入库，同步执行。默认 600。
+  # 大文件或首次建索引会更久；超时返回 500，客户端可重试（同内容幂等）。
+  archive_timeout_seconds: 600
+
+  # PATCH 修改内容后重建索引的超时（秒）。默认 180。
+  reconcile_timeout_seconds: 180
+
+  # DELETE（trash 模式）超时（秒）。默认 300。
+  delete_timeout_seconds: 300

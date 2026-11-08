@@ -23,26 +23,24 @@ import psycopg
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
-ROOT = Path(os.environ.get("SOCIAL_WORK_ROOT", "/srv/social-work"))
+from settings import SETTINGS
+
+ROOT = SETTINGS.root
 SCRIPTS = ROOT / "scripts"
-PG_DSN = os.environ.get(
-    "SOCIALWORK_DB_DSN",
-    "host=127.0.0.1 port=5432 dbname=socialwork user=admin password=tjfjyjr",
-)
-TZ = timezone(timedelta(hours=8))
-TOKEN_TTL_HOURS = 12
-ALL_PROJECTS = ["huadu", "huimin"]
+PG_DSN = SETTINGS.db_dsn
+TZ = timezone(timedelta(hours=SETTINGS.timezone_offset_hours))
+TOKEN_TTL_HOURS = SETTINGS.token_ttl_hours
+ALL_PROJECTS = SETTINGS.projects
 
 app = FastAPI(title="社工文档服务", version="0.1")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=SETTINGS.cors_origins,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-TEMPLATES_DIR = Path(os.environ.get(
-    "SOCIALWORK_TEMPLATES", str(Path.home() / ".dsh/skills/social-work/templates")))
+TEMPLATES_DIR = SETTINGS.templates_dir
 TYPE_MAP = {
     "个案记录": "case-record", "家访提纲": "home-visit-outline",
     "服务计划": "service-plan", "活动方案": "activity-plan",
@@ -50,12 +48,13 @@ TYPE_MAP = {
 }
 
 
-def llm_chat(prompt: str, max_tokens: int = 16000) -> tuple[str, str]:
+def llm_chat(prompt: str, max_tokens: int | None = None) -> tuple[str, str]:
     """调 longcat 生成文书。读 /srv/social-work/.env 的 LLM 配置。
 
     返回 (正文, finish_reason)。LongCat 是推理模型，reasoning 与正文共用
-    max_tokens，预算给小了正文会被截断，故默认放到 16000。
+    max_tokens，预算给小了正文会被截断，默认值见 config/api.yaml。
     """
+    max_tokens = max_tokens or int(SETTINGS.llm["max_tokens"])
     import urllib.request
     env = {}
     for line in (ROOT / ".env").read_text(encoding="utf-8").splitlines():
@@ -70,13 +69,15 @@ def llm_chat(prompt: str, max_tokens: int = 16000) -> tuple[str, str]:
         raise RuntimeError("LLM 未配置")
     body = {"model": model,
             "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.3, "max_tokens": max_tokens}
+            "temperature": float(SETTINGS.llm["temperature"]),
+            "max_tokens": max_tokens}
     req = urllib.request.Request(
         endpoint.rstrip("/") + "/chat/completions",
         data=json.dumps(body).encode(),
         headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"})
     try:
-        with urllib.request.urlopen(req, timeout=240) as resp:
+        with urllib.request.urlopen(
+                req, timeout=int(SETTINGS.llm["timeout_seconds"])) as resp:
             data = json.loads(resp.read().decode())
     except Exception as exc:
         # 区分超时与其它错误，便于上层返回 504/500
@@ -292,7 +293,8 @@ async def upload_doc(
     cmd = ["python3", str(SCRIPTS / "archive.py"), "--file", tmp_path]
     if project:
         cmd += ["--project", project]
-    proc = subprocess.run(cmd, cwd=str(ROOT), capture_output=True, text=True, timeout=600)
+    proc = subprocess.run(cmd, cwd=str(ROOT), capture_output=True, text=True,
+                          timeout=int(SETTINGS.tasks["archive_timeout_seconds"]))
     shutil.rmtree(tmpdir, ignore_errors=True)
     audit(conn, user["id"], "create", project, file.filename,
           {"returncode": proc.returncode}, request.client.host)
@@ -322,7 +324,8 @@ def update_doc(token: str, body: dict, request: Request,
     try:
         subprocess.run(
             ["python3", str(SCRIPTS / "reconcile.py"), "--pg-dsn", PG_DSN, "--no-notify"],
-            cwd=str(ROOT), capture_output=True, text=True, timeout=180)
+            cwd=str(ROOT), capture_output=True, text=True,
+            timeout=int(SETTINGS.tasks["reconcile_timeout_seconds"]))
     except Exception:
         pass   # 索引重建失败不阻断 PATCH（下轮 15min timer 兜底）
     audit(conn, user["id"], "update", e.get("project"), e.get("name"),
@@ -342,7 +345,8 @@ def delete_doc(token: str, request: Request, user=Depends(require_write),
     check_project(user, e.get("project"))
     proc = subprocess.run(
         ["python3", str(SCRIPTS / "delete.py"), token, "--mode", "trash", "--yes"],
-        cwd=str(ROOT), capture_output=True, text=True, timeout=300)
+        cwd=str(ROOT), capture_output=True, text=True,
+        timeout=int(SETTINGS.tasks["delete_timeout_seconds"]))
     audit(conn, user["id"], "delete", e.get("project"), e.get("name"),
           {"mode": "trash", "returncode": proc.returncode}, request.client.host)
     if proc.returncode != 0:
@@ -367,12 +371,13 @@ def search_datasets(query: str, datasets: list[str],
             cmd += ["--type", qtype]
         try:
             proc = subprocess.run(cmd, cwd=str(ROOT), capture_output=True,
-                                  text=True, timeout=90)
+                                  text=True,
+                                  timeout=int(SETTINGS.search["timeout_seconds"]))
         except subprocess.TimeoutExpired:
             timeouts += 1
             continue
         oks.append(proc.returncode == 0)
-        text = re.sub(r"<[^>]+>", "", proc.stdout[-4000:]).strip()
+        text = re.sub(r"<[^>]+>", "", proc.stdout[-int(SETTINGS.search["snippet_chars"]):]).strip()
         if text:
             outs.append(text)
     all_timeout = bool(datasets) and timeouts == len(datasets)
@@ -412,7 +417,7 @@ def generate(body: dict, request: Request, user=Depends(current_user),
     search_out = ""
     if context:
         _, search_out, _ = search_datasets(context, datasets, qtype="CHUNKS")
-        search_out = search_out[-3000:]
+        search_out = search_out[-int(SETTINGS.search["material_chars"]):]
 
     prompt = f"""你是社工文书生成助手。根据以下模板和素材，生成一份{doc_type}。
 
@@ -546,4 +551,4 @@ def admin_audit(limit: int = 100, conn=Depends(db), user=Depends(require_admin))
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="127.0.0.1", port=int(os.environ.get("PORT", "8001")))
+    uvicorn.run(app, host=SETTINGS.server["host"], port=int(SETTINGS.server["port"]))

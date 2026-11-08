@@ -74,6 +74,7 @@ def test_configs_parse():
     targets = [
         "config/feishu-flow.yaml.example",
         "config/entities.yaml",
+        "config/api.simple.yaml",
         "skill/enabled-skills.yaml",
     ]
     for rel in targets:

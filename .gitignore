@@ -24,6 +24,9 @@ config/feishu-flow.yaml
 # 通知收件人含个人 open_id，只提交 .example
 config/notify.yaml
 
+# API 部署配置（本地值）：模板是 config/api.simple.yaml
+config/api.yaml
+
 # ---------- Python ----------
 __pycache__/
 *.py[cod]

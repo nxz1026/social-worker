@@ -13,6 +13,7 @@
 social-worker/
 ├── config/
 │   ├── config.yaml                # M8 服务端配置：root / 容器名 / 数据集 / LLM
+│   ├── api.simple.yaml            # API 配置模板（逐项中文说明）；复制成 api.yaml 生效，api.yaml 不进仓
 │   ├── feishu-flow.yaml.example   # 飞书目录 token / 项目 / 类别映射（填值后改名去掉 .example）
 │   ├── entities.yaml              # 实体名册：转换时自动插 [[链接]]
 │   ├── project_aliases.yaml       # M2 规则层：项目 → 关键词（改词不用改代码）
@@ -43,7 +44,8 @@ social-worker/
 │   ├── templates/*.md             # 6 套文书模板
 │   └── review-checklists/*.yaml   # 6 份复核清单
 ├── api/
-│   └── app.py                     # HTTP API：登录 / 文档增删改查 / 检索 / 生成 / 用户 / 审计
+│   ├── app.py                     # HTTP API：登录 / 文档增删改查 / 检索 / 生成 / 用户 / 审计
+│   └── settings.py                # 读 config/api.yaml，环境变量优先
 ├── docs/
 │   ├── API-使用说明.md             # 对外 API 契约：端点、耗时、幂等、错误码、调用示例
 │   ├── 服务器部署.md               # 部署与运维（docker / syncthing / 踩坑）
@@ -140,6 +142,10 @@ python3 scripts/scan-inbox.py               # 真跑
 | 维护 | `PATCH` / `DELETE /api/docs/{token}` | 同步重建索引 / trash 可恢复，耗时较长 |
 
 调用方判断归档成功请以 `GET /api/docs?project=X` 能查到该 token 为准，不要只匹配上传输出文案。
+
+服务自身参数（监听地址/端口、token 有效期、检索与生成超时、`max_tokens`）集中在 `config/api.yaml`，
+模板与逐项说明见 `config/api.simple.yaml`（复制后改值；`api.yaml` 属本地部署配置，不进仓），
+也可用 `SOCIALWORK_API_CONFIG` 指定别的文件；数据库连接串由环境变量 `SOCIALWORK_DB_DSN` 提供，不写进仓库。
 
 ## 目录与数据集对照
 
