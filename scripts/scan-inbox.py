@@ -548,6 +548,7 @@ def archive_one(src: Path, token: str, digest: str, decision: dict, cfg: dict,
         "original": f"{original_dir}/{name}", "sha256": digest, "size": src.stat().st_size,
         "status": "pending", "converter": conv["converter"],
         "seen_at": datetime.now(TZ).isoformat(timespec="seconds"),
+        "detected_project": decision.get("detected_project"),
     })
 
     if dry_run:
@@ -813,10 +814,12 @@ def main() -> int:
             decision = None
             if forced_project:
                 d = classify(rel, conv["text"], llm, projects, categories, args.verbose)
+                d["detected_project"] = d.get("project")   # 覆盖前记录内容识别结果
                 d["project"] = forced_project
                 d["reason"] = "forced"
                 decision = d
-                log(f"  · 指定项目 {forced_project} / {decision['category']}")
+                log(f"  · 指定项目 {forced_project} / {decision['category']}"
+                    f"（内容识别：{d.get('detected_project')}）")
             elif rules is not None:
                 decision = _cr.classify_rule(rel, conv["text"], rules, projects, categories,
                                              require_category=not is_photo)

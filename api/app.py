@@ -212,9 +212,7 @@ def list_docs(project: str = "", category: str = "", q: str = "",
               user=Depends(current_user)):
     if project and project not in user["projects"]:
         raise HTTPException(403, f"无项目 {project} 权限")
-    scope = project or None
-    if scope is None:
-        scope = user["projects"][0] if user["projects"] else None
+    scopes = [project] if project else user["projects"]   # BUG-07：无 project 返回全部授权项目
     # 台账过滤
     import yaml
     mpath = ROOT / "state" / "manifest.yaml"
@@ -223,7 +221,7 @@ def list_docs(project: str = "", category: str = "", q: str = "",
     for token, e in (manifest.get("files") or {}).items():
         if e.get("status") == "deleted":
             continue
-        if scope and e.get("project") != scope:
+        if scopes and e.get("project") not in scopes:
             continue
         if category and e.get("category") != category:
             continue
@@ -238,6 +236,7 @@ def list_docs(project: str = "", category: str = "", q: str = "",
             "original": e.get("original"),
             "status": e.get("status"),
             "archived_at": e.get("archived_at"),
+            "detected_project": e.get("detected_project"),
         })
     return {"total": len(out), "items": out}
 
@@ -251,12 +250,15 @@ def get_doc(token: str, user=Depends(current_user)):
     if not e:
         raise HTTPException(404, "文档不存在")
     check_project(user, e.get("project"))
+    if e.get("status") == "deleted":
+        raise HTTPException(404, "文档已删除")
     content = ""
     if e.get("md") and (ROOT / e["md"]).is_file():
         content = (ROOT / e["md"]).read_text(encoding="utf-8")
     return {"token": token, "name": e.get("name"), "project": e.get("project"),
             "category": e.get("category"), "content": content,
-            "original": e.get("original")}
+            "original": e.get("original"),
+            "detected_project": e.get("detected_project")}
 
 
 @app.post("/api/docs")
@@ -304,6 +306,13 @@ def update_doc(token: str, body: dict, request: Request,
     if not md_rel or not (ROOT / md_rel).is_file():
         raise HTTPException(400, "该文档无 md，无法修改")
     (ROOT / md_rel).write_text(content, encoding="utf-8")
+    # BUG-04：改内容后触发索引重建（reconcile 检测 md 变化 → 更新 Cognee）
+    try:
+        subprocess.run(
+            ["python3", str(SCRIPTS / "reconcile.py"), "--pg-dsn", PG_DSN, "--no-notify"],
+            cwd=str(ROOT), capture_output=True, text=True, timeout=180)
+    except Exception:
+        pass   # 索引重建失败不阻断 PATCH（下轮 15min timer 兜底）
     audit(conn, user["id"], "update", e.get("project"), e.get("name"),
           {"md": md_rel}, request.client.host)
     return {"ok": True}
@@ -335,10 +344,17 @@ def search(q: str, project: str = "", user=Depends(current_user)):
     if project and project not in user["projects"]:
         raise HTTPException(403, f"无项目 {project} 权限")
     dataset = project or (user["projects"][0] if user["projects"] else "huadu")
-    proc = subprocess.run(
-        ["python3", str(SCRIPTS / "cognee.py"), "search", q, "--dataset", dataset],
-        cwd=str(ROOT), capture_output=True, text=True, timeout=300)
-    return {"ok": proc.returncode == 0, "output": proc.stdout[-4000:]}
+    import re
+    try:
+        proc = subprocess.run(
+            ["python3", str(SCRIPTS / "cognee.py"), "search", q, "--dataset", dataset],
+            cwd=str(ROOT), capture_output=True, text=True, timeout=90)
+        out = proc.stdout[-4000:]
+        out = re.sub(r"<[^>]+>", "", out)   # BUG-06：去 HTML 标签（docx 表格转出）
+        return {"ok": proc.returncode == 0, "output": out}
+    except subprocess.TimeoutExpired:
+        # BUG-05：检索超时按无结果返回，不拖死调用方
+        return {"ok": True, "output": "", "note": "检索超时，已按无结果返回"}
 
 
 @app.post("/api/generate")
