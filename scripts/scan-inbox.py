@@ -358,11 +358,13 @@ def classify(name: str, preview: str, llm: dict, projects: dict, categories: lis
     start, end = content.find("{"), content.rfind("}")
     if start < 0 or end < start:
         fallback["reason"] = "LLM 未返回 JSON"
+        log(f"  ! 分类降级：{fallback['reason']}（{content[:80]!r}）")
         return fallback
     try:
         result = json.loads(content[start:end + 1])
     except json.JSONDecodeError:
         fallback["reason"] = "JSON 解析失败"
+        log(f"  ! 分类降级：{fallback['reason']}（{content[:80]!r}）")
         return fallback
 
     label = str(result.get("project", "")).strip()
@@ -816,7 +818,7 @@ def main() -> int:
                 d = classify(rel, conv["text"], llm, projects, categories, args.verbose)
                 d["detected_project"] = d.get("project")   # 覆盖前记录内容识别结果
                 d["project"] = forced_project
-                d["reason"] = "forced"
+                d["reason"] = f"forced（内容判定：{d.get('reason') or '无'}）"
                 decision = d
                 log(f"  · 指定项目 {forced_project} / {decision['category']}"
                     f"（内容识别：{d.get('detected_project')}）")
@@ -829,9 +831,13 @@ def main() -> int:
                     log(f"  · 规则判定 {decision['project']} / {decision['category']}")
             if not decision:
                 decision = classify(rel, conv["text"], llm, projects, categories, args.verbose)
-            if decision["confidence"] < min_conf and decision["project"]:
+            if decision["confidence"] < min_conf and decision["project"] and not forced_project:
                 log(f"  ! 置信度 {decision['confidence']:.2f} < {min_conf}，转待确认")
                 decision["project"] = ""
+            elif forced_project and decision["confidence"] < min_conf:
+                # 显式指定项目时不因分类置信度否决项目归属：低置信度只影响 category
+                log(f"  ! 置信度 {decision['confidence']:.2f} < {min_conf}，"
+                    f"但已指定项目 {forced_project}，保留入库（类别 {decision['category']}）")
             if name_info is not None and not _np.usable(name_info):
                 # 连文件名都读不出日期也读不出单位 → 未分类，
                 # 交给每天 22:00 的审计汇总提醒人工处理（不再猜）

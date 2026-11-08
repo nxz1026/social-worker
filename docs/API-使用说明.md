@@ -22,8 +22,8 @@ POST /api/login  body: {"username","password"}
 | POST | `/api/docs` | editor/admin | 上传归档（multipart：`file`、可选 `project`） |
 | PATCH | `/api/docs/{token}` | editor/admin | 修改内容（JSON：`{"content": "..."}`） |
 | DELETE | `/api/docs/{token}` | editor/admin | 删除（trash 模式，可恢复） |
-| GET | `/api/search?q=&project=` | 登录 | 知识库检索 |
-| POST | `/api/generate` | 登录 | 文书生成（JSON：`{"type","context"}`） |
+| GET | `/api/search?q=&project=` | 登录 | 知识库检索；不带 project 检索全部授权项目 |
+| POST | `/api/generate` | 登录 | 文书生成（JSON：`{"type","context","project"?}`） |
 | GET | `/api/admin/users` | admin | 用户列表 |
 | POST | `/api/admin/users` | admin | 建号（`{"username","password","role","projects"}`） |
 | PATCH | `/api/admin/users/{id}` | admin | 改角色/项目/禁用 |
@@ -36,10 +36,29 @@ POST /api/login  body: {"username","password"}
 | 操作 | 耗时 | 说明 |
 |---|---|---|
 | 上传归档 | 30–70s | 同步返回（含分类入库）；`project` 未传则按文件名+内容自动判 |
-| 检索 | 10–90s | 超时返回 `{"ok":true,"output":"","note":"检索超时..."}` |
-| 文书生成 | 约 60s | 长 context 可能更久；超时返回 504 |
+| 检索 | 10–90s / 项目 | 不带 project 时按项目**串行**检索再合并，多项目耗时叠加；全部超时返回 `{"ok":true,"output":"","note":"检索超时..."}` |
+| 文书生成 | 2–6 分钟 | 先检索素材再调 LLM；超时（240s 无响应）返回 504 |
 | PATCH | 1–3 分钟 | 触发索引重建（同步阻塞） |
 | DELETE | 20–30s | trash 模式；删后详情 404 |
+
+**检索响应**：
+
+```json
+{"ok": true, "output": "### 文档名\n片段…", "datasets": ["huadu", "huimin"]}
+```
+
+`output` 是拼接后的纯文本，`###` 行是命中文档名；`datasets` 为本次实际检索的数据集。
+`ok=false` 表示检索脚本异常（非超时），可重试。
+
+**生成响应**：
+
+```json
+{"ok": true, "content": "……", "truncated": false, "finish_reason": "stop"}
+```
+
+- `truncated=true`（`finish_reason=length`）说明正文被模型输出上限截断，应缩短 context 或拆分文书后重试；
+- 素材检索固定取原文片段（CHUNKS），正文中引用素材会标注 `（来源：<文档名>）`；
+- `project` 省略时合并该账号全部授权项目作为素材，指定时只用该项目（无权限返回 403）。
 
 **幂等性**：
 - 重复上传同内容文件 → 同一 token（内容哈希）
@@ -52,21 +71,21 @@ POST /api/login  body: {"username","password"}
 |---|---|---|
 | 400 | 参数错误 | 检查 body/字段 |
 | 401 | 未登录 / token 过期 | 重新登录 |
-| 403 | 角色不足或跨项目 | 换账号或申请权限 |
+| 403 | 角色不足 / 跨项目 / 账号已禁用 | 换账号或申请权限 |
 | 404 | 文档不存在 / 已删除 | 视为已删除 |
 | 409 | 用户名已存在 | 换用户名 |
-| 500 | 服务端错误 | 重试或报告 |
+| 500 | 服务端错误（含 LLM 未返回正文） | 看 `detail` 后重试或报告 |
 | 504 | 生成超时 | 重试 |
 
 ## 调用示例（Python 标准库）
 
 ```python
-import json, urllib.request, ssl
+import json, urllib.request, urllib.error, ssl, urllib.parse
 
-BASE = "https://140.83.62.161/sw-api/api"
+BASE = "https://140.83.62.161/sw-api/api"      # 已含 /api，路径不要再带 /api 前缀
 ctx = ssl.create_default_context(); ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE
 
-def call(method, path, token=None, body=None, raw=None):
+def call(method, path, token=None, body=None, raw=None, timeout=300):
     url = BASE + path
     data = None
     headers = {}
@@ -78,23 +97,25 @@ def call(method, path, token=None, body=None, raw=None):
         headers["x-token"] = token
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(req, timeout=300, context=ctx) as r:
+        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as r:
             return r.status, json.loads(r.read().decode())
     except urllib.error.HTTPError as e:
         return e.code, json.loads(e.read().decode())
 
 # 登录
-st, d = call("POST", "/api/login", body={"username": "xxx", "password": "xxx"})
+st, d = call("POST", "/login", body={"username": "xxx", "password": "xxx"})
 token = d["token"]
 
-# 归档文件（multipart 用 curl 更省事）
-# 检索
-st, d = call("GET", "/api/search?q=共治行动&project=huadu", token=token)
-print(d["output"])
+# 检索（不带 project = 全部授权项目）
+q = urllib.parse.quote("民乐北巷 治理公约 协商议事")
+st, d = call("GET", f"/search?q={q}&project=huimin", token=token)
+print(d["datasets"], d["output"][:500])
 
-# 生成文书
-st, d = call("POST", "/api/generate", token=token,
-             body={"type": "活动方案", "context": "惠民社区为老服务活动"})
+# 生成文书（带 project 时素材只取该项目）
+st, d = call("POST", "/generate", token=token,
+             body={"type": "活动方案", "project": "huimin",
+                   "context": "惠民社区为老服务活动"})
+print(d["finish_reason"], d["truncated"])
 print(d["content"])
 ```
 
@@ -107,12 +128,14 @@ curl -sk -X POST "$BASE/docs" -H "x-token: $TOKEN" \
 ## 常见任务
 
 **归档一份文件**
-1. `POST /api/docs`（带 file + project）
-2. 返回 output 含"台账有记录"→ 成功；含"置信度不足"→ 落 `_待确认`（需人工）
+1. `POST /api/docs`（带 file + 显式 project）
+2. 判定成功：`GET /api/docs?project=<项目>&q=<文件名关键词>` 能查到该文档（`name` / `project` 正确）
+3. 带 project 时分类置信度低**不会**再落 `_待确认`，只影响 `category`；不带 project 且置信度不足才会转人工
 
 **检索并生成文书**
-1. `GET /api/search?q=<主题>&project=<项目>` 取素材
-2. `POST /api/generate` body `{type, context}` → content
+1. `GET /api/search?q=<主题>&project=<项目>` 取素材（看 `output` 里的 `###` 文档名判断命中）
+2. `POST /api/generate` body `{type, context, project}` → `content`
+3. 检查 `truncated`：为 `true` 时正文被截断，缩小 context 或拆成多份文书
 
 **删除文档**
 1. `DELETE /api/docs/{token}`
@@ -120,7 +143,8 @@ curl -sk -X POST "$BASE/docs" -H "x-token: $TOKEN" \
 
 ## 注意
 
-- 归档文件名起描述性名（日期+项目+内容关键词），便于检索
-- `project` 参数会被内容判定覆盖时以内容为准；如需强制，归档后检查 `detected_project`
-- 检索/生成失败时先看 `note` 字段（超时提示）
-- 服务端为单机部署，高并发下耗时上升；建议串行调用
+- 归档文件名起描述性名（日期+项目+内容关键词），便于检索与溯源
+- 显式 `project` 优先于内容判定，归档后可用详情里的 `detected_project` 对照内容识别结果
+- 检索/生成失败时先看 `note` 字段（超时提示）；`ok=false` 且无 `note` 才是真异常
+- 生成接口耗时长（2–6 分钟），客户端超时不要低于 360s
+- 服务端为单机部署，检索与生成都较吃资源；高并发下耗时上升，建议串行调用

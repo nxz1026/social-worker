@@ -50,8 +50,12 @@ TYPE_MAP = {
 }
 
 
-def llm_chat(prompt: str, max_tokens: int = 4000) -> str:
-    """调 longcat 生成文书。读 /srv/social-work/.env 的 LLM 配置。"""
+def llm_chat(prompt: str, max_tokens: int = 16000) -> tuple[str, str]:
+    """调 longcat 生成文书。读 /srv/social-work/.env 的 LLM 配置。
+
+    返回 (正文, finish_reason)。LongCat 是推理模型，reasoning 与正文共用
+    max_tokens，预算给小了正文会被截断，故默认放到 16000。
+    """
     import urllib.request
     env = {}
     for line in (ROOT / ".env").read_text(encoding="utf-8").splitlines():
@@ -81,7 +85,15 @@ def llm_chat(prompt: str, max_tokens: int = 4000) -> str:
         if isinstance(reason, TimeoutError) or "timed out" in str(exc).lower():
             raise TimeoutError(str(exc)) from exc
         raise
-    return data["choices"][0]["message"]["content"]
+    choice = (data.get("choices") or [{}])[0]
+    finish = choice.get("finish_reason") or ""
+    content = (choice.get("message") or {}).get("content")
+    if not isinstance(content, str) or not content.strip():
+        usage = data.get("usage") or {}
+        reasoning = (usage.get("completion_tokens_details") or {}).get("reasoning_tokens")
+        raise RuntimeError(
+            f"上游未返回正文（finish_reason={finish}, reasoning_tokens={reasoning}）")
+    return content, finish
 
 
 # ---------- DB ----------
@@ -339,22 +351,44 @@ def delete_doc(token: str, request: Request, user=Depends(require_write),
 
 
 # ---------- 检索 ----------
+def search_datasets(query: str, datasets: list[str],
+                    qtype: str | None = None) -> tuple[bool, str, bool]:
+    """按数据集逐个检索并合并。cognee 一次只认一个数据集名。
+
+    qtype 为空时沿用 cognee 的 auto（含日期会走 TEMPORAL，返回合成答案而非素材）；
+    生成文书要的是可引用的原文片段，因此固定传 CHUNKS。
+    返回 (ok, 合并文本, 是否全部超时)。
+    """
+    import re
+    oks, outs, timeouts = [], [], 0
+    for ds in datasets:
+        cmd = ["python3", str(SCRIPTS / "cognee.py"), "search", query, "--dataset", ds]
+        if qtype:
+            cmd += ["--type", qtype]
+        try:
+            proc = subprocess.run(cmd, cwd=str(ROOT), capture_output=True,
+                                  text=True, timeout=90)
+        except subprocess.TimeoutExpired:
+            timeouts += 1
+            continue
+        oks.append(proc.returncode == 0)
+        text = re.sub(r"<[^>]+>", "", proc.stdout[-4000:]).strip()
+        if text:
+            outs.append(text)
+    all_timeout = bool(datasets) and timeouts == len(datasets)
+    return (any(oks) if oks else True), "\n\n".join(outs), all_timeout
+
+
 @app.get("/api/search")
 def search(q: str, project: str = "", user=Depends(current_user)):
     if project and project not in user["projects"]:
         raise HTTPException(403, f"无项目 {project} 权限")
-    dataset = project or (user["projects"][0] if user["projects"] else "huadu")
-    import re
-    try:
-        proc = subprocess.run(
-            ["python3", str(SCRIPTS / "cognee.py"), "search", q, "--dataset", dataset],
-            cwd=str(ROOT), capture_output=True, text=True, timeout=90)
-        out = proc.stdout[-4000:]
-        out = re.sub(r"<[^>]+>", "", out)   # BUG-06：去 HTML 标签（docx 表格转出）
-        return {"ok": proc.returncode == 0, "output": out}
-    except subprocess.TimeoutExpired:
+    datasets = [project] if project else (user["projects"] or ["huadu"])
+    ok, out, all_timeout = search_datasets(q, datasets)
+    if all_timeout:
         # BUG-05：检索超时按无结果返回，不拖死调用方
         return {"ok": True, "output": "", "note": "检索超时，已按无结果返回"}
+    return {"ok": ok, "output": out, "datasets": datasets}
 
 
 @app.post("/api/generate")
@@ -370,18 +404,15 @@ def generate(body: dict, request: Request, user=Depends(current_user),
         raise HTTPException(500, f"模板缺失：{tpl_path}")
     template = tpl_path.read_text(encoding="utf-8")
 
-    # 检索素材（取用户第一个授权项目）
-    dataset = user["projects"][0] if user["projects"] else "huadu"
+    # 检索素材：显式 project 优先，否则合并全部授权项目
+    project = (body.get("project") or "").strip()
+    if project and project not in user["projects"]:
+        raise HTTPException(403, f"无项目 {project} 权限")
+    datasets = [project] if project else (user["projects"] or ["huadu"])
     search_out = ""
     if context:
-        try:
-            proc = subprocess.run(
-                ["python3", str(SCRIPTS / "cognee.py"), "search", context,
-                 "--dataset", dataset],
-                cwd=str(ROOT), capture_output=True, text=True, timeout=300)
-            search_out = proc.stdout[-3000:]
-        except Exception:
-            search_out = ""
+        _, search_out, _ = search_datasets(context, datasets, qtype="CHUNKS")
+        search_out = search_out[-3000:]
 
     prompt = f"""你是社工文书生成助手。根据以下模板和素材，生成一份{doc_type}。
 
@@ -404,7 +435,7 @@ def generate(body: dict, request: Request, user=Depends(current_user),
     import socket
     import traceback
     try:
-        content = llm_chat(prompt)
+        content, finish = llm_chat(prompt)
     except (TimeoutError, socket.timeout) as exc:
         traceback.print_exc()
         raise HTTPException(504, f"生成超时（LLM 未在限时内返回）：{exc}")
@@ -412,8 +443,11 @@ def generate(body: dict, request: Request, user=Depends(current_user),
         traceback.print_exc()
         raise HTTPException(500, f"生成失败：{exc}")
     audit(conn, user["id"], "generate", target=doc_type,
-          detail={"context": context[:200]}, ip=request.client.host)
-    return {"ok": True, "content": content}
+          detail={"context": context[:200], "project": project,
+                  "finish_reason": finish},
+          ip=request.client.host)
+    return {"ok": True, "content": content, "truncated": finish == "length",
+            "finish_reason": finish}
 
 
 # ---------- 用户管理（admin） ----------

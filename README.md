@@ -42,7 +42,10 @@ social-worker/
 │   ├── enabled-skills.yaml
 │   ├── templates/*.md             # 6 套文书模板
 │   └── review-checklists/*.yaml   # 6 份复核清单
+├── api/
+│   └── app.py                     # HTTP API：登录 / 文档增删改查 / 检索 / 生成 / 用户 / 审计
 ├── docs/
+│   ├── API-使用说明.md             # 对外 API 契约：端点、耗时、幂等、错误码、调用示例
 │   ├── 服务器部署.md               # 部署与运维（docker / syncthing / 踩坑）
 │   ├── 资料存放说明.md             # 飞书端 + 服务器端目录结构、数据流、FAQ
 │   └── 流程review.md              # 流程 review：哪些该用代码，哪些留给 LLM
@@ -121,6 +124,22 @@ python3 scripts/scan-inbox.py               # 真跑
 ```
 
 依赖：Docker、Python 3.11+、`pandoc`、`lark-cli`（飞书）。详见 [docs/服务器部署.md](docs/服务器部署.md)。
+
+## API 服务
+
+对外入口 `https://<host>/sw-api/api`（nginx 反代到本机 uvicorn，自签证书），调用方只需 HTTP + `x-token`，
+完整契约见 [docs/API-使用说明.md](docs/API-使用说明.md)。
+
+| 能力 | 端点 | 要点 |
+|---|---|---|
+| 认证 | `POST /api/login` | 返回 12 小时有效的 token；`401` 重新登录 |
+| 归档 | `POST /api/docs` | multipart（`file` + 可选 `project`）；同步完成分类入库，30–70s |
+| 台账 | `GET /api/docs?project=&category=&q=` | 不带 `project` 返回全部授权项目 |
+| 检索 | `GET /api/search?q=&project=` | 不带 `project` 时逐个项目检索后合并，响应带 `datasets` |
+| 生成 | `POST /api/generate` | `{type, context, project?}`；素材检索固定取原文片段（CHUNKS） |
+| 维护 | `PATCH` / `DELETE /api/docs/{token}` | 同步重建索引 / trash 可恢复，耗时较长 |
+
+调用方判断归档成功请以 `GET /api/docs?project=X` 能查到该 token 为准，不要只匹配上传输出文案。
 
 ## 目录与数据集对照
 
