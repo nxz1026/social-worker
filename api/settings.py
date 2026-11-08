@@ -34,7 +34,14 @@ DEFAULTS = {
     "auth": {"token_ttl_hours": 12},
     "db": {"dsn": ""},
     "projects": ["huadu", "huimin"],
-    "llm": {"max_tokens": 16000, "timeout_seconds": 240, "temperature": 0.3},
+    "llm": {
+        "endpoint": "",
+        "model": "",
+        "api_key": "",
+        "max_tokens": 16000,
+        "timeout_seconds": 240,
+        "temperature": 0.3,
+    },
     "search": {"timeout_seconds": 90, "snippet_chars": 4000, "material_chars": 3000},
     "tasks": {
         "archive_timeout_seconds": 600,

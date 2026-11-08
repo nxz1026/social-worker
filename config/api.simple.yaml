@@ -16,7 +16,8 @@
 #   SOCIALWORK_DB_DSN     覆盖 db.dsn
 #   PORT                  覆盖 server.port
 #
-# 凭证（LLM 的 endpoint / model / api_key）不在本文件，仍在服务端 .env。
+# LLM 的 endpoint / model / api_key 可以写在本文件（api.yaml 不进仓），
+# 也可以留空，回退到环境变量或服务端 .env。
 # ============================================================================
 
 server:
@@ -67,6 +68,21 @@ projects:
   - huimin
 
 llm:
+  # 上游 LLM 地址（OpenAI 兼容接口，会拼 /chat/completions）。
+  # 例：https://api.longcat.chat/openai/v1
+  # 留空则依次回退：环境变量 LLM_ENDPOINT → 服务端 .env 的 LLM_ENDPOINT。
+  endpoint: ""
+
+  # 模型名。例：LongCat-2.5
+  # 写成 openai/LongCat-2.5 这种带 provider 前缀的形式也可以，代码会自动截掉前缀。
+  # 留空则依次回退：环境变量 LLM_MODEL → .env 的 LLM_MODEL。
+  model: ""
+
+  # API Key，以 Bearer 方式发送。
+  # 本文件（api.yaml）已加入 .gitignore，可以填真实值；也可以留空改用
+  # 环境变量 LLM_API_KEY 或 .env。优先级：环境变量 > 本文件 > .env。
+  api_key: ""
+
   # 单次生成的输出上限（tokens，推理与正文共用）。默认 16000。
   # LongCat 是推理模型，实测 reasoning 会吃掉数千 tokens；给小了正文会被截断
   # （finish_reason=length，接口返回 truncated=true）。调小省成本但容易半篇；

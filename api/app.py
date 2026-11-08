@@ -49,8 +49,9 @@ TYPE_MAP = {
 
 
 def llm_chat(prompt: str, max_tokens: int | None = None) -> tuple[str, str]:
-    """调 longcat 生成文书。读 /srv/social-work/.env 的 LLM 配置。
+    """调上游 LLM 生成文书。
 
+    地址 / 模型 / key 的优先级：环境变量 > config/api.yaml 的 llm 段 > 服务端 .env。
     返回 (正文, finish_reason)。LongCat 是推理模型，reasoning 与正文共用
     max_tokens，预算给小了正文会被截断，默认值见 config/api.yaml。
     """
@@ -62,11 +63,15 @@ def llm_chat(prompt: str, max_tokens: int | None = None) -> tuple[str, str]:
         if line and not line.startswith("#") and "=" in line:
             k, v = line.split("=", 1)
             env[k.strip()] = v.strip().strip('"').strip("'")
-    endpoint = env.get("LLM_ENDPOINT", "")
-    key = env.get("LLM_API_KEY", "")
-    model = env.get("LLM_MODEL", "").split("/")[-1]
-    if not endpoint or not key:
-        raise RuntimeError("LLM 未配置")
+    endpoint = (os.environ.get("LLM_ENDPOINT")
+                or SETTINGS.llm.get("endpoint") or env.get("LLM_ENDPOINT", ""))
+    key = (os.environ.get("LLM_API_KEY")
+           or SETTINGS.llm.get("api_key") or env.get("LLM_API_KEY", ""))
+    model = (os.environ.get("LLM_MODEL")
+             or SETTINGS.llm.get("model") or env.get("LLM_MODEL", "")).split("/")[-1]
+    if not endpoint or not key or not model:
+        raise RuntimeError(
+            "LLM 未配置：在 config/api.yaml 的 llm 段或服务端 .env 填 endpoint / model / api_key")
     body = {"model": model,
             "messages": [{"role": "user", "content": prompt}],
             "temperature": float(SETTINGS.llm["temperature"]),

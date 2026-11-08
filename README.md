@@ -146,6 +146,7 @@ python3 scripts/scan-inbox.py               # 真跑
 服务自身参数（监听地址/端口、token 有效期、检索与生成超时、`max_tokens`）集中在 `config/api.yaml`，
 模板与逐项说明见 `config/api.simple.yaml`（复制后改值；`api.yaml` 属本地部署配置，不进仓），
 也可用 `SOCIALWORK_API_CONFIG` 指定别的文件；数据库连接串由环境变量 `SOCIALWORK_DB_DSN` 提供，不写进仓库。
+LLM 的 `endpoint` / `model` / `api_key` 同样可写在该文件的 `llm` 段，留空则回退环境变量或 `.env`。
 
 ## 目录与数据集对照
 
