@@ -156,7 +156,7 @@ def audit(conn, user_id, action, project=None, target=None, detail=None, ip=None
 
 # ---------- 依赖 ----------
 def current_user(request: Request, conn=Depends(db)):
-    token = request.headers.get("x-token") or request.query_params.get("token")
+    token = request.headers.get("x-token")   # 只走 header，避免 token 进 URL/日志
     if not token:
         raise HTTPException(401, "未登录")
     u = get_user(conn, token)
