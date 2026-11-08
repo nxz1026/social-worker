@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
@@ -31,6 +32,37 @@ import cognee as _cg
 TZ = timezone(timedelta(hours=8))
 MANIFEST_REL = "state/manifest.yaml"
 TRASH_DIRNAME = ".trash"
+
+
+# ---------- PG 审计 ----------
+def pg_connect(dsn: str | None = None):
+    """连接社工系统 PG（audit_log）。失败返回 None（审计不可用不阻断主流程）。"""
+    dsn = dsn or os.environ.get("SOCIALWORK_DB_DSN", "")
+    if not dsn:
+        return None
+    try:
+        import psycopg
+        return psycopg.connect(dsn)
+    except Exception as exc:
+        log(f"  ! PG 审计连接失败：{exc}")
+        return None
+
+
+def pg_audit(conn, action: str, project: str = None, target: str = None,
+             detail: dict | None = None):
+    """写 audit_log（user_id=NULL 表示系统操作）。"""
+    if conn is None:
+        return
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO audit_log(user_id, action, project, target, detail, ip)
+                   VALUES(NULL, %s, %s, %s, %s, 'reconcile')""",
+                (action, project, target,
+                 json.dumps(detail, ensure_ascii=False) if detail else None))
+        conn.commit()
+    except Exception as exc:
+        log(f"  ! PG 审计写入失败：{exc}")
 
 
 def log(msg):
@@ -137,12 +169,13 @@ def md_state(root, entry):
     return ("same" if cur == entry.get("md_sha256") else "changed"), cur
 
 
-def reconcile_dataset(root, pcfg, flow, manifest, project_key, key, dry_run):
+def reconcile_dataset(root, pcfg, flow, manifest, project_key, key, dry_run,
+                      pg_conn=None, purge=False):
     """对账一个项目，返回统计 dict（含 changes 列表）。"""
     dataset = pcfg["dataset"]
     vault = Path(root) / pcfg["vault"]
     stats = {"added": 0, "updated": 0, "deleted": 0, "restored": 0,
-             "feishu_deleted": 0, "errors": 0, "changes": []}
+             "feishu_deleted": 0, "purged": 0, "errors": 0, "changes": []}
 
     st = _cg.sync_dataset(vault / "md", dataset, key, dry_run=dry_run, log=log)
     stats["added"] += st.get("added", 0)
@@ -183,17 +216,34 @@ def reconcile_dataset(root, pcfg, flow, manifest, project_key, key, dry_run):
             stats["restored"] += 1
             stats["changes"].append(f"恢复 {name}")
             log(f"  · 恢复 {name}")
+            pg_audit(pg_conn, "restore", project_key, name,
+                     {"md": entry.get("md")})
             continue
 
         if state == "missing":
             if delete_feishu(entry, root, dry_run):
                 stats["feishu_deleted"] += 1
+            if purge:
+                # 连原件一起删（彻底删除，不可恢复）
+                orig = entry.get("original")
+                if orig and (Path(root) / orig).is_file():
+                    if not dry_run:
+                        try:
+                            (Path(root) / orig).unlink()
+                        except OSError as exc:
+                            log(f"  ! 原件删除失败 {orig}：{exc}")
+                            stats["errors"] += 1
+                            continue
+                    stats["purged"] += 1
             entry["status"] = "deleted"
             entry["deleted_at"] = now_iso()
-            entry["delete_mode"] = "auto"
+            entry["delete_mode"] = "purge" if purge else "auto"
             stats["deleted"] += 1
-            stats["changes"].append(f"删除 {name}")
-            log(f"  · 删除 {name}（md 已消失）")
+            stats["changes"].append(f"删除 {name}" + ("（含原件）" if purge else ""))
+            log(f"  · 删除 {name}（md 已消失" + ("，原件已删）" if purge else "）"))
+            pg_audit(pg_conn, "delete", project_key, name,
+                     {"md": entry.get("md"), "feishu_deleted": True,
+                      "purge": purge})
             continue
 
         if state == "changed":
@@ -203,6 +253,8 @@ def reconcile_dataset(root, pcfg, flow, manifest, project_key, key, dry_run):
             entry["md_sha256"] = cur
             stats["updated"] += 1
             stats["changes"].append(f"更新 {name}")
+            pg_audit(pg_conn, "update", project_key, name,
+                     {"md": entry.get("md")})
     return stats
 
 
@@ -213,6 +265,9 @@ def main():
                     help="只处理指定数据集（可多次）；默认全部")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--no-notify", action="store_true")
+    ap.add_argument("--pg-dsn", default=None, help="社工系统 PG DSN（写审计）")
+    ap.add_argument("--purge", action="store_true",
+                    help="删除时连原件（sources/）一起删，不可恢复")
     args = ap.parse_args()
 
     cfg = load_config(args.config)
@@ -225,15 +280,17 @@ def main():
     key = _cg.load_key()
     projects = flow.get("projects") or {}
     targets = set(args.dataset) or {p.get("dataset") for p in projects.values()}
+    pg_conn = pg_connect(args.pg_dsn)
 
     total = {"added": 0, "updated": 0, "deleted": 0, "restored": 0,
-             "feishu_deleted": 0, "errors": 0}
+             "feishu_deleted": 0, "purged": 0, "errors": 0}
     lines = []
     for project_key, pcfg in projects.items():
         if pcfg.get("dataset") not in targets:
             continue
         log(f"=== {project_key}（{pcfg.get('dataset')}）===")
-        st = reconcile_dataset(root, pcfg, flow, manifest, project_key, key, args.dry_run)
+        st = reconcile_dataset(root, pcfg, flow, manifest, project_key, key,
+                               args.dry_run, pg_conn, purge=args.purge)
         for k in total:
             total[k] += st.get(k, 0)
         if st["changes"]:
@@ -242,8 +299,11 @@ def main():
     # dry-run 只报计划，不落盘
     if not args.dry_run:
         save_manifest(root, manifest)
+    if pg_conn is not None:
+        pg_conn.close()
     log(f"\n完成：+{total['added']} ~{total['updated']} -{total['deleted']}"
         f" 恢复 {total['restored']} 飞书删除 {total['feishu_deleted']}"
+        + (f" 原件清除 {total['purged']}" if total["purged"] else "")
         + (f" 失败 {total['errors']}" if total["errors"] else ""))
     if lines and not args.no_notify and not args.dry_run:
         notify_send("社工知识库对账：\n" + "\n".join(lines), root)
