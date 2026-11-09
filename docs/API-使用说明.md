@@ -18,10 +18,24 @@ POST /api/login  body: {"username","password"}
 | POST | `/api/login` | — | 登录拿 token |
 | GET | `/api/me` | 登录 | 当前用户 + role + projects |
 | GET | `/api/docs?project=&category=&q=` | 登录 | 文档列表；不带 project 返回**全部授权项目** |
+| GET | `/api/docs/health` | 登录 | 列表用批量健康状态（原件/md/飞书/索引四态） |
 | GET | `/api/docs/{token}` | 登录 + 项目 | 详情（含 content）；已删除返回 404 |
+| GET | `/api/docs/{token}/status` | 登录 + 项目 | 五态详情（含 sha256 / md5 / 飞书链接 / 实体数） |
+| GET | `/api/docs/{token}/source` | 登录 + 项目 | 下载原件（二进制，逐次写审计） |
+| GET | `/api/docs/{token}/relations` | 登录 + 项目 | 实体分组 + 反链 + 共享实体 |
 | POST | `/api/docs` | editor/admin | 上传归档（multipart：`file`、可选 `project`） |
 | PATCH | `/api/docs/{token}` | editor/admin | 修改内容（JSON：`{"content": "..."}`） |
-| DELETE | `/api/docs/{token}` | editor/admin | 删除（trash 模式，可恢复） |
+| DELETE | `/api/docs/{token}` | **admin** | 删除（trash 模式，可恢复） |
+| POST | `/api/docs/{token}/feishu` | admin | 旧副本改名 → 上传新副本 → 旧副本进飞书回收站 |
+| DELETE | `/api/docs/{token}/feishu` | admin | 删除飞书副本（本地原件/md/索引不动） |
+| POST | `/api/docs/{token}/reindex` | admin | 按项目数据集重建索引（同步，可能几十秒） |
+| POST | `/api/meta/relink` | admin | 按当前 `entities.yaml` 给已有 md 补 `[[实体]]` 并重建索引（`{"project"?,"dry_run"?}`） |
+| GET | `/api/issues` | admin | 待确认 + 已归档残留 + 今日失败 + 错误队列 |
+| POST | `/api/pending/archive` | admin | 待确认文件重新归档（`{"path","project"?}`） |
+| POST | `/api/pending/delete` | admin | 丢弃待确认文件到 `sources/.trash` |
+| GET | `/api/trash` | admin | 回收站清单（md / 源文件） |
+| POST | `/api/trash/restore` | admin | 恢复原位并自动对账（`{"path"}`） |
+| POST | `/api/trash/purge` | admin | 彻底删除（不可恢复，`{"path"}`） |
 | GET | `/api/search?q=&project=` | 登录 | 知识库检索；不带 project 检索全部授权项目 |
 | POST | `/api/generate` | 登录 | 文书生成（JSON：`{"type","context","project"?}`） |
 | GET | `/api/admin/users` | admin | 用户列表 |
@@ -39,7 +53,12 @@ POST /api/login  body: {"username","password"}
 | 检索 | 10–90s / 项目 | 不带 project 时按项目**串行**检索再合并，多项目耗时叠加；全部超时返回 `{"ok":true,"output":"","note":"检索超时..."}` |
 | 文书生成 | 2–6 分钟 | 先检索素材再调 LLM；超时（240s 无响应）返回 504 |
 | PATCH | 1–3 分钟 | 触发索引重建（同步阻塞） |
-| DELETE | 20–30s | trash 模式；删后详情 404 |
+| DELETE | 20–30s | trash 模式；删后详情 404；**仅 admin** |
+| 下载原件 | <1s | 返回文件流，写一条 `download` 审计 |
+| 重建索引 | 20–60s | 按项目数据集同步跑 reconcile（幂等） |
+| 飞书重传 | 5–20s | 旧副本先改名（`.旧-时间戳`），新副本传成功后才删旧；返回 `old_trashed` |
+| 补实体链接 | 1–4 分钟 | 改 md 后要重建索引，耗时随文档数增长；`dry_run=true` 只看会改几篇 |
+| 待确认归档 | 30–70s | 同上传归档；成功后把兜底目录里那份移入回收站 |
 
 **检索响应**：
 
@@ -138,8 +157,14 @@ curl -sk -X POST "$BASE/docs" -H "x-token: $TOKEN" \
 3. 检查 `truncated`：为 `true` 时正文被截断，缩小 context 或拆成多份文书
 
 **删除文档**
-1. `DELETE /api/docs/{token}`
+1. `DELETE /api/docs/{token}`（仅 admin）
 2. 详情返回 404（已删）；彻底删除需本机 `reconcile --purge`
+
+**处理待确认文件**
+1. `GET /api/issues` → `pending[]` 每项带 `path`、`status`（`pending` / `stale`）、`suggested_project`
+2. 归档：`POST /api/pending/archive` body `{"path", "project"?}`；不传 `project` 就用推荐值
+3. 丢弃：`POST /api/pending/delete` body `{"path"}`（移到 `sources/.trash`，可恢复）
+4. `stale` 表示这份文件后来已归档成功（`reason` 里有归档位置），只需清理，不用再处理
 
 ## 注意
 

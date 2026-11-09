@@ -44,10 +44,16 @@ social-worker/
 │   ├── templates/*.md             # 6 套文书模板
 │   └── review-checklists/*.yaml   # 6 份复核清单
 ├── api/
-│   ├── app.py                     # HTTP API：登录 / 文档增删改查 / 检索 / 生成 / 用户 / 审计
+│   ├── app.py                     # HTTP API：登录 / 文档增删改查 / 状态 / 关系 / 待确认 / 回收站 / 检索 / 生成 / 用户 / 审计
+│   ├── status.py                  # 文档五态纯函数：原件 / md / 飞书 / 索引 / 关系（API 与测试共用）
 │   └── settings.py                # 读 config/api.yaml，环境变量优先
+├── web/                           # 管理界面（部署到 /srv/social-work/web，nginx `/sw/`）
+│   ├── index.html                 # 页面骨架
+│   ├── app.js                     # 列表 / 五 tab 详情 / 待确认 / 回收站 / hash 深链
+│   └── app.css                    # 样式
 ├── docs/
 │   ├── API-使用说明.md             # 对外 API 契约：端点、耗时、幂等、错误码、调用示例
+│   ├── 管理界面-实施记录.md         # `/sw/` 的决策、范围、改动文件、API 契约、验证与回滚
 │   ├── 服务器部署.md               # 部署与运维（docker / syncthing / 踩坑）
 │   ├── 资料存放说明.md             # 飞书端 + 服务器端目录结构、数据流、FAQ
 │   └── 流程review.md              # 流程 review：哪些该用代码，哪些留给 LLM
@@ -68,6 +74,9 @@ social-worker/
     ├── test_error_queue.py        # M4 错误队列
     ├── test_fallback.py           # M4 待兜底清单
     ├── test_archive.py            # M5 一条命令归档（端到端）
+    ├── test_api_status.py         # 文档五态推导 + 反链 + 实体缓存
+    ├── test_api_ops.py            # 管理界面写操作护栏：路径越界 / 回收站 / 项目建议 / 飞书重传顺序
+    ├── test_relink.py             # `convert-md.py --relink-only`：只加链接、幂等、跳过代码块
     └── test_search.py             # M7 检索参数自动选择
 ```
 
@@ -137,9 +146,18 @@ python3 scripts/scan-inbox.py               # 真跑
 | 认证 | `POST /api/login` | 返回 12 小时有效的 token；`401` 重新登录 |
 | 归档 | `POST /api/docs` | multipart（`file` + 可选 `project`）；同步完成分类入库，30–70s |
 | 台账 | `GET /api/docs?project=&category=&q=` | 不带 `project` 返回全部授权项目 |
+| 状态 | `GET /api/docs/health`、`GET /api/docs/{token}/status` | 列表批量四态 / 单篇五态（原件、md、飞书、索引、关系） |
+| 原件 | `GET /api/docs/{token}/source` | 按项目鉴权下载，逐次写审计 |
+| 关系 | `GET /api/docs/{token}/relations` | `[[实体]]` 分组 + 反链 + 共享实体 + 名册覆盖度 |
 | 检索 | `GET /api/search?q=&project=` | 不带 `project` 时逐个项目检索后合并，响应带 `datasets` |
 | 生成 | `POST /api/generate` | `{type, context, project?}`；素材检索固定取原文片段（CHUNKS） |
-| 维护 | `PATCH` / `DELETE /api/docs/{token}` | 同步重建索引 / trash 可恢复，耗时较长 |
+| 维护 | `PATCH /api/docs/{token}` | 改 md 内容并同步重建索引 |
+| 删除 | `DELETE /api/docs/{token}` | **仅 admin**；trash 可恢复，耗时较长 |
+| 飞书 | `POST/DELETE /api/docs/{token}/feishu` | admin；重传时旧副本先改名、新副本成功后再进飞书回收站 |
+| 索引 | `POST /api/docs/{token}/reindex` | admin；按项目数据集重建（幂等） |
+| 补链 | `POST /api/meta/relink` | admin；按 `entities.yaml` 给已有 md 补 `[[实体]]`，支持 `dry_run` |
+| 待确认 | `GET /api/issues`、`POST /api/pending/{archive,delete}` | admin；清单带推荐项目，归档/丢弃后移出兜底目录 |
+| 回收站 | `GET /api/trash`、`POST /api/trash/{restore,purge}` | admin；恢复会跑一次对账（飞书一并恢复） |
 
 调用方判断归档成功请以 `GET /api/docs?project=X` 能查到该 token 为准，不要只匹配上传输出文案。
 
@@ -147,6 +165,20 @@ python3 scripts/scan-inbox.py               # 真跑
 模板与逐项说明见 `config/api.simple.yaml`（复制后改值；`api.yaml` 属本地部署配置，不进仓），
 也可用 `SOCIALWORK_API_CONFIG` 指定别的文件；数据库连接串由环境变量 `SOCIALWORK_DB_DSN` 提供，不写进仓库。
 LLM 的 `endpoint` / `model` / `api_key` 同样可写在该文件的 `llm` 段，留空则回退环境变量或 `.env`。
+
+## 管理界面 `/sw/`
+
+`https://<host>/sw/`（nginx 静态页；`/sw-api/` 反代到本机 8001）。
+
+- **文档**：按项目 / 类别 / 健康状态筛选；详情有 概览 / 源文件 / 飞书 / 索引 / 关系 五个子页
+- **权限**：项目人员可在线改 md（保存后自动重建索引）；飞书重传、索引重建、删除、待确认处理仅 admin
+- **待确认**：列出 `_待确认` 里的原件（按 sha256 去重，已归档的标「残留」），按文件名/正文推荐项目，可归档或丢弃
+- **回收站**：md 与兜底文件统一列出；恢复会跑一次对账（飞书副本一并恢复）
+- **关系**：`[[实体]]` 分组 + 反链 + 共享实体；名册缺机构/人员/地点时提示补法，并可一键「重建实体链接」
+- **深链**：`#/docs?health=index_stale`、`#/pending`、`#/trash`、`#/doc/<token>/<tab>`；
+  portal 的告警按钮直接跳到对应位置（portal 只做收件箱，不提供写操作）
+
+实现与验收细节见 [docs/管理界面-实施记录.md](docs/管理界面-实施记录.md)。
 
 ## 目录与数据集对照
 
