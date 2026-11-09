@@ -56,10 +56,6 @@ social-worker/
 │   ├── 管理界面-实施记录.md         # `/sw/` 的决策、范围、改动文件、API 契约、验证与回滚
 │   ├── 服务器部署.md               # 部署与运维（docker / syncthing / 踩坑）
 │   ├── 资料存放说明.md             # 飞书端 + 服务器端目录结构、数据流、FAQ
-│   ├── 问答卡片-民乐北巷停车长效治理.md  # 三版回访卡：题目全文、印刷规格、现场发放与统计口径
-│   ├── KT板-民乐北巷停车长效治理.md     # 120×90cm 议事会讨论板：三栏议题、六条约定、便利贴区
-│   ├── 食品安全卡片-智慧菜市.md         # A6 食安小问答：6 题、答案、印刷与现场用法
-│   ├── print/                       # 送印文件：问答卡、KT 板、食安卡（PDF + 预览）
 │   └── 流程review.md              # 流程 review：哪些该用代码，哪些留给 LLM
 ├── docker-compose.yml             # cognee + syncthing
 ├── Dockerfile                     # 官方镜像 + 本地 OCR + Office loader + 模型预热
