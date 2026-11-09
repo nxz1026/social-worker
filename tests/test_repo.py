@@ -12,6 +12,8 @@ from __future__ import annotations
 import os
 import py_compile
 import re
+import shutil
+import subprocess
 import sys
 from contextlib import contextmanager
 from pathlib import Path
@@ -23,6 +25,7 @@ SCRIPTS = ["config.py", "convert-md.py", "scan-inbox.py", "cognee.py", "classify
           "image_policy.py", "audit_log.py", "audit.py", "notify.py",
           "retry.py", "error_queue.py", "fallback.py", "archive.py", "name_parse.py",
           "reconcile.py", "delete.py"]
+API_FILES = ["app.py", "status.py", "settings.py"]
 # 纯函数模块 / 只接收外部传入 root 的模块，不自己解析路径，不需要 load_config()
 PURE_MODULES = {"classify_rules.py", "image_policy.py", "audit_log.py",
                 "audit.py", "notify.py", "retry.py", "error_queue.py", "fallback.py",
@@ -68,6 +71,38 @@ def _env(**overrides):
 def test_scripts_compile():
     for name in SCRIPTS:
         py_compile.compile(str(ROOT / "scripts" / name), doraise=True)
+    for name in API_FILES:
+        py_compile.compile(str(ROOT / "api" / name), doraise=True)
+
+
+def test_web_assets_are_split_and_present():
+    """/sw/ 页面必须入仓，且 CSS/JS 外链（不再内联）。"""
+    html = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
+    assert '<link rel="stylesheet" href="app.css">' in html
+    assert '<script src="app.js" defer></script>' in html
+    assert "<style>" not in html
+    assert "<script>" not in html
+    assert (ROOT / "web" / "app.css").is_file()
+    assert (ROOT / "web" / "app.js").is_file()
+
+
+def test_web_js_syntax():
+    node = shutil.which("node")
+    if not node:
+        return
+    subprocess.run([node, "--check", str(ROOT / "web" / "app.js")], check=True)
+
+
+def test_web_ids_referenced_by_js_exist():
+    """静态 id 引用必须能在 HTML 里找到；渲染后动态插入的 id 豁免。"""
+    html = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
+    js = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+    ids = set(re.findall(r'id="([^"]+)"', html))
+    # 这些 id 由 renderSource / renderFeishu / renderIndex 生成后才存在
+    dynamic = {"btnDownload", "btnFeishuUp", "btnFeishuDel", "feishuMsg",
+               "btnReindex", "indexMsg", "btnRelink", "relinkMsg"}
+    refs = set(re.findall(r"\$\('([^']+)'\)", js)) - dynamic
+    assert not (refs - ids), f"JS 引用了不存在的 id：{sorted(refs - ids)}"
 
 
 def test_configs_parse():
@@ -162,6 +197,9 @@ def test_scripts_use_config():
 if __name__ == "__main__":
     for fn in (
         test_scripts_compile,
+        test_web_assets_are_split_and_present,
+        test_web_js_syntax,
+        test_web_ids_referenced_by_js_exist,
         test_configs_parse,
         test_skill_has_frontmatter,
         test_no_real_secrets_tracked,

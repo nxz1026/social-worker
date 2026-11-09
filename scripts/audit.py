@@ -68,14 +68,64 @@ def project_labels(root) -> dict:
             if isinstance(v, dict)}
 
 
-def summarize(records: list[dict], labels: dict | None = None) -> dict:
+def load_manifest_done_shas(root) -> set[str]:
+    """台账里已经归档成功的 sha256 集合。
+
+    用途：审计日志是**流水**，同一天可能先失败落 `_待确认`、后来又重新归档成功；
+    22:00 汇总如果只回放日志，就会把已经处理完的文件继续报成「待兜底」。
+    这里按 sha256 对照台账，把已完成的历史记录排除掉。
+    """
+    p = Path(root) / "state" / "manifest.yaml"
+    if not p.is_file():
+        return set()
+    try:
+        data = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return set()
+    files = data.get("files") if isinstance(data, dict) else None
+    if not isinstance(files, dict):
+        return set()
+    return {str(rec.get("sha256")) for rec in files.values()
+            if isinstance(rec, dict)
+            and rec.get("status") == "done"
+            and rec.get("sha256")}
+
+
+def summarize(records: list[dict], labels: dict | None = None,
+              done_shas: set[str] | None = None) -> dict:
     labels = labels or {}
+    done_shas = set(done_shas or ())
     docs = [r for r in records if r.get("action") not in IMAGE_ACTIONS]
     imgs = [r for r in records if r.get("action") in IMAGE_ACTIONS]
     ok_docs = [r for r in docs if r.get("status") == "done"]
-    failed = [r for r in records if r.get("status") in FAIL_STATUS
-              or (r.get("status") == "pending" and r.get("error"))]
-    pending_review = [r for r in records if r.get("status") == "pending_review"]
+
+    def _deleted_after(r: dict) -> bool:
+        """这条记录之后有没有同文件/同 sha 的删除记录（有 ⇒ 已处理，别再报）。"""
+        ts = str(r.get("ts") or "")
+        sha = str(r.get("sha256") or "")
+        f = str(r.get("file") or "")
+        for d in records:
+            if d.get("status") != "deleted":
+                continue
+            dts = str(d.get("ts") or "")
+            if ts and dts and dts <= ts:
+                continue
+            if sha and str(d.get("sha256") or "") == sha:
+                return True
+            if not sha and str(d.get("file") or "") == f:
+                return True
+        return False
+
+    def _already_done(r: dict) -> bool:
+        sha = str(r.get("sha256") or "")
+        return (bool(sha) and sha in done_shas) or _deleted_after(r)
+
+    failed_all = [r for r in records if r.get("status") in FAIL_STATUS
+                  or (r.get("status") == "pending" and r.get("error"))]
+    pending_all = [r for r in records if r.get("status") == "pending_review"]
+    failed = [r for r in failed_all if not _already_done(r)]
+    pending_review = [r for r in pending_all if not _already_done(r)]
+    stale = [r for r in failed_all + pending_all if _already_done(r)]
 
     converter = Counter(r.get("converter") or "?" for r in ok_docs)
     projects = Counter(labels.get(r.get("project") or "", r.get("project") or "待确认")
@@ -93,6 +143,7 @@ def summarize(records: list[dict], labels: dict | None = None) -> dict:
         "categories": dict(categories),
         "failed": failed,
         "pending_review": pending_review,
+        "stale": stale,
     }
 
 
@@ -126,6 +177,8 @@ def render(s: dict, date: str) -> str:
             lines.append(f"  [{hhmm(r.get('ts',''))}] {r.get('file','')} — {why}")
     if not s["failed"] and not s["pending_review"]:
         lines.append("无失败、无待兜底")
+    if s.get("stale"):
+        lines.append(f"（已排除 {len(s['stale'])} 条后来已归档/删除的历史记录）")
     return "\n".join(lines)
 
 
@@ -145,7 +198,7 @@ def main() -> int:
         return 2
 
     records = load_records(a.root, date)
-    s = summarize(records, project_labels(a.root))
+    s = summarize(records, project_labels(a.root), load_manifest_done_shas(a.root))
     if a.json:
         print(json.dumps(s, ensure_ascii=False, indent=2))
         return 0

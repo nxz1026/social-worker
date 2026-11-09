@@ -84,6 +84,32 @@ def test_summarize_pending_without_error_is_not_failed():
     assert s["failed"] == []
 
 
+def test_summarize_skips_records_already_done(tmp_path):
+    """审计日志是流水：先失败、后来重新归档成功的，22:00 汇总不该再报待兜底。"""
+    s = audit.summarize([
+        _rec(file="已补传.docx", status="pending_review", sha256="aaa",
+             project="", category="其他"),
+        _rec(file="真待处理.docx", status="pending_review", sha256="bbb",
+             project="", category="其他"),
+    ], done_shas={"aaa"})
+    assert [r["file"] for r in s["pending_review"]] == ["真待处理.docx"]
+    assert [r["file"] for r in s["stale"]] == ["已补传.docx"]
+
+
+def test_load_manifest_done_shas(tmp_path):
+    (tmp_path / "state").mkdir()
+    (tmp_path / "state" / "manifest.yaml").write_text(
+        "files:\n"
+        "  local-aaaaaaaaaaaaaaaa:\n"
+        "    status: done\n"
+        "    sha256: aaa\n"
+        "  local-bbbbbbbbbbbbbbbb:\n"
+        "    status: pending_review\n"
+        "    sha256: bbb\n",
+        encoding="utf-8")
+    assert audit.load_manifest_done_shas(tmp_path) == {"aaa"}
+
+
 # ---------- audit.render ----------
 
 def test_render_shape():
@@ -115,6 +141,16 @@ def test_render_uses_note_as_reason():
     ]), "2026-11-06")
     assert "待兜底 1" in text
     assert "乱七八糟.jpg — 文件名无日期/单位" in text
+
+
+def test_render_explains_excluded_history():
+    """把过期记录排除后要说一句，避免用户以为日报漏了东西。"""
+    text = audit.render(audit.summarize([
+        _rec(file="已补传.docx", status="pending_review", sha256="aaa",
+             project="", category="其他"),
+    ], done_shas={"aaa"}), "2026-11-06")
+    assert "无失败、无待兜底" in text
+    assert "已排除 1 条后来已归档/删除的历史记录" in text
 
 
 # ---------- notify ----------

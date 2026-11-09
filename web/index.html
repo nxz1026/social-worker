@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>社工文档系统</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header>
+  <h1>社工文档系统</h1>
+  <span class="me" id="me"></span>
+  <button class="ghost hidden" id="btnLogout">退出</button>
+</header>
+<main>
+  <!-- 登录 -->
+  <div class="card" id="loginCard">
+    <h2>登录</h2>
+    <div class="row">
+      <input id="loginUser" placeholder="用户名" style="width:180px">
+      <input id="loginPass" type="password" placeholder="密码" style="width:180px">
+      <button id="btnLogin">登录</button>
+    </div>
+    <div class="err" id="loginErr"></div>
+  </div>
+
+  <!-- 主界面 -->
+  <div class="hidden" id="mainArea">
+    <div class="tabs">
+      <button data-tab="docs" class="active">文档</button>
+      <button data-tab="issues" id="tabIssues" class="hidden">待确认</button>
+      <button data-tab="trash" id="tabTrash" class="hidden">回收站</button>
+      <button data-tab="upload">上传</button>
+      <button data-tab="search">检索</button>
+      <button data-tab="generate">文书生成</button>
+      <button data-tab="users" id="tabUsers" class="hidden">用户管理</button>
+      <button data-tab="audit" id="tabAudit" class="hidden">审计</button>
+    </div>
+
+    <!-- 文档列表 -->
+    <div class="card" id="tab-docs">
+      <div class="row">
+        <select id="fProject"><option value="">全部项目</option></select>
+        <select id="fCategory"><option value="">全部类别</option></select>
+        <select id="fHealth">
+          <option value="">全部状态</option>
+          <option value="source_missing">源文件缺失</option>
+          <option value="feishu_missing">飞书缺失</option>
+          <option value="index_stale">索引过期</option>
+          <option value="index_missing">未索引</option>
+        </select>
+        <input id="fQ" placeholder="文件名关键词" style="width:200px">
+        <button id="btnFilter" class="ghost">筛选</button>
+        <span class="muted" id="docCount"></span>
+        <span class="muted" id="healthSummary"></span>
+      </div>
+      <table>
+        <thead><tr><th>文件名</th><th>项目</th><th>类别</th><th>状态</th><th>归档时间</th><th></th></tr></thead>
+        <tbody id="docList"></tbody>
+      </table>
+    </div>
+
+    <!-- 文档详情 -->
+    <div class="card hidden" id="docDetail">
+      <div class="row">
+        <h2 id="docName" style="margin:0"></h2>
+        <span class="muted" id="docMeta"></span>
+        <span id="docBadges"></span>
+        <button id="btnEdit" class="ghost">编辑 md</button>
+        <button id="btnDelete" class="danger">删除</button>
+        <button id="btnBack" class="ghost">返回</button>
+      </div>
+      <div class="subtabs" id="docTabs">
+        <button data-dtab="overview" class="active">概览</button>
+        <button data-dtab="source">源文件</button>
+        <button data-dtab="feishu">飞书</button>
+        <button data-dtab="index">索引</button>
+        <button data-dtab="relations">关系</button>
+      </div>
+
+      <div id="dtab-overview">
+        <div id="docStatus" class="kv"></div>
+        <div id="docContent" class="docbody"></div>
+        <textarea id="docEditor" class="hidden"></textarea>
+        <div class="row hidden" id="editBar">
+          <button id="btnSave">保存</button>
+          <button id="btnCancel" class="ghost">取消</button>
+        </div>
+      </div>
+      <div id="dtab-source" class="hidden"></div>
+      <div id="dtab-feishu" class="hidden"></div>
+      <div id="dtab-index" class="hidden"></div>
+      <div id="dtab-relations" class="hidden"></div>
+    </div>
+
+    <!-- 待确认 / 失败 -->
+    <div class="card hidden" id="tab-issues">
+      <div class="row">
+        <span class="muted" id="issuesSummary">加载中…</span>
+        <button id="btnIssuesRefresh" class="ghost">刷新</button>
+      </div>
+      <h3>待确认文件</h3>
+      <table>
+        <thead><tr><th>文件名</th><th>位置</th><th>状态</th><th>原因</th><th>大小</th><th>处理</th></tr></thead>
+        <tbody id="issuePending"></tbody>
+      </table>
+      <h3 style="margin-top:20px">最近失败</h3>
+      <table>
+        <thead><tr><th>时间</th><th>文件</th><th>错误</th><th></th></tr></thead>
+        <tbody id="issueFailures"></tbody>
+      </table>
+      <h3 style="margin-top:20px">错误队列</h3>
+      <table>
+        <thead><tr><th>时间</th><th>文件</th><th>错误</th></tr></thead>
+        <tbody id="issueErrors"></tbody>
+      </table>
+    </div>
+
+    <!-- 回收站 -->
+    <div class="card hidden" id="tab-trash">
+      <div class="row">
+        <span class="muted" id="trashSummary">加载中…</span>
+        <button id="btnTrashRefresh" class="ghost">刷新</button>
+      </div>
+      <p class="muted">删除的 md / 丢弃的待确认文件都在这里；「恢复」会挪回原位并自动跑一次对账（飞书副本一并恢复）。</p>
+      <table>
+        <thead><tr><th>文件名</th><th>类型</th><th>删除时间</th><th>大小</th><th>位置</th><th>操作</th></tr></thead>
+        <tbody id="trashList"></tbody>
+      </table>
+    </div>
+
+    <!-- 上传 -->
+    <div class="card hidden" id="tab-upload">
+      <div class="row">
+        <input type="file" id="upFile">
+        <select id="upProject"></select>
+        <button id="btnUpload">上传归档</button>
+      </div>
+      <div id="upResult" class="muted"></div>
+    </div>
+
+    <!-- 检索 -->
+    <div class="card hidden" id="tab-search">
+      <div class="row">
+        <input id="searchQ" placeholder="检索词" style="width:300px">
+        <select id="searchProject"></select>
+        <button id="btnSearch">检索</button>
+      </div>
+      <div id="searchOut"></div>
+    </div>
+
+    <!-- 文书生成 -->
+    <div class="card hidden" id="tab-generate">
+      <div class="row">
+        <select id="genType">
+          <option value="个案记录">个案记录</option>
+          <option value="家访提纲">家访提纲</option>
+          <option value="服务计划">服务计划</option>
+          <option value="活动方案">活动方案</option>
+          <option value="项目申报">项目申报</option>
+          <option value="评估报告">评估报告</option>
+        </select>
+        <input id="genContext" placeholder="主题 / 关键词" style="width:320px">
+        <button id="btnGenerate">生成</button>
+      </div>
+      <div class="muted" id="genMsg"></div>
+      <div id="genOut" class="hidden"></div>
+    </div>
+
+    <!-- 用户管理 -->
+    <div class="card hidden" id="tab-users">
+      <h3>新建用户</h3>
+      <div class="row">
+        <input id="nuName" placeholder="用户名" style="width:140px">
+        <input id="nuPass" placeholder="密码" style="width:140px">
+        <select id="nuRole">
+          <option value="viewer">viewer（只读）</option>
+          <option value="editor">editor（读写）</option>
+          <option value="admin">admin（全部）</option>
+        </select>
+        <label><input type="checkbox" id="nuHuadu" value="huadu"> 花都</label>
+        <label><input type="checkbox" id="nuHuimin" value="huimin"> 惠民</label>
+        <button id="btnCreateUser">建号</button>
+      </div>
+      <div class="ok" id="nuMsg"></div>
+      <h3 style="margin-top:20px">用户列表</h3>
+      <table>
+        <thead><tr><th>ID</th><th>用户名</th><th>角色</th><th>项目</th><th>状态</th><th></th></tr></thead>
+        <tbody id="userList"></tbody>
+      </table>
+    </div>
+
+    <!-- 审计 -->
+    <div class="card hidden" id="tab-audit">
+      <table style="margin-top:12px">
+        <thead><tr><th>时间</th><th>用户</th><th>动作</th><th>项目</th><th>对象</th><th>IP</th></tr></thead>
+        <tbody id="auditList"></tbody>
+      </table>
+    </div>
+  </div>
+</main>
+
+<script src="app.js" defer></script>
+</body>
+</html>

@@ -348,6 +348,35 @@ def prune(cfg: dict) -> list[str]:
     return removed
 
 
+def relink(cfg: dict, dry_run: bool = False) -> tuple[int, int]:
+    """只对已有 md 重新插 `[[实体]]`，不重转、不覆盖正文。
+
+    名册（entities.yaml）补了人/机构/地点之后，已有 md 不会自动长出链接：
+    build_jobs 只挑源文件比 md 新的，名册变更不在它的判断里。
+    这里直接扫 vault 里的 md 做一次幂等补链（已有 [[...]] 会跳过）。
+    返回 (改写的篇数, 新增链接数)。
+    """
+    names = load_entities(cfg)
+    md_root: Path = cfg["vault"] / "md"
+    changed = links = 0
+    if not md_root.is_dir() or not names:
+        return 0, 0
+    for path in sorted(md_root.rglob("*.md")):
+        if "_待确认" in path.parts or ".trash" in path.parts:
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        new, n = insert_links(text, names)
+        if n and new != text:
+            if not dry_run:
+                path.write_text(new, encoding="utf-8")
+            changed += 1
+            links += n
+    return changed, links
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="原始文件 → vault 里的 markdown")
     ap.add_argument("--project", choices=[*PROJECTS, "all"], default="all")
@@ -357,6 +386,8 @@ def main() -> int:
     ap.add_argument("--no-links", action="store_true")
     ap.add_argument("--no-media", action="store_true")
     ap.add_argument("--prune", action="store_true")
+    ap.add_argument("--relink-only", action="store_true",
+                    help="不转换，只给已有 md 重新插 [[实体]]（名册变更后用）")
     ap.add_argument("--config", metavar="PATH", help="配置文件路径（默认 config/config.yaml）")
     args = ap.parse_args()
 
@@ -371,6 +402,14 @@ def main() -> int:
         items = list(PROJECTS.items())
     else:
         items = [(args.project, PROJECTS[args.project])]
+
+    if args.relink_only:
+        for project, cfg in items:
+            changed, links = relink(cfg, args.dry_run)
+            verb = "将改写" if args.dry_run else "改写"
+            print(f"{project}：{verb} {changed} 篇，新增链接 {links}")
+        return 0
+
     total_ok = total_fail = total_links = 0
     failures: list[str] = []
 
