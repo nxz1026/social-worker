@@ -2,7 +2,7 @@
 
 社工知识库：**原始文件存档 + 转 md 入 vault 与知识库**，Obsidian 浏览，DSH skill 生成文书。
 
-- 服务端：Cognee（向量 + 图谱，全本地模型，个案资料不出本机）
+- 服务端：Cognee（向量 + 图谱，本地部署）；**分类与文书生成会调用外部 LLM**（`LLM_ENDPOINT`），个案资料上传前必须先剔除敏感信息
 - 入口：飞书「未分类」→ 定时脚本自动分类、转 md、归档、建索引
 - 客户端：两个项目各自独立的 Obsidian vault，Syncthing 双向同步
 - DSH skill：检索知识库 + 按 6 类模板生成社工文书
@@ -143,8 +143,8 @@ python3 scripts/scan-inbox.py               # 真跑
 
 | 能力 | 端点 | 要点 |
 |---|---|---|
-| 认证 | `POST /api/login` | 返回 12 小时有效的 token；`401` 重新登录 |
-| 归档 | `POST /api/docs` | multipart（`file` + 可选 `project`）；同步完成分类入库，30–70s |
+| 认证 | `POST /api/login`、`POST /api/logout` | 返回 12 小时有效的 token；logout 立即删除服务端会话；`401` 重新登录 |
+| 归档 | `POST /api/docs` | multipart（`file` + 可选 `project`）；同步完成分类入库，30–70s；超限 `413`、超时 `504` |
 | 台账 | `GET /api/docs?project=&category=&q=` | 不带 `project` 返回全部授权项目 |
 | 状态 | `GET /api/docs/health`、`GET /api/docs/{token}/status` | 列表批量四态 / 单篇五态（原件、md、飞书、索引、关系） |
 | 原件 | `GET /api/docs/{token}/source` | 按项目鉴权下载，逐次写审计 |
@@ -156,10 +156,12 @@ python3 scripts/scan-inbox.py               # 真跑
 | 飞书 | `POST/DELETE /api/docs/{token}/feishu` | admin；重传时旧副本先改名、新副本成功后再进飞书回收站 |
 | 索引 | `POST /api/docs/{token}/reindex` | admin；按项目数据集重建（幂等） |
 | 补链 | `POST /api/meta/relink` | admin；按 `entities.yaml` 给已有 md 补 `[[实体]]`，支持 `dry_run` |
-| 待确认 | `GET /api/issues`、`POST /api/pending/{archive,delete}` | admin；清单带推荐项目，归档/丢弃后移出兜底目录 |
+| 待确认 | `GET /api/issues`、`POST /api/pending/{archive,delete}`、`POST /api/issues/resolve` | admin；清单带推荐项目，归档/丢弃后移出兜底目录；resolve 可 `requeue` 把文件放回 inbox 重跑 |
 | 回收站 | `GET /api/trash`、`POST /api/trash/{restore,purge}` | admin；恢复会跑一次对账（飞书一并恢复） |
+| 账号 | `GET /api/admin/users`、`PATCH /api/admin/users/{id}`、`DELETE /api/admin/users/{id}/sessions` | admin；改密会立刻失效该账号全部会话 |
 
-调用方判断归档成功请以 `GET /api/docs?project=X` 能查到该 token 为准，不要只匹配上传输出文案。
+调用方判断归档成功请以上传响应里的结构化回执（`ok` / `token` / `project`）为准；
+回执来自 `archive.py --json`，`ok=false` 时接口返回 `500`，不要再靠匹配输出文案。
 
 服务自身参数（监听地址/端口、token 有效期、检索与生成超时、`max_tokens`）集中在 `config/api.yaml`，
 模板与逐项说明见 `config/api.simple.yaml`（复制后改值；`api.yaml` 属本地部署配置，不进仓），
@@ -218,6 +220,7 @@ python3 scripts/delete.py <标识> --mode purge --yes          # 彻底删：md 
   只含文件名元数据的「档案条目」md（M10），进库的是这条条目，不是图片。
 - **禁止手工往飞书「已分类」写文件。** 那是 `scan-inbox.py` 的产物，手工放会绕过台账、md 生成与索引。
 - **含服务对象面部 / 证件的图片不要入库。**
+- **外部 LLM 数据流**：分类只发文件名 + 正文摘要，文书生成会发检索素材；两者都经 `LLM_ENDPOINT` 外发。当前控制手段是上传前人工脱敏，系统不做自动脱敏。
 - 文件权限 644、目录 755（Cognee 容器 uid=1000 要能读）。
 
 ## 安全

@@ -370,20 +370,27 @@ def sync_dataset(md_root, dataset, key, dry_run=False, log=None):
 
     # 先删旧条目：内容变了的旧版本 + 本地已无对应 md 的孤儿
     stale = list(to_delete) + [e for e, _, _ in to_update]
+    delete_failed = 0
     for e in stale:
-        _api(f"/api/v1/datasets/{ds_id}/data/{e['id']}", key, method="DELETE")
+        try:
+            _api(f"/api/v1/datasets/{ds_id}/data/{e['id']}", key, method="DELETE")
+        except Exception as exc:  # noqa: BLE001
+            delete_failed += 1
+            log(f"  ! 删除旧条目失败 {e.get('name')}: {exc}")
     log(f"清理旧条目 {len(stale)} 个")
 
     # 删完重取，得到数据集的真实剩余
     to_add, _, _ = plan_sync(_fetch_entries(ds_id, key), jobs)
 
     added = 0
+    failed: list[str] = []
     for m, _ in to_add:
         r = subprocess.run(["docker", "exec", "-e", f"COGNEE_API_KEY={key}", get_config().container,
                             CLI, "--api-url", API_URL, "add", to_container(str(m)),
                             "--dataset-name", dataset],
                            capture_output=True, text=True)
         if r.returncode != 0:
+            failed.append(m.name)
             log(f"  ! add 失败 {m.name}: {(r.stderr or r.stdout).strip()[:160]}")
         else:
             added += 1
@@ -392,8 +399,13 @@ def sync_dataset(md_root, dataset, key, dry_run=False, log=None):
     st["deleted"] = len(to_delete)
     st["updated"] = len(to_update)
     st["added"] = added
+    if delete_failed or failed:
+        st["error"] = (f"{delete_failed} 个旧条目删除失败、" if delete_failed else "") \
+            + (f"{len(failed)} 个条目入库失败" if failed else "")
     if stale or to_add:
         st["cognified"] = cognify(dataset, key, log=log)
+        if not st["cognified"] and not st.get("error"):
+            st["error"] = "cognify 失败"
     return st
 
 

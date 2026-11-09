@@ -17,11 +17,12 @@
 """
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import sys
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import yaml
 
@@ -49,6 +50,13 @@ def _load_audit():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _mask(file: str) -> str:
+    """清单标题用脱敏名：保留目录与扩展名，文件名换 hash。"""
+    p = PurePosixPath(str(file or "").replace("\\", "/"))
+    digest = hashlib.sha256(p.stem.encode("utf-8")).hexdigest()[:8]
+    return str(p.with_name(f"{digest}{p.suffix}")) if p.name else "?"
 
 
 def _locate(root, file, md_path=None):
@@ -86,6 +94,7 @@ def collect(root, date=None):
         }.get(status, status)
         items.append({
             "file": rec.get("file", "?"),
+            "display": rec.get("display") or _mask(rec.get("file", "?")),
             "problem": str(problem)[:200],
             "where": _locate(root, rec.get("file", "?"), rec.get("md_path")),
             "task": "判断该归哪个项目/类别（或确认是否该删）",
@@ -94,6 +103,7 @@ def collect(root, date=None):
     for err in list_open(root):
         items.append({
             "file": err.get("file", "?"),
+            "display": err.get("display") or _mask(err.get("file", "?")),
             "problem": err.get("error", "?"),
             "where": _locate(root, err.get("file", "?")),
             "task": "判断错误原因；能修的修，不能修的说明",

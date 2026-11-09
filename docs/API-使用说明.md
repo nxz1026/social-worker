@@ -1,6 +1,6 @@
 # 社工文档服务 API 使用说明（客户端 Agent 版）
 
-面向调用方 Agent / 程序。服务 `https://140.83.62.161/sw-api/api`，自签证书（客户端跳过校验）。所有响应为 JSON。
+面向调用方 Agent / 程序。服务地址由 `SOCIALWORK_API` 指定（形如 `https://<host>/sw-api/api`）。生产使用 HTTPS；自签证书请把 CA 装进客户端信任库（或设 `SSL_CERT_FILE`），**不要关闭证书校验**。所有响应为 JSON。
 
 ## 认证
 
@@ -16,6 +16,7 @@ POST /api/login  body: {"username","password"}
 | 方法 | 路径 | 权限 | 说明 |
 |---|---|---|---|
 | POST | `/api/login` | — | 登录拿 token |
+| POST | `/api/logout` | 登录 | 立刻删除当前会话（token 立即失效） |
 | GET | `/api/me` | 登录 | 当前用户 + role + projects |
 | GET | `/api/docs?project=&category=&q=` | 登录 | 文档列表；不带 project 返回**全部授权项目** |
 | GET | `/api/docs/health` | 登录 | 列表用批量健康状态（原件/md/飞书/索引四态） |
@@ -23,7 +24,7 @@ POST /api/login  body: {"username","password"}
 | GET | `/api/docs/{token}/status` | 登录 + 项目 | 五态详情（含 sha256 / md5 / 飞书链接 / 实体数） |
 | GET | `/api/docs/{token}/source` | 登录 + 项目 | 下载原件（二进制，逐次写审计） |
 | GET | `/api/docs/{token}/relations` | 登录 + 项目 | 实体分组 + 反链 + 共享实体 |
-| POST | `/api/docs` | editor/admin | 上传归档（multipart：`file`、可选 `project`） |
+| POST | `/api/docs` | editor/admin | 上传归档（multipart：`file`、可选 `project`）；超限 413、超时 504 |
 | PATCH | `/api/docs/{token}` | editor/admin | 修改内容（JSON：`{"content": "..."}`） |
 | DELETE | `/api/docs/{token}` | **admin** | 删除（trash 模式，可恢复） |
 | POST | `/api/docs/{token}/feishu` | admin | 旧副本改名 → 上传新副本 → 旧副本进飞书回收站 |
@@ -33,6 +34,7 @@ POST /api/login  body: {"username","password"}
 | GET | `/api/issues` | admin | 待确认 + 已归档残留 + 今日失败 + 错误队列 |
 | POST | `/api/pending/archive` | admin | 待确认文件重新归档（`{"path","project"?}`） |
 | POST | `/api/pending/delete` | admin | 丢弃待确认文件到 `sources/.trash` |
+| POST | `/api/issues/resolve` | admin | 关闭错误队列一条（`{"id"}` 或 `{"file"}`）；`requeue=true` 时把文件挪回 inbox 重跑 |
 | GET | `/api/trash` | admin | 回收站清单（md / 源文件） |
 | POST | `/api/trash/restore` | admin | 恢复原位并自动对账（`{"path"}`） |
 | POST | `/api/trash/purge` | admin | 彻底删除（不可恢复，`{"path"}`） |
@@ -40,8 +42,9 @@ POST /api/login  body: {"username","password"}
 | POST | `/api/generate` | 登录 | 文书生成（JSON：`{"type","context","project"?}`） |
 | GET | `/api/admin/users` | admin | 用户列表 |
 | POST | `/api/admin/users` | admin | 建号（`{"username","password","role","projects"}`） |
-| PATCH | `/api/admin/users/{id}` | admin | 改角色/项目/禁用 |
-| GET | `/api/admin/audit?limit=` | admin | 审计日志 |
+| PATCH | `/api/admin/users/{id}` | admin | 改角色/项目/禁用；改密后该账号全部会话立即失效 |
+| DELETE | `/api/admin/users/{id}/sessions` | admin | 踢掉该账号全部会话（不改密码） |
+| GET | `/api/admin/audit?limit=` | admin | 审计日志（`limit` 夹在 1–500） |
 
 **权限模型**：admin 全部项目；editor 授权项目可增删改查；viewer 授权项目只读。跨项目访问返回 403。
 
@@ -49,7 +52,7 @@ POST /api/login  body: {"username","password"}
 
 | 操作 | 耗时 | 说明 |
 |---|---|---|
-| 上传归档 | 30–70s | 同步返回（含分类入库）；`project` 未传则按文件名+内容自动判 |
+| 上传归档 | 30–70s | 同步返回结构化回执；有全部项目权限时 `project` 可省略（按文件名+内容判），否则必须显式指定（400）；超过 `upload.max_mb` 返回 413 |
 | 检索 | 10–90s / 项目 | 不带 project 时按项目**串行**检索再合并，多项目耗时叠加；全部超时返回 `{"ok":true,"output":"","note":"检索超时..."}` |
 | 文书生成 | 2–6 分钟 | 先检索素材再调 LLM；超时（240s 无响应）返回 504 |
 | PATCH | 1–3 分钟 | 触发索引重建（同步阻塞） |
@@ -99,10 +102,10 @@ POST /api/login  body: {"username","password"}
 ## 调用示例（Python 标准库）
 
 ```python
-import json, urllib.request, urllib.error, ssl, urllib.parse
+import json, os, urllib.request, urllib.error, ssl, urllib.parse
 
-BASE = "https://140.83.62.161/sw-api/api"      # 已含 /api，路径不要再带 /api 前缀
-ctx = ssl.create_default_context(); ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE
+BASE = os.environ.get("SOCIALWORK_API", "https://<host>/sw-api/api")  # 已含 /api，路径不要再带 /api 前缀
+ctx = ssl.create_default_context()   # 自签证书：把 CA 加入信任库，或设 SSL_CERT_FILE；不要关闭校验
 
 def call(method, path, token=None, body=None, raw=None, timeout=300):
     url = BASE + path
@@ -140,16 +143,19 @@ print(d["content"])
 
 **上传（curl）**：
 ```bash
-curl -sk -X POST "$BASE/docs" -H "x-token: $TOKEN" \
+# 自签证书：用 --cacert 指定 CA（或设 SSL_CERT_FILE），不要用 -k 关校验
+curl -sS --cacert "$CA_FILE" -X POST "$BASE/docs" -H "x-token: $TOKEN" \
   -F "file=@/path/文件.docx" -F "project=huimin"
 ```
+成功响应里带 `ok`、`token`、`project`、`md`、`lines`（归档校验结果）。
 
 ## 常见任务
 
 **归档一份文件**
 1. `POST /api/docs`（带 file + 显式 project）
-2. 判定成功：`GET /api/docs?project=<项目>&q=<文件名关键词>` 能查到该文档（`name` / `project` 正确）
-3. 带 project 时分类置信度低**不会**再落 `_待确认`，只影响 `category`；不带 project 且置信度不足才会转人工
+2. 判定成功：响应 `ok=true` 且带 `token` / `project`；`ok=false` 或非 2xx 都算失败，不要靠匹配输出文案
+3. 需要复核时再 `GET /api/docs?project=<项目>&q=<文件名关键词>` 对照 `name` / `project`
+4. 带 project 时分类置信度低**不会**再落 `_待确认`，只影响 `category`；不带 project 且置信度不足才会转人工
 
 **检索并生成文书**
 1. `GET /api/search?q=<主题>&project=<项目>` 取素材（看 `output` 里的 `###` 文档名判断命中）
@@ -166,9 +172,18 @@ curl -sk -X POST "$BASE/docs" -H "x-token: $TOKEN" \
 3. 丢弃：`POST /api/pending/delete` body `{"path"}`（移到 `sources/.trash`，可恢复）
 4. `stale` 表示这份文件后来已归档成功（`reason` 里有归档位置），只需清理，不用再处理
 
+**关闭错误队列**
+1. `GET /api/issues` → `error_queue[]` 每项带 `id`、`display`（脱敏文件名）、`error`
+2. 人工修好后：`POST /api/issues/resolve` body `{"id": "..."}`（或 `{"file": "..."}` 关该文件全部错误）
+3. 想让它自动重跑：加 `"requeue": true`，文件会被挪回 `inbox/`，下一轮扫描重新处理
+
+**退出登录**
+`POST /api/logout` 立即删除服务端会话；客户端同时清掉本地 token。只清本地不调这个接口时，token 在 12 小时内仍然有效。
+
 ## 注意
 
 - 归档文件名起描述性名（日期+项目+内容关键词），便于检索与溯源
+- 客户端脚本一律从环境变量 `SOCIALWORK_API` 取服务地址，不要把 IP/域名写进脚本；证书自签时用 `SSL_CERT_FILE` 或 `--cacert`，只有本机调试才临时设 `SOCIALWORK_INSECURE=1`（`skill/api.sh` 支持）
 - 显式 `project` 优先于内容判定，归档后可用详情里的 `detected_project` 对照内容识别结果
 - 检索/生成失败时先看 `note` 字段（超时提示）；`ok=false` 且无 `note` 才是真异常
 - 生成接口耗时长（2–6 分钟），客户端超时不要低于 360s

@@ -197,3 +197,19 @@ def test_reconcile_skips_pending(tmp_path, monkeypatch):
     assert st["deleted"] == 0 and st["updated"] == 0
     assert deleted == []
     assert manifest["files"]["tok1"]["status"] == "pending"
+
+
+def test_cognee_sync_error_does_not_touch_manifest(tmp_path, monkeypatch):
+    """Cognee 入库失败时不能更新 md_sha256，否则差异被永久掩盖。"""
+    p = _write_md(tmp_path, "vault-huadu/md/其他/doc/doc.md", "v2")
+    old = "deadbeef"
+    pcfg = {"dataset": "huadu", "vault": "vault-huadu"}
+    flow = {"projects": {}, "category_folders": {}}
+    manifest = {"files": {"tok1": _entry(md_sha256=old)}}
+    monkeypatch.setattr(rec._cg, "sync_dataset",
+                        lambda *a, **k: {"added": 0, "updated": 0, "deleted": 0,
+                                         "cognified": False, "error": "add 失败"})
+    st = rec.reconcile_dataset(tmp_path, pcfg, flow, manifest, "huadu", "key", False)
+    assert st["errors"] == 1
+    assert manifest["files"]["tok1"]["md_sha256"] == old
+    assert manifest["files"]["tok1"]["status"] == "done"

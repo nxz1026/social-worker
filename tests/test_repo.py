@@ -24,12 +24,12 @@ ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS = ["config.py", "convert-md.py", "scan-inbox.py", "cognee.py", "classify_rules.py",
           "image_policy.py", "audit_log.py", "audit.py", "notify.py",
           "retry.py", "error_queue.py", "fallback.py", "archive.py", "name_parse.py",
-          "reconcile.py", "delete.py"]
+          "reconcile.py", "delete.py", "manifest.py", "migrate_manifest_paths.py"]
 API_FILES = ["app.py", "status.py", "settings.py"]
 # 纯函数模块 / 只接收外部传入 root 的模块，不自己解析路径，不需要 load_config()
 PURE_MODULES = {"classify_rules.py", "image_policy.py", "audit_log.py",
                 "audit.py", "notify.py", "retry.py", "error_queue.py", "fallback.py",
-                "name_parse.py"}
+                "name_parse.py", "manifest.py", "migrate_manifest_paths.py"}
 
 sys.path.insert(0, str(ROOT / "scripts"))
 import config as sw_config  # noqa: E402
@@ -40,6 +40,21 @@ FEISHU_TOKEN = re.compile(r"\b[A-Za-z0-9]{27,28}\b")
 SECRET = re.compile(
     r"\b(ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]{10,})\b"
 )
+# 公网 IPv4（排除回环 / 私网 / 0.0.0.0；文档里应写 <host>）
+IPV4 = re.compile(
+    r"\b(?!0\.0\.0\.0\b)(?!127\.)(?!10\.)(?!192\.168\.)"
+    r"(?!172\.(?:1[6-9]|2\d|3[01])\.)(?:\d{1,3}\.){3}\d{1,3}\b"
+)
+# 账号/口令对：admin/tjfjyjr、账号：foo / bar（占位符 <...> 豁免）
+CRED_PAIR = re.compile(
+    r"(?:账号|账户|用户名|user(?:name)?)\s*[:：=]?\s*"
+    r"(?!<)[A-Za-z0-9_.-]{2,}\s*[/／]\s*(?!<)[^\s`'\"]{6,}"
+)
+# password: xxx / 密码：xxx（占位符 <...> 豁免）
+PASSWORD_LABEL = re.compile(
+    r"(?:password|passwd|pwd|密码|口令)\s*[:：=]\s*(?!<)[^\s`'\"]{6,}", re.I
+)
+DOC_SUFFIXES = {".md", ".sh", ".yaml", ".yml", ".example", ".txt"}
 SKIP_DIRS = {".git", "__pycache__", ".pytest_cache", "tests"}
 
 # 脚本里不该再出现写死的服务端根目录 / 容器名赋值（文档字符串里的说明文字不算）
@@ -124,18 +139,37 @@ def test_skill_has_frontmatter():
     assert head.startswith("---\n"), "SKILL.md 必须有 YAML frontmatter 才能被 DSH 注册"
 
 
+def _tracked_files() -> list[Path]:
+    """只扫将进仓的文件；.env / config/api.yaml 等运行时配置不在 git 里。"""
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(ROOT), "ls-files", "-z"],
+            capture_output=True, check=True).stdout
+        names = [x for x in out.decode("utf-8", "replace").split("\0") if x]
+        return [ROOT / name for name in names]
+    except Exception:
+        return [p for p in ROOT.rglob("*") if p.is_file()]
+
+
 def test_no_real_secrets_tracked():
-    """真实密钥不得出现在任何将进仓的文件里。"""
+    """真实密钥 / 生产 IP / 账号口令不得出现在任何将进仓的文件里。"""
     text_suffixes = {".md", ".yaml", ".yml", ".py", ".sh", ".example", ".txt", ""}
-    for path in sorted(ROOT.rglob("*")):
-        if not path.is_file() or any(p in SKIP_DIRS for p in path.parts):
+    for path in sorted(_tracked_files()):
+        if not path.is_file():
+            continue
+        rel = path.relative_to(ROOT)
+        if any(part in SKIP_DIRS for part in rel.parts):
             continue
         if path.suffix not in text_suffixes:
             continue
         text = path.read_text(encoding="utf-8", errors="replace")
-        assert not SECRET.search(text), f"{path.relative_to(ROOT)} 含疑似密钥"
+        assert not SECRET.search(text), f"{rel} 含疑似密钥"
+        assert not IPV4.search(text), f"{rel} 含疑似生产 IP（文档请用 <host>）"
+        if path.suffix in DOC_SUFFIXES:
+            assert not CRED_PAIR.search(text), f"{rel} 含疑似账号/口令对"
+            assert not PASSWORD_LABEL.search(text), f"{rel} 含疑似明文口令"
         if path.name.endswith(".example"):
-            assert not FEISHU_TOKEN.search(text), f"{path.relative_to(ROOT)} 含疑似真实 folder token"
+            assert not FEISHU_TOKEN.search(text), f"{rel} 含疑似真实 folder token"
 
 
 def test_gitignore_covers_runtime_data():

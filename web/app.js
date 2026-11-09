@@ -472,7 +472,7 @@ $('issuePending').onclick = async e => {
 async function loadUsers() {
   const d = await api('/admin/users');
   $('userList').innerHTML = d.items.map(u => `<tr>
-    <td>${u.id}</td><td>${esc(u.username)}</td><td>${u.role}</td>
+    <td>${u.id}</td><td>${esc(u.username)}</td><td>${esc(u.role)}</td>
     <td>${u.projects.join(',') || '（无）'}</td><td>${u.enabled ? '启用' : '禁用'}</td>
     <td><button class="ghost" data-uid="${u.id}" data-en="${u.enabled ? 0 : 1}">${u.enabled ? '禁用' : '启用'}</button></td>
     </tr>`).join('');
@@ -596,7 +596,10 @@ $('btnLogin').onclick = async () => {
     me = await api('/me'); showMain(); await route();
   } catch (e) { $('loginErr').textContent = e.message; }
 };
-$('btnLogout').onclick = () => { localStorage.removeItem('sw_token'); token = ''; me = null; location.reload(); };
+$('btnLogout').onclick = async () => {
+  try { await api('/logout', { method: 'POST' }); } catch (e) { /* 服务端会话可能已失效，本地照样清理 */ }
+  localStorage.removeItem('sw_token'); token = ''; me = null; location.reload();
+};
 $('btnFilter').onclick = () => { history.replaceState(null, '', '#/docs'); loadDocs(); };
 $('docList').onclick = async e => {
   const del = e.target.dataset.del;

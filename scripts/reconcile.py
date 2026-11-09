@@ -28,6 +28,7 @@ from config import load_config
 from notify import send as notify_send
 
 import cognee as _cg
+import manifest as _mf
 
 TZ = timezone(timedelta(hours=8))
 MANIFEST_REL = "state/manifest.yaml"
@@ -82,19 +83,28 @@ def sha256_of(path):
 
 
 def load_manifest(root):
-    p = Path(root) / MANIFEST_REL
-    data = yaml.safe_load(p.read_text(encoding="utf-8")) if p.is_file() else {}
-    if not isinstance(data, dict):
-        data = {}
-    data.setdefault("files", {})
-    return data
+    """读台账（严格模式：损坏时抛 ManifestCorrupt，不能当空台账继续）。"""
+    return _mf.load(Path(root) / MANIFEST_REL)
 
 
 def save_manifest(root, manifest):
-    p = Path(root) / MANIFEST_REL
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(yaml.safe_dump(manifest, allow_unicode=True, sort_keys=False),
-                 encoding="utf-8")
+    _mf.save(Path(root) / MANIFEST_REL, manifest)
+
+
+def _merge_manifest(fresh, working):
+    """把本轮改过的字段合并回最新台账，避免覆盖并发写入的新条目。"""
+    mutable = ("status", "md_sha256", "deleted_at", "delete_mode",
+               "restored_at", "feishu_token", "feishu_uploaded_at")
+    for token, entry in (working.get("files") or {}).items():
+        target = (fresh.get("files") or {}).get(token)
+        if not isinstance(target, dict) or not isinstance(entry, dict):
+            continue
+        for key in mutable:
+            if key in entry:
+                target[key] = entry[key]
+        for key in ("deleted_at", "delete_mode"):
+            if key not in entry:
+                target.pop(key, None)
 
 
 def lark(args, root, timeout=600):
@@ -109,10 +119,15 @@ def lark(args, root, timeout=600):
 
 
 def delete_feishu(entry, root, dry_run):
-    """删掉台账里记的飞书文档。返回是否删了（dry-run 下「会删」）。"""
+    """删掉台账里记的飞书文档。
+
+    返回 True = 已删 / 本来就没有副本（无副作用）；False = 删除失败。
+    调用方据此决定是否继续把台账标 deleted —— 删失败还标 deleted，
+    会让台账指向一个仍然存在的飞书副本，用户以为已经清理了。
+    """
     token = entry.get("feishu_token")
     if not token:
-        return False
+        return True
     if dry_run:
         log(f"  [dry-run] 删除飞书文档 {token}")
         return True
@@ -126,16 +141,25 @@ def delete_feishu(entry, root, dry_run):
 
 
 def restore_feishu(entry, root, flow, dry_run):
-    """md 恢复了 → 重新上传一份到飞书「已分类」，返回新 token（失败返回空串）。"""
+    """md 恢复了 → 重新上传一份到飞书「已分类」，返回新 token（失败返回空串）。
+
+    优先上传**改过的 md**（vault 是真相源）；md 不存在才退回原件。
+    以前上传 sources/ 原件，用户在 Obsidian 改过内容再删/恢复，飞书会回到旧版本。
+    """
     original = entry.get("original")
+    md_rel = entry.get("md")
     project = entry.get("project")
     category = entry.get("category")
-    if not (original and project and category):
+    if not ((original or md_rel) and project and category):
         return ""
-    src = Path(root) / original
+    src = Path(root) / (_mf.normalize_rel(md_rel) if md_rel else _mf.normalize_rel(original))
     if not src.is_file():
-        log(f"  ! 恢复失败：原件不存在 {original}")
-        return ""
+        # md 缺失时退回原件（至少别把飞书副本丢掉）
+        if md_rel and original:
+            src = Path(root) / _mf.normalize_rel(original)
+        if not src.is_file():
+            log(f"  ! 恢复失败：md/原件都不存在（{md_rel or original}）")
+            return ""
     label = (flow.get("projects", {}).get(project, {}) or {}).get("label", project)
     dest_folder = (flow.get("category_folders", {}).get(label, {}) or {}).get(category)
     if not dest_folder:
@@ -184,6 +208,9 @@ def reconcile_dataset(root, pcfg, flow, manifest, project_key, key, dry_run,
     if st.get("error"):
         log(f"  ! Cognee：{st['error']}")
         stats["errors"] += 1
+        # 索引没同步成功就不要再改台账/飞书：否则 md_sha256 被更新成新值，
+        # 下一轮会以为「已索引」，vault 与 Cognee 的差异被永久掩盖。
+        return stats
 
     for token, entry in list(manifest["files"].items()):
         if entry.get("project") != project_key:
@@ -221,7 +248,13 @@ def reconcile_dataset(root, pcfg, flow, manifest, project_key, key, dry_run,
             continue
 
         if state == "missing":
-            if delete_feishu(entry, root, dry_run):
+            had_feishu = bool(entry.get("feishu_token"))
+            if not delete_feishu(entry, root, dry_run):
+                # 飞书没删掉就不能标 deleted：台账会指向一个仍存在的副本
+                log(f"  ! {name} 飞书删除失败，保持原状态下轮重试")
+                stats["errors"] += 1
+                continue
+            if had_feishu:
                 stats["feishu_deleted"] += 1
             if purge:
                 # 连原件一起删（彻底删除，不可恢复）
@@ -275,7 +308,10 @@ def main():
     flow_path = root / "feishu-flow.yaml"
     flow = yaml.safe_load(flow_path.read_text(encoding="utf-8")) if flow_path.is_file() else {}
     flow = flow or {}
-    manifest = load_manifest(root)
+    try:
+        manifest = load_manifest(root)
+    except _mf.ManifestCorrupt as exc:
+        sys.exit(f"! {exc}")
 
     key = _cg.load_key()
     projects = flow.get("projects") or {}
@@ -296,9 +332,13 @@ def main():
         if st["changes"]:
             lines.append(f"{project_key}：" + "、".join(st["changes"]))
 
-    # dry-run 只报计划，不落盘
+    # dry-run 只报计划，不落盘；真跑也要先合并并发写入的新条目再落盘
     if not args.dry_run:
-        save_manifest(root, manifest)
+        path = Path(root) / MANIFEST_REL
+        with _mf.lock(path):
+            fresh = _mf.load(path)
+            _merge_manifest(fresh, manifest)
+            _mf.save(path, fresh)
     if pg_conn is not None:
         pg_conn.close()
     log(f"\n完成：+{total['added']} ~{total['updated']} -{total['deleted']}"

@@ -147,7 +147,14 @@ def summarize(records: list[dict], labels: dict | None = None,
     }
 
 
-def render(s: dict, date: str) -> str:
+def _label(rec: dict, mask: bool) -> str:
+    """飞书汇总用脱敏名；本机 stdout 保留原名便于定位。"""
+    if mask:
+        return str(rec.get("display") or rec.get("file") or "")
+    return str(rec.get("file") or "")
+
+
+def render(s: dict, date: str, mask: bool = False) -> str:
     lines = [f"=== {date} 审计 ===", f"收到 {s['total']} 个文件"]
     if s["docs"]:
         conv = " / ".join(f"{k} {v}" for k, v in sorted(s["converter"].items()))
@@ -167,14 +174,14 @@ def render(s: dict, date: str) -> str:
     if s["failed"]:
         lines.append(f"失败 {len(s['failed'])}")
         for r in s["failed"]:
-            lines.append(f"  [{hhmm(r.get('ts',''))}] {r.get('file','')} — "
+            lines.append(f"  [{hhmm(r.get('ts',''))}] {_label(r, mask)} — "
                          f"{r.get('error') or r.get('status','')}")
     if s["pending_review"]:
         lines.append(f"待兜底 {len(s['pending_review'])}")
         for r in s["pending_review"]:
             # note：M10 起手写/图片资料「文件名无日期/单位」也落这里，原因写在 note
             why = r.get("note") or f"项目无法判定，落 _待确认/{r.get('category','')}/"
-            lines.append(f"  [{hhmm(r.get('ts',''))}] {r.get('file','')} — {why}")
+            lines.append(f"  [{hhmm(r.get('ts',''))}] {_label(r, mask)} — {why}")
     if not s["failed"] and not s["pending_review"]:
         lines.append("无失败、无待兜底")
     if s.get("stale"):
@@ -211,7 +218,8 @@ def main() -> int:
         spec = importlib.util.spec_from_file_location("notify", SCRIPT_DIR / "notify.py")
         m = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(m)
-        ok = m.send(f"【社工知识库 {date}】\n{text}", a.root)
+        masked = render(s, date, mask=True)
+        ok = m.send(f"【社工知识库 {date}】\n{masked}", a.root)
         print("飞书：已发送" if ok else "飞书：发送失败（见上面日志）")
         return 0 if ok else 1
     return 0

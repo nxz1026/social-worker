@@ -141,6 +141,22 @@ def test_verify_no_manifest_entry(tmp_path):
     assert any("台账里没有" in ln for ln in lines)
 
 
+def test_verify_matches_renamed_image_by_digest(tmp_path):
+    """图片归档会改名（日期-单位-关键词），回执必须按 sha256 找到条目。"""
+    (tmp_path / "vault-huadu/md/日常工作佐证/x").mkdir(parents=True)
+    md = tmp_path / "vault-huadu/md/日常工作佐证/x/x.md"
+    md.write_text("# x", encoding="utf-8")
+    (tmp_path / "state").mkdir()
+    (tmp_path / "state/manifest.yaml").write_text(yaml.safe_dump(
+        {"files": {"t1": {"name": "2026-11-06-花都-活动.jpg",
+                          "sha256": "abc123", "project": "huadu",
+                          "category": "日常工作佐证",
+                          "md": "vault-huadu/md/日常工作佐证/x/x.md"}}}),
+        encoding="utf-8")
+    ok, lines, token, entry = ar.verify_result(tmp_path, "IMG_001.jpg", "abc123")
+    assert ok and token == "t1" and entry["project"] == "huadu"
+
+
 # ---------- 端到端：本地文件进 inbox/ 被处理 ----------
 
 def test_local_file_in_inbox_gets_archived(tmp_path, monkeypatch):

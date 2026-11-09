@@ -35,6 +35,10 @@ import status as status_mod
 
 ROOT = SETTINGS.root
 SCRIPTS = ROOT / "scripts"
+if str(SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS))
+import manifest as _mf  # noqa: E402
+import error_queue as _eq  # noqa: E402
 PG_DSN = SETTINGS.db_dsn
 TZ = timezone(timedelta(hours=SETTINGS.timezone_offset_hours))
 TOKEN_TTL_HOURS = SETTINGS.token_ttl_hours
@@ -169,13 +173,35 @@ def user_projects(conn, user_id: int, role: str) -> list[str]:
 
 
 # ---------- 审计 ----------
+# 审计明细里绝不能出现口令 / token / 个案正文；只保留排查需要的字段。
+_SENSITIVE_DETAIL_KEYS = {
+    "password", "passwd", "pwd", "token", "api_key", "apikey", "secret",
+    "context", "content",
+}
+
+
+def _safe_detail(detail):
+    """剔敏后的审计明细。口令/token/正文一律替换，不落库。"""
+    if not isinstance(detail, dict):
+        return detail
+    out = {}
+    for key, value in detail.items():
+        if str(key).lower() in _SENSITIVE_DETAIL_KEYS:
+            out[key] = "<redacted>"
+        elif isinstance(value, str) and len(value) > 300:
+            out[key] = value[:300] + "…"
+        else:
+            out[key] = value
+    return out
+
+
 def audit(conn, user_id, action, project=None, target=None, detail=None, ip=None):
     with conn.cursor() as cur:
         cur.execute(
             """INSERT INTO audit_log(user_id, action, project, target, detail, ip)
                VALUES(%s,%s,%s,%s,%s,%s)""",
             (user_id, action, project, target,
-             json.dumps(detail, ensure_ascii=False) if detail else None, ip),
+             json.dumps(_safe_detail(detail), ensure_ascii=False) if detail else None, ip),
         )
     conn.commit()
 
@@ -209,21 +235,50 @@ def check_project(user, project: str):
         raise HTTPException(403, f"无项目 {project} 权限")
 
 
+def scopes_of(user, project: str = "") -> list[str]:
+    """本次请求允许访问的项目集合。
+
+    零项目账号返回空列表 —— 绝不能兜底成 `["huadu"]` 或「不过滤」。
+    调用方必须把空列表当成「没有数据」，而不是「全部数据」。
+    """
+    if project:
+        if project not in user["projects"]:
+            raise HTTPException(403, f"无项目 {project} 权限")
+        return [project]
+    return list(user["projects"])
+
+
 # ---------- 台账 / Cognee / 状态辅助 ----------
 COGNEE_BASE = "http://127.0.0.1:8000"
 _COGNEE_CACHE: dict[str, tuple[float, list[dict] | None]] = {}
 _COGNEE_TTL = 15
 
 
+def _manifest_file() -> Path:
+    return ROOT / "state" / "manifest.yaml"
+
+
 def _load_manifest() -> dict:
-    p = ROOT / "state" / "manifest.yaml"
-    if not p.is_file():
-        return {}
     try:
-        data = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
-    except Exception:
-        return {}
-    return data if isinstance(data, dict) else {}
+        return _mf.load(_manifest_file())
+    except _mf.ManifestCorrupt as exc:
+        raise HTTPException(500, f"台账损坏，请先修复：{exc}")
+
+
+def _save_manifest(manifest: dict) -> None:
+    _mf.save(_manifest_file(), manifest)
+
+
+def _update_manifest(mutator):
+    """锁内读-改-写台账，避免与 scan-inbox / reconcile 互相覆盖。"""
+    try:
+        with _mf.lock(_manifest_file()):
+            data = _load_manifest()
+            out = mutator(data)
+            _save_manifest(data)
+            return out
+    except _mf.ManifestCorrupt as exc:
+        raise HTTPException(500, f"台账损坏，请先修复：{exc}")
 
 
 def _manifest_entry(token: str) -> dict | None:
@@ -495,22 +550,30 @@ def me(user=Depends(current_user)):
             "projects": user["projects"]}
 
 
+@app.post("/api/logout")
+def logout(request: Request, user=Depends(current_user), conn=Depends(db)):
+    """退出登录：服务端删 session，旧 token 立即失效（不是只清前端 localStorage）。"""
+    token = request.headers.get("x-token", "")
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM sessions WHERE token=%s", (token,))
+    conn.commit()
+    audit(conn, user["id"], "logout", ip=request.client.host)
+    return {"ok": True}
+
+
 # ---------- 文档 ----------
 @app.get("/api/docs")
 def list_docs(project: str = "", category: str = "", q: str = "",
               user=Depends(current_user)):
-    if project and project not in user["projects"]:
-        raise HTTPException(403, f"无项目 {project} 权限")
-    scopes = [project] if project else user["projects"]   # BUG-07：无 project 返回全部授权项目
-    # 台账过滤
-    import yaml
-    mpath = ROOT / "state" / "manifest.yaml"
-    manifest = yaml.safe_load(mpath.read_text(encoding="utf-8")) if mpath.is_file() else {}
+    scopes = scopes_of(user, project)
+    if not scopes:
+        return {"total": 0, "items": []}
+    manifest = _load_manifest()
     out = []
     for token, e in (manifest.get("files") or {}).items():
-        if e.get("status") == "deleted":
+        if not isinstance(e, dict) or e.get("status") == "deleted":
             continue
-        if scopes and e.get("project") not in scopes:
+        if e.get("project") not in scopes:
             continue
         if category and e.get("category") != category:
             continue
@@ -533,9 +596,9 @@ def list_docs(project: str = "", category: str = "", q: str = "",
 @app.get("/api/docs/health")
 def docs_health(project: str = "", user=Depends(current_user)):
     """列表用的批量健康状态（source/md/feishu/index），按项目取一次 Cognee。"""
-    if project and project not in user["projects"]:
-        raise HTTPException(403, f"无项目 {project} 权限")
-    scopes = [project] if project else user["projects"]
+    scopes = scopes_of(user, project)
+    if not scopes:
+        return {"total": 0, "items": {}}
     manifest = _load_manifest()
     url_tpl = _feishu_template()
     entries_by_ds: dict[str, list[dict] | None] = {}
@@ -566,9 +629,7 @@ def docs_health(project: str = "", user=Depends(current_user)):
 
 @app.get("/api/docs/{token}")
 def get_doc(token: str, user=Depends(current_user)):
-    import yaml
-    mpath = ROOT / "state" / "manifest.yaml"
-    manifest = yaml.safe_load(mpath.read_text(encoding="utf-8")) if mpath.is_file() else {}
+    manifest = _load_manifest()
     e = (manifest.get("files") or {}).get(token)
     if not e:
         raise HTTPException(404, "文档不存在")
@@ -576,8 +637,9 @@ def get_doc(token: str, user=Depends(current_user)):
     if e.get("status") == "deleted":
         raise HTTPException(404, "文档已删除")
     content = ""
-    if e.get("md") and (ROOT / e["md"]).is_file():
-        content = (ROOT / e["md"]).read_text(encoding="utf-8")
+    md_path = _mf.entry_path(ROOT, e)
+    if md_path and md_path.is_file():
+        content = md_path.read_text(encoding="utf-8")
     return {"token": token, "name": e.get("name"), "project": e.get("project"),
             "category": e.get("category"), "content": content,
             "original": e.get("original"),
@@ -606,7 +668,7 @@ def download_source(token: str, request: Request,
     if not e:
         raise HTTPException(404, "文档不存在")
     check_project(user, str(e.get("project") or ""))
-    rel = str(e.get("original") or "")
+    rel = _mf.normalize_rel(str(e.get("original") or ""))
     if not rel:
         raise HTTPException(404, "台账没有原件路径")
     path = (ROOT / rel).resolve()
@@ -622,6 +684,18 @@ def download_source(token: str, request: Request,
     return FileResponse(path, media_type=media, filename=e.get("name") or path.name)
 
 
+def _parse_archive_receipt(stdout: str) -> dict:
+    """archive.py --json 在最后一行输出 `__RESULT__ {json}`。"""
+    for line in reversed((stdout or "").splitlines()):
+        if line.startswith("__RESULT__ "):
+            try:
+                data = json.loads(line[len("__RESULT__ "):])
+                return data if isinstance(data, dict) else {}
+            except ValueError:
+                return {}
+    return {}
+
+
 @app.post("/api/docs")
 async def upload_doc(
     request: Request,
@@ -631,32 +705,62 @@ async def upload_doc(
     user=Depends(require_write),
     conn=Depends(db),
 ):
-    if project and project not in user["projects"]:
-        raise HTTPException(403, f"无项目 {project} 权限")
+    if project:
+        check_project(user, project)
+    elif set(user["projects"]) != set(ALL_PROJECTS):
+        # 自动判项目会把文件写进用户没权限的项目；没有全部项目权限时必须显式指定
+        raise HTTPException(400, "请指定项目（project）：当前账号没有全部项目权限，不能自动判定归属")
+
     filename = Path(file.filename or "upload.bin").name
+    max_mb = int(SETTINGS.upload.get("max_mb", 50))
+    max_bytes = max_mb * 1024 * 1024
     tmpdir = tempfile.mkdtemp()
     tmp_path = os.path.join(tmpdir, filename)
-    with open(tmp_path, "wb") as f:
-        f.write(await file.read())
-    cmd = ["python3", str(SCRIPTS / "archive.py"), "--file", tmp_path]
-    if project:
-        cmd += ["--project", project]
-    proc = subprocess.run(cmd, cwd=str(ROOT), capture_output=True, text=True,
-                          timeout=int(SETTINGS.tasks["archive_timeout_seconds"]))
-    shutil.rmtree(tmpdir, ignore_errors=True)
-    audit(conn, user["id"], "create", project, file.filename,
-          {"returncode": proc.returncode}, request.client.host)
-    if proc.returncode != 0:
-        raise HTTPException(500, f"归档失败：{proc.stdout[-300:]}")
-    return {"ok": True, "output": proc.stdout[-800:]}
+    size = 0
+    try:
+        with open(tmp_path, "wb") as f:
+            while True:
+                chunk = await file.read(1 << 20)
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > max_bytes:
+                    raise HTTPException(413, f"文件超过 {max_mb} MB 限制")
+                f.write(chunk)
+        if size == 0:
+            raise HTTPException(400, "空文件")
+
+        cmd = ["python3", str(SCRIPTS / "archive.py"), "--file", tmp_path, "--json"]
+        if project:
+            cmd += ["--project", project]
+        try:
+            proc = subprocess.run(cmd, cwd=str(ROOT), capture_output=True, text=True,
+                                  timeout=int(SETTINGS.tasks["archive_timeout_seconds"]))
+        except subprocess.TimeoutExpired:
+            raise HTTPException(504, "归档超时（后台可能仍在跑，稍后用台账查询）")
+
+        receipt = _parse_archive_receipt(proc.stdout)
+        audit(conn, user["id"], "create", project, receipt.get("token") or filename,
+              {"returncode": proc.returncode, "size": size,
+               "token": receipt.get("token"), "archived_project": receipt.get("project")},
+              request.client.host)
+        if proc.returncode != 0:
+            raise HTTPException(500, f"归档失败：{proc.stdout[-300:]}")
+        if not receipt.get("ok"):
+            raise HTTPException(500, f"归档结果未通过校验：{proc.stdout[-300:]}")
+
+        archived_project = str(receipt.get("project") or "")
+        if archived_project and archived_project not in user["projects"]:
+            raise HTTPException(403, f"归档到无权限项目 {archived_project}，请联系管理员处理")
+        return {"ok": True, **receipt, "output": proc.stdout[-800:]}
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 @app.patch("/api/docs/{token}")
 def update_doc(token: str, body: dict, request: Request,
                user=Depends(require_write), conn=Depends(db)):
-    import yaml
-    mpath = ROOT / "state" / "manifest.yaml"
-    manifest = yaml.safe_load(mpath.read_text(encoding="utf-8")) if mpath.is_file() else {}
+    manifest = _load_manifest()
     e = (manifest.get("files") or {}).get(token)
     if not e:
         raise HTTPException(404, "文档不存在")
@@ -664,37 +768,44 @@ def update_doc(token: str, body: dict, request: Request,
     content = body.get("content")
     if content is None:
         raise HTTPException(400, "缺 content")
-    md_rel = e.get("md")
-    if not md_rel or not (ROOT / md_rel).is_file():
+    md_path = _mf.entry_path(ROOT, e)
+    if not md_path or not md_path.is_file():
         raise HTTPException(400, "该文档无 md，无法修改")
-    (ROOT / md_rel).write_text(content, encoding="utf-8")
-    # BUG-04：改内容后触发索引重建（reconcile 检测 md 变化 → 更新 Cognee）
+    md_path.write_text(content, encoding="utf-8")
+    # 改内容后触发索引重建；失败不阻断保存，但要把结果告诉调用方（不再静默 pass）
+    reconcile_rc, reconcile_note = 0, ""
     try:
-        subprocess.run(
+        proc = subprocess.run(
             ["python3", str(SCRIPTS / "reconcile.py"), "--pg-dsn", PG_DSN, "--no-notify"],
             cwd=str(ROOT), capture_output=True, text=True,
             timeout=int(SETTINGS.tasks["reconcile_timeout_seconds"]))
-    except Exception:
-        pass   # 索引重建失败不阻断 PATCH（下轮 15min timer 兜底）
+        reconcile_rc = proc.returncode
+        if proc.returncode != 0:
+            reconcile_note = (proc.stdout or proc.stderr)[-300:]
+    except subprocess.TimeoutExpired:
+        reconcile_rc = 124
+        reconcile_note = "索引重建超时，15 分钟定时器会补"
     audit(conn, user["id"], "update", e.get("project"), e.get("name"),
-          {"md": md_rel}, request.client.host)
-    return {"ok": True}
+          {"md": e.get("md")}, request.client.host)
+    return {"ok": True, "reconcile": {"returncode": reconcile_rc,
+                                      "warning": reconcile_note}}
 
 
 @app.delete("/api/docs/{token}")
 def delete_doc(token: str, request: Request, user=Depends(require_admin),
                conn=Depends(db)):
-    import yaml
-    mpath = ROOT / "state" / "manifest.yaml"
-    manifest = yaml.safe_load(mpath.read_text(encoding="utf-8")) if mpath.is_file() else {}
+    manifest = _load_manifest()
     e = (manifest.get("files") or {}).get(token)
     if not e:
         raise HTTPException(404, "文档不存在")
     check_project(user, e.get("project"))
-    proc = subprocess.run(
-        ["python3", str(SCRIPTS / "delete.py"), token, "--mode", "trash", "--yes"],
-        cwd=str(ROOT), capture_output=True, text=True,
-        timeout=int(SETTINGS.tasks["delete_timeout_seconds"]))
+    try:
+        proc = subprocess.run(
+            ["python3", str(SCRIPTS / "delete.py"), token, "--mode", "trash", "--yes"],
+            cwd=str(ROOT), capture_output=True, text=True,
+            timeout=int(SETTINGS.tasks["delete_timeout_seconds"]))
+    except subprocess.TimeoutExpired:
+        raise HTTPException(504, "删除超时（后台可能仍在跑，请稍后查回收站）")
     audit(conn, user["id"], "delete", e.get("project"), e.get("name"),
           {"mode": "trash", "returncode": proc.returncode}, request.client.host)
     if proc.returncode != 0:
@@ -703,15 +814,6 @@ def delete_doc(token: str, request: Request, user=Depends(require_admin),
 
 
 # ---------- 文档操作：关系 / 飞书 / 索引 / 待确认 / 回收站 ----------
-def _save_manifest(manifest: dict) -> None:
-    """原子写台账：先写临时文件再 replace，避免写一半被读到（scan 每 15 分钟会读）。"""
-    p = ROOT / "state" / "manifest.yaml"
-    tmp = p.with_name(p.name + ".tmp")
-    tmp.write_text(yaml.safe_dump(manifest, allow_unicode=True, sort_keys=False),
-                   encoding="utf-8")
-    os.replace(tmp, p)
-
-
 def _flow() -> dict:
     p = ROOT / "feishu-flow.yaml"
     if not p.is_file():
@@ -779,7 +881,7 @@ def _trash_file(path: Path) -> str:
         dest = dest.with_name(f"{dest.stem}-{n}{dest.suffix}")
         n += 1
     shutil.move(str(path), str(dest))
-    return str(dest.relative_to(ROOT))
+    return dest.relative_to(ROOT).as_posix()
 
 
 def _run_reconcile(dataset: str, timeout: int) -> subprocess.CompletedProcess:
@@ -918,12 +1020,12 @@ def feishu_reupload(token: str, request: Request,
 
     # 先落台账再删旧：万一写台账失败，旧副本还只是改了名（链接仍可用），
     # 不会出现「旧副本已进回收站、台账还指着它」的坏状态。
-    manifest = _load_manifest()
-    rec = (manifest.get("files") or {}).get(token) or {}
-    rec["feishu_token"] = ft
-    rec["feishu_uploaded_at"] = datetime.now(TZ).isoformat(timespec="seconds")
-    manifest.setdefault("files", {})[token] = rec
-    _save_manifest(manifest)
+    def _set_new(data: dict) -> None:
+        rec = (data.get("files") or {}).setdefault(token, {})
+        rec["feishu_token"] = ft
+        rec["feishu_uploaded_at"] = datetime.now(TZ).isoformat(timespec="seconds")
+
+    _update_manifest(_set_new)
 
     old_trashed = False
     if old_ft:
@@ -955,12 +1057,14 @@ def feishu_delete(token: str, request: Request,
         raise HTTPException(400, "台账里没有飞书副本")
     _lark(["drive", "+delete", "--file-token", ft, "--type",
            str(e.get("feishu_type") or "file"), "--yes"])
-    manifest = _load_manifest()
-    rec = (manifest.get("files") or {}).get(token) or {}
-    rec.pop("feishu_token", None)
-    rec.pop("feishu_uploaded_at", None)
-    manifest.setdefault("files", {})[token] = rec
-    _save_manifest(manifest)
+
+    def _clear(data: dict) -> None:
+        rec = (data.get("files") or {}).get(token)
+        if isinstance(rec, dict):
+            rec.pop("feishu_token", None)
+            rec.pop("feishu_uploaded_at", None)
+
+    _update_manifest(_clear)
     audit(conn, user["id"], "feishu_delete", project, e.get("name"),
           {"file_token": ft}, request.client.host)
     return {"ok": True}
@@ -1053,7 +1157,7 @@ def list_trash(user=Depends(require_admin)):
                     mtime = datetime.fromtimestamp(full.stat().st_mtime, TZ)
                 except OSError:
                     continue
-                rel = str(full.relative_to(ROOT))
+                rel = full.relative_to(ROOT).as_posix()
                 parts = Path(rel).parts
                 out.append({
                     "path": rel,
@@ -1082,7 +1186,11 @@ def _restore_dest_parts(parts: tuple[str, ...]) -> tuple[str, tuple[str, ...]] |
 @app.post("/api/trash/restore")
 def trash_restore(body: dict, request: Request,
                   user=Depends(require_admin), conn=Depends(db)):
-    """恢复：把 .trash/<日期>/ 里的文件挪回原位，再跑一次对账（飞书一并恢复）。"""
+    """恢复：把 .trash/<日期>/ 里的文件挪回原位，再跑一次对账（飞书一并恢复）。
+
+    返回真实结果：vault md 恢复后看 reconcile 退出码；sources 原件恢复后
+    把对应台账条目标成 pending，让下一轮 scan 重新归档。
+    """
     rel = str(body.get("path") or "").strip()
     src = (ROOT / rel).resolve()
     try:
@@ -1099,18 +1207,43 @@ def trash_restore(body: dict, request: Request,
         raise HTTPException(400, f"不认识的回收站位置：{top}")
     dest = ROOT.joinpath(top, *rest)
     if dest.exists():
-        raise HTTPException(409, f"原位置已有同名文件：{dest.relative_to(ROOT)}")
+        raise HTTPException(409, f"原位置已有同名文件：{dest.relative_to(ROOT).as_posix()}")
     dest.parent.mkdir(parents=True, exist_ok=True)
     shutil.move(str(src), str(dest))
-    project = top.replace("vault-", "") if top.startswith("vault-") else ""
-    out = ""
-    if project in ALL_PROJECTS:
-        proc = _run_reconcile(_dataset_for(project),
-                              int(SETTINGS.tasks["reconcile_timeout_seconds"]))
-        out = (proc.stdout or "")[-600:]
-    audit(conn, user["id"], "restore", project or None, src.name,
-          {"to": str(dest.relative_to(ROOT))}, request.client.host)
-    return {"ok": True, "restored_to": str(dest.relative_to(ROOT)), "output": out}
+    restored_to = dest.relative_to(ROOT).as_posix()
+
+    reconcile = None
+    status = "restored"
+    if top.startswith("vault-"):
+        project = top.replace("vault-", "")
+        if project in ALL_PROJECTS:
+            proc = _run_reconcile(_dataset_for(project),
+                                  int(SETTINGS.tasks["reconcile_timeout_seconds"]))
+            reconcile = {"returncode": proc.returncode,
+                         "output": (proc.stdout or "")[-600:]}
+            if proc.returncode != 0:
+                raise HTTPException(
+                    500, "文件已恢复，但索引/飞书对账失败："
+                         + (proc.stdout or proc.stderr or "")[-300:])
+    elif top == "sources":
+        def _mark_pending(data: dict) -> str:
+            for tok, rec in (data.get("files") or {}).items():
+                if not isinstance(rec, dict):
+                    continue
+                if _mf.normalize_rel(str(rec.get("original") or "")) == restored_to:
+                    rec["status"] = "pending"
+                    for key in ("deleted_at", "delete_mode", "error"):
+                        rec.pop(key, None)
+                    return tok
+            return ""
+
+        token = _update_manifest(_mark_pending)
+        status = "pending" if token else "orphan"
+
+    audit(conn, user["id"], "restore", top.replace("vault-", "") or None, src.name,
+          {"to": restored_to, "status": status}, request.client.host)
+    return {"ok": True, "restored_to": restored_to, "status": status,
+            "reconcile": reconcile, "output": (reconcile or {}).get("output", "")}
 
 
 @app.post("/api/trash/purge")
@@ -1142,9 +1275,11 @@ def search_datasets(query: str, datasets: list[str],
     import re
     oks, outs, timeouts = [], [], 0
     for ds in datasets:
-        cmd = ["python3", str(SCRIPTS / "cognee.py"), "search", query, "--dataset", ds]
+        # 选项在前、`--` 后再放 query：避免以 `-` 开头的检索词被 argparse 当成参数
+        cmd = ["python3", str(SCRIPTS / "cognee.py"), "search", "--dataset", ds]
         if qtype:
             cmd += ["--type", qtype]
+        cmd += ["--", query]
         try:
             proc = subprocess.run(cmd, cwd=str(ROOT), capture_output=True,
                                   text=True,
@@ -1162,9 +1297,9 @@ def search_datasets(query: str, datasets: list[str],
 
 @app.get("/api/search")
 def search(q: str, project: str = "", user=Depends(current_user)):
-    if project and project not in user["projects"]:
-        raise HTTPException(403, f"无项目 {project} 权限")
-    datasets = [project] if project else (user["projects"] or ["huadu"])
+    datasets = scopes_of(user, project)
+    if not datasets:
+        raise HTTPException(403, "当前账号没有可检索的项目")
     ok, out, all_timeout = search_datasets(q, datasets)
     if all_timeout:
         # BUG-05：检索超时按无结果返回，不拖死调用方
@@ -1185,11 +1320,11 @@ def generate(body: dict, request: Request, user=Depends(current_user),
         raise HTTPException(500, f"模板缺失：{tpl_path}")
     template = tpl_path.read_text(encoding="utf-8")
 
-    # 检索素材：显式 project 优先，否则合并全部授权项目
+    # 检索素材：显式 project 优先，否则合并全部授权项目；零项目直接拒绝
     project = (body.get("project") or "").strip()
-    if project and project not in user["projects"]:
-        raise HTTPException(403, f"无项目 {project} 权限")
-    datasets = [project] if project else (user["projects"] or ["huadu"])
+    datasets = scopes_of(user, project)
+    if not datasets:
+        raise HTTPException(403, "当前账号没有可用的项目")
     search_out = ""
     if context:
         _, search_out, _ = search_datasets(context, datasets, qtype="CHUNKS")
@@ -1249,6 +1384,39 @@ def list_issues(user=Depends(require_admin)):
     }
 
 
+@app.post("/api/issues/resolve")
+def resolve_issue(body: dict, request: Request,
+                  user=Depends(require_admin), conn=Depends(db)):
+    """关闭一条错误队列；可选 requeue=true 把文件挪回 inbox 让下一轮重跑。"""
+    eid = str(body.get("id") or "").strip()
+    file = str(body.get("file") or "").strip()
+    if not eid and not file:
+        raise HTTPException(400, "需要 id 或 file")
+    entry = _eq.find_open(ROOT, eid=eid or None, file=file or None)
+    if not entry:
+        raise HTTPException(404, "错误队列里没有这一条")
+    resolved = _eq.resolve(ROOT, entry["id"]) if entry.get("id") else False
+    if not resolved and file:
+        resolved = _eq.close_by_file(ROOT, file) > 0
+
+    requeued = ""
+    if resolved and body.get("requeue"):
+        rel = str(entry.get("file") or "")
+        src = ROOT / rel
+        if src.is_file():
+            dest = ROOT / "inbox" / src.name
+            n = 1
+            while dest.exists():
+                dest = ROOT / "inbox" / f"{src.stem}-{n}{src.suffix}"
+                n += 1
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(src), str(dest))
+            requeued = dest.relative_to(ROOT).as_posix()
+    audit(conn, user["id"], "resolve_issue", None, entry.get("display") or entry.get("file"),
+          {"resolved": resolved, "requeued": requeued}, request.client.host)
+    return {"ok": True, "resolved": resolved, "requeued": requeued}
+
+
 @app.get("/api/admin/users")
 def admin_users(conn=Depends(db), user=Depends(require_admin)):
     with conn.cursor() as cur:
@@ -1264,17 +1432,35 @@ def admin_users(conn=Depends(db), user=Depends(require_admin)):
     return {"items": out}
 
 
+def _valid_role(role: str) -> str:
+    if role not in ("admin", "editor", "viewer"):
+        raise HTTPException(400, "角色非法")
+    return role
+
+
+def _as_bool(value) -> bool:
+    """严格布尔解析：字符串 "false" 不能当 True。"""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    raise HTTPException(400, "enabled 必须是布尔值")
+
+
 @app.post("/api/admin/users")
 def admin_create_user(body: dict, request: Request, conn=Depends(db),
                       user=Depends(require_admin)):
     username = (body.get("username") or "").strip()
     password = body.get("password") or ""
-    role = body.get("role") or "viewer"
+    role = _valid_role(body.get("role") or "viewer")
     projects = body.get("projects") or []
     if not username or not password:
         raise HTTPException(400, "用户名或密码为空")
-    if role not in ("admin", "editor", "viewer"):
-        raise HTTPException(400, "角色非法")
     with conn.cursor() as cur:
         cur.execute("SELECT id FROM users WHERE username = %s", (username,))
         if cur.fetchone():
@@ -1302,13 +1488,16 @@ def admin_update_user(uid: int, body: dict, request: Request, conn=Depends(db),
         if not cur.fetchone():
             raise HTTPException(404, "用户不存在")
         if "role" in body:
-            cur.execute("UPDATE users SET role=%s WHERE id=%s", (body["role"], uid))
+            cur.execute("UPDATE users SET role=%s WHERE id=%s",
+                        (_valid_role(body["role"]), uid))
         if "enabled" in body:
             cur.execute("UPDATE users SET enabled=%s WHERE id=%s",
-                        (bool(body["enabled"]), uid))
+                        (_as_bool(body["enabled"]), uid))
         if "password" in body and body["password"]:
             cur.execute("UPDATE users SET password_hash=%s WHERE id=%s",
                         (hash_pw(body["password"]), uid))
+            # 改密后旧 token 必须立即失效，否则泄漏的会话还能用满 12 小时
+            cur.execute("DELETE FROM sessions WHERE user_id=%s", (uid,))
         if "projects" in body:
             cur.execute("DELETE FROM user_projects WHERE user_id=%s", (uid,))
             for p in body["projects"]:
@@ -1321,8 +1510,25 @@ def admin_update_user(uid: int, body: dict, request: Request, conn=Depends(db),
     return {"ok": True}
 
 
+@app.delete("/api/admin/users/{uid}/sessions")
+def admin_revoke_sessions(uid: int, request: Request, conn=Depends(db),
+                          user=Depends(require_admin)):
+    """踢掉某个用户的全部会话（改密、离职、token 泄漏时用）。"""
+    with conn.cursor() as cur:
+        cur.execute("SELECT id FROM users WHERE id=%s", (uid,))
+        if not cur.fetchone():
+            raise HTTPException(404, "用户不存在")
+        cur.execute("DELETE FROM sessions WHERE user_id=%s", (uid,))
+        removed = cur.rowcount
+    conn.commit()
+    audit(conn, user["id"], "revoke_sessions", target=str(uid),
+          detail={"removed": removed}, ip=request.client.host)
+    return {"ok": True, "removed": removed}
+
+
 @app.get("/api/admin/audit")
 def admin_audit(limit: int = 100, conn=Depends(db), user=Depends(require_admin)):
+    limit = max(1, min(int(limit), 500))
     with conn.cursor() as cur:
         cur.execute(
             """SELECT a.id, u.username, a.action, a.project, a.target, a.detail, a.ip, a.ts

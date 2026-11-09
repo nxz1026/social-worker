@@ -38,7 +38,7 @@ import sys
 import tempfile
 import urllib.request
 from datetime import datetime, timezone, timedelta
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import yaml
 
@@ -46,6 +46,7 @@ from config import load_config
 
 # M4：错误队列 / 通知 / 重试（同目录模块）
 import error_queue as _eq  # noqa: E402
+import manifest as _mf  # noqa: E402
 import notify as _notify  # noqa: E402
 import retry as _retry  # noqa: E402
 
@@ -197,9 +198,28 @@ def load_yaml(path: Path, default):
         return default
 
 
-def save_yaml(path: Path, data) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(yaml.safe_dump(data, allow_unicode=True, sort_keys=False), encoding="utf-8")
+def _mask_rel(rel: str) -> str:
+    """日志/通知里用的文件名脱敏：保留目录与扩展名，文件名换 hash。
+
+    审计与错误队列仍保留原始 `file` 供本机定位（文件已 0600），
+    但发到飞书的消息只带脱敏后的名字。
+    """
+    p = PurePosixPath(str(rel or "").replace("\\", "/"))
+    digest = hashlib.sha256(p.stem.encode("utf-8")).hexdigest()[:8]
+    return str(p.with_name(f"{digest}{p.suffix}")) if p.name else "?"
+
+
+def _save_manifest_entry(manifest: dict, token: str) -> dict:
+    """锁内把当前文件的条目合并回最新台账，返回合并后的台账。
+
+    不能直接 `save_yaml(manifest)`：那份 manifest 是整轮开始时读的，
+    期间 reconcile / API 可能已经改过别的条目，整份覆盖会丢更新。
+    """
+    with _mf.lock(MANIFEST_PATH):
+        fresh = _mf.load(MANIFEST_PATH)
+        fresh.setdefault("files", {})[token] = manifest["files"][token]
+        _mf.save(MANIFEST_PATH, fresh)
+        return fresh
 
 
 def load_llm() -> dict:
@@ -262,6 +282,7 @@ def _enqueue(rel, message, sink, root=None, log=None, **extra) -> None:
     队列挂掉不该拖垮归档 —— 只告警。
     """
     try:
+        extra = {**extra, "display": _mask_rel(rel)}
         entry, is_new = _eq.add(root or ROOT, file=rel, error=message, extra=extra, log=log)
         if is_new:
             sink.append(entry)
@@ -270,26 +291,50 @@ def _enqueue(rel, message, sink, root=None, log=None, **extra) -> None:
             log(f"  ! 错误队列入队失败：{exc}")
 
 
-def _alert_errors(entries, root=None, log=None) -> None:
+def _alert_errors(entries, root=None, log=None) -> bool:
     """有新的未处理错误 → **立刻**发飞书，不等用户来查。
 
-    通知失败不影响主流程（`_notify.send` 本身不抛异常，这里再兜一层）。
+    返回是否发送成功。通知失败时主流程会以非零退出码结束，
+    让 systemd / 监控能看见 —— 不能只打一行 stderr。
     """
     if not entries:
-        return
+        return True
     lines = [f"⚠️ 社工知识库：{len(entries)} 个文件处理失败，需要你看一下", ""]
     for e in entries[:10]:
-        lines.append(f"· {e.get('file')} — {e.get('error')}")
+        lines.append(f"· {e.get('display') or e.get('file')} — {e.get('error')}")
     if len(entries) > 10:
         lines.append(f"… 另有 {len(entries) - 10} 条")
     lines += ["", "明细：python3 scripts/fallback.py --list"]
     try:
         ok = _notify.send("\n".join(lines), root or ROOT)
         if log:
-            log("  ✓ 已发飞书告警" if ok else "  ! 飞书告警发送失败")
+            log("  ✓ 已发飞书告警" if ok else "  ! 飞书告警发送失败（退出码将非零）")
+        return ok
     except Exception as exc:  # noqa: BLE001
         if log:
             log(f"  ! 飞书告警异常：{exc}")
+        return False
+
+
+def _alert_pending(entries, root=None, log=None) -> bool:
+    """本次新转入 `_待确认` 的文件 → 一并提醒，避免用户不知道有东西卡住。"""
+    if not entries:
+        return True
+    lines = [f"📥 社工知识库：{len(entries)} 个文件转入待确认，需要人工定项目/类别", ""]
+    for e in entries[:10]:
+        lines.append(f"· {e.get('display') or e.get('file')} — {e.get('note') or '置信度不足'}")
+    if len(entries) > 10:
+        lines.append(f"… 另有 {len(entries) - 10} 个")
+    lines += ["", "处理：在管理界面「待确认」里定项目，或运行 scripts/fallback.py --list"]
+    try:
+        ok = _notify.send("\n".join(lines), root or ROOT)
+        if log:
+            log("  ✓ 已发待确认提醒" if ok else "  ! 待确认提醒发送失败")
+        return ok
+    except Exception as exc:  # noqa: BLE001
+        if log:
+            log(f"  ! 待确认提醒异常：{exc}")
+        return False
 
 
 # ---------- 内容提取 ----------
@@ -544,6 +589,10 @@ def archive_one(src: Path, token: str, digest: str, decision: dict, cfg: dict,
         original_dir = f"sources/_待确认/{category}"
         md_dir = unique_dir(PENDING / "_md" / category, src.stem, token)
 
+    if dry_run:
+        log(f"  [dry-run] {name} → {original_dir}/{name}")
+        return "dry-run"
+
     entry = manifest["files"].setdefault(token, {})
     entry.update({
         "name": name, "project": project, "category": category,
@@ -552,10 +601,6 @@ def archive_one(src: Path, token: str, digest: str, decision: dict, cfg: dict,
         "seen_at": datetime.now(TZ).isoformat(timespec="seconds"),
         "detected_project": decision.get("detected_project"),
     })
-
-    if dry_run:
-        log(f"  [dry-run] {name} → {original_dir}/{name}")
-        return "dry-run"
 
     md_dir.mkdir(parents=True, exist_ok=True)
     # 原件落位（只存档图片按日期命名，同一天多张会撞名 → unique_dest 加序号）
@@ -577,14 +622,14 @@ def archive_one(src: Path, token: str, digest: str, decision: dict, cfg: dict,
             media = unique_dest(media_dir / name, digest)
             shutil.copy2(src, media)
             os.chmod(media, 0o644)
-            entry["media"] = str(media.relative_to(ROOT))
+            entry["media"] = _mf.rel_posix(media, ROOT)
             log(f"     → {entry['media']}")
             # M10：手写/图片资料按文件名元数据建「档案条目」，喂 Cognee 建日期+单位关系
             body = image_entry_md(src, name, decision, cfg, name_info,
                                   entry["original"], ocr_text=conv.get("text", ""))
             md_file = md_dir / (src.stem + ".md")
             md_file.write_text(header + body, encoding="utf-8")
-            entry["md"] = str(md_file.relative_to(ROOT))
+            entry["md"] = _mf.rel_posix(md_file, ROOT)
             log(f"     → {entry['md']}（文件名元数据条目）")
     # md 落位
     elif conv["converter"] == "media":
@@ -607,12 +652,11 @@ def archive_one(src: Path, token: str, digest: str, decision: dict, cfg: dict,
         (md_dir / (src.stem + ".md")).write_text(header + text, encoding="utf-8")
     else:
         entry["status"] = "unsupported"
-        save_yaml(MANIFEST_PATH, manifest)
         log(f"  ! 不支持的格式：{name}")
         return "unsupported"
 
     if not work_photo:
-        entry["md"] = str(md_dir.relative_to(ROOT) / (src.stem + ".md"))
+        entry["md"] = (md_dir.relative_to(ROOT) / (src.stem + ".md")).as_posix()
 
     # 未分类图片不产 md：md_dir 是上面刚建的空壳，收掉，别在档案里留空目录
     if not entry.get("md"):
@@ -720,14 +764,27 @@ def main() -> int:
     if local_count:
         log(f"  inbox/ 里还有 {local_count} 个本地文件待处理")
 
-    manifest = load_yaml(MANIFEST_PATH, {"files": {}})
-    manifest.setdefault("files", {})
+    try:
+        manifest = _mf.load(MANIFEST_PATH)
+    except _mf.ManifestCorrupt as exc:
+        log(f"  ! {exc}")
+        log("  ! 台账损坏，本次停止（先修复/恢复 state/manifest.yaml，不要当空台账继续）")
+        return 1
+
+    # 审计流水含文件名（可能含居民姓名），按保留期清理，别无限增长
+    try:
+        removed = _al.prune(ROOT, CFG.audit_retention_days)
+        if removed:
+            log(f"· 审计流水已清理 {removed} 个过期文件")
+    except Exception as exc:  # noqa: BLE001
+        log(f"  ! 审计流水清理失败：{exc}")
 
     processed = skipped = 0
     new_errors: list = []  # M4：本次新产生的错误，收尾时一次性告警
+    new_pending: list = []  # C-10：本次新转入待确认的文件，一并提醒
     # M4：已经报错过的文件不再重复处理（否则坏文件每 15 分钟重试一次，永久刷日志）
     try:
-        open_error_files = {e.get("file") for e in _eq.list_open(ROOT)}
+        open_error_files = {_mf.normalize_rel(e.get("file") or "") for e in _eq.list_open(ROOT)}
     except Exception:
         open_error_files = set()
 
@@ -748,7 +805,7 @@ def main() -> int:
             skipped += 1
             continue
 
-        if rel in open_error_files:
+        if _mf.normalize_rel(rel) in open_error_files:
             log(f"  = 跳过（已有未处理错误）{rel} —— 处理后用 fallback.py --list 查看")
             skipped += 1
             continue
@@ -763,7 +820,7 @@ def main() -> int:
         def record_audit(**kw) -> None:
             """写一条审计记录。失败只告警 —— 审计挂掉不该拖垮归档。"""
             base = {
-                "file": rel, "sha256": digest, "size": size,
+                "file": rel, "display": _mask_rel(rel), "sha256": digest, "size": size,
                 "action": action or "normal", "md_path": None, "data_id": None,
                 "duration_ms": int((datetime.now(TZ) - started).total_seconds() * 1000),
             }
@@ -866,24 +923,33 @@ def main() -> int:
             if status == "done":
                 # 飞书侧已归档，清掉本地副本，下次扫描才干净
                 src.unlink()
-        save_yaml(MANIFEST_PATH, manifest)
-        # 审计日志：每个处理过的文件一条
-        record_audit(converter=conv.get("converter"),
-                     project=decision.get("project", ""),
-                     category=decision.get("category", ""),
-                     confidence=decision.get("confidence"),
-                     md_path=manifest["files"].get(token, {}).get("md"),
-                     note=decision.get("pending_reason"),
-                     status=status)
+            if status == "pending_review":
+                new_pending.append({"file": rel, "display": _mask_rel(rel),
+                                    "note": decision.get("pending_reason")})
+            manifest = _save_manifest_entry(manifest, token)
+            # 审计日志：每个处理过的文件一条（dry-run 不写盘）
+            record_audit(converter=conv.get("converter"),
+                         project=decision.get("project", ""),
+                         category=decision.get("category", ""),
+                         confidence=decision.get("confidence"),
+                         token=token,
+                         md_path=manifest["files"].get(token, {}).get("md"),
+                         note=decision.get("pending_reason"),
+                         status=status)
 
     log(f"\n完成：处理 {processed}，跳过 {skipped}")
 
-    # M4：有**新**错误就立刻告警，不等用户来查（通知失败不影响返回码）
+    # M4：有**新**错误就立刻告警；告警发不出去要以非零退出码暴露给 systemd
+    alert_failed = False
     if new_errors:
-        _alert_errors(new_errors, log=log)
+        alert_failed = not _alert_errors(new_errors, log=log)
+    # C-10：转入待确认的文件同样要让人知道（不再只写一行日志）
+    # 提醒发不出去不算本轮失败：文件已安全落到 _待确认，用户查 issues 也能看到
+    if new_pending:
+        _alert_pending(new_pending, log=log)
 
     if args.no_cognify or args.dry_run:
-        return 0
+        return 3 if alert_failed else 0
 
     # 对账：vault 是真相源，用户在 Obsidian 里的增/改/删都从这里传播
     log("\n=== 对账（vault → Cognee / 飞书 / 台账）===")
@@ -900,7 +966,7 @@ def main() -> int:
             continue
         out = (r.stdout or r.stderr).strip()
         log(f"  {pcfg['dataset']}: {out[-300:]}")
-    return 0
+    return 3 if alert_failed else 0
 
 
 if __name__ == "__main__":

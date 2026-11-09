@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import time
 from pathlib import Path
 
 import yaml
@@ -32,7 +33,10 @@ def _hash_file(path: Path, algo: str, use_cache: bool = False) -> str:
     except OSError:
         return ""
     key = (str(path), st.st_mtime_ns, st.st_size)
-    if use_cache and algo == "md5" and key in _MD5_CACHE:
+    # 刚写过的文件 mtime 精度在 Windows 上可能没变，缓存会读到旧内容；
+    # 2 秒内的文件不走缓存。
+    cacheable = (time.time() - st.st_mtime) > 2.0
+    if use_cache and cacheable and algo == "md5" and key in _MD5_CACHE:
         return _MD5_CACHE[key]
     h = hashlib.new(algo)
     try:
@@ -42,7 +46,7 @@ def _hash_file(path: Path, algo: str, use_cache: bool = False) -> str:
     except OSError:
         return ""
     out = h.hexdigest()
-    if use_cache and algo == "md5":
+    if use_cache and cacheable and algo == "md5":
         if len(_MD5_CACHE) > 5000:
             _MD5_CACHE.clear()
         _MD5_CACHE[key] = out
@@ -133,16 +137,18 @@ def doc_entities(path: Path) -> list[str]:
     except OSError:
         return []
     key = (str(path), st.st_mtime_ns, st.st_size)
-    if key in _ENT_CACHE:
+    cacheable = (time.time() - st.st_mtime) > 2.0
+    if cacheable and key in _ENT_CACHE:
         return _ENT_CACHE[key]
     try:
         text = path.read_text(encoding="utf-8")
     except OSError:
         text = ""
     out = extract_entities(text)
-    if len(_ENT_CACHE) > 5000:
-        _ENT_CACHE.clear()
-    _ENT_CACHE[key] = out
+    if cacheable:
+        if len(_ENT_CACHE) > 5000:
+            _ENT_CACHE.clear()
+        _ENT_CACHE[key] = out
     return out
 
 

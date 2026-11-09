@@ -6,6 +6,7 @@ M3 的 audit.py 只读这个文件出摘要，写入口统一在这里，避免�
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -17,14 +18,29 @@ def audit_dir(root) -> Path:
 
 
 def append(root, entry: dict) -> Path:
-    """追加一条审计记录，返回写入的文件路径。"""
+    """追加一条审计记录，返回写入的文件路径。
+
+    审计里含文件名（可能含居民姓名），文件权限收紧到 0600；
+    目录 0700。飞书/界面展示用脱敏后的 `display`，不要直接外发 `file`。
+    """
     d = audit_dir(root)
     d.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(d, 0o700)
+    except OSError:
+        pass
     now = datetime.now(TZ)
     path = d / f"{now.strftime('%Y-%m-%d')}.jsonl"
     record = {"ts": now.isoformat(timespec="seconds"), **entry}
-    with path.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    try:
+        with os.fdopen(fd, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    finally:
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
     return path
 
 

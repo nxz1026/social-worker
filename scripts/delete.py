@@ -25,8 +25,9 @@ from notify import send as notify_send
 from audit_log import append as audit_append
 
 import cognee as _cg
+import manifest as _mf
 from reconcile import (TRASH_DIRNAME, TZ, delete_feishu, load_manifest, log,
-                       now_iso, save_manifest)
+                       now_iso)
 
 
 def find_entries(manifest, ident):
@@ -55,7 +56,7 @@ def trash_md(root, vault, md_rel, dry_run):
     dest.parent.mkdir(parents=True, exist_ok=True)
     shutil.move(str(md_path), str(dest))
     os.chmod(dest, 0o644)
-    return str(dest.relative_to(root))
+    return dest.relative_to(root).as_posix()
 
 
 def main():
@@ -129,11 +130,15 @@ def main():
             print(f"  ! Cognee 删除失败：{exc}")
     # 4) 飞书
     delete_feishu(entry, root, False)
-    # 5) 台账
+    # 5) 台账（锁内只改本条目，避免覆盖并发写入）
     entry["status"] = "deleted"
     entry["deleted_at"] = now_iso()
     entry["delete_mode"] = args.mode
-    save_manifest(root, manifest)
+    _mf.update_entry(Path(root) / "state" / "manifest.yaml", token, {
+        "status": "deleted",
+        "deleted_at": entry["deleted_at"],
+        "delete_mode": args.mode,
+    })
     # 6) 审计
     try:
         audit_append(root, {"file": name, "sha256": entry.get("sha256"),

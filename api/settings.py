@@ -43,6 +43,7 @@ DEFAULTS = {
         "temperature": 0.3,
     },
     "search": {"timeout_seconds": 90, "snippet_chars": 4000, "material_chars": 3000},
+    "upload": {"max_mb": 50},
     "tasks": {
         "archive_timeout_seconds": 600,
         "reconcile_timeout_seconds": 180,
@@ -64,6 +65,7 @@ class Settings:
     server: dict
     llm: dict
     search: dict
+    upload: dict
     tasks: dict
 
 
@@ -97,6 +99,7 @@ def load(path: str | Path | None = None) -> Settings:
     db = section("db")
     llm = section("llm")
     search = section("search")
+    upload = section("upload")
     tasks = section("tasks")
 
     root = Path(os.environ.get("SOCIAL_WORK_ROOT") or server["root"]).expanduser()
@@ -119,6 +122,7 @@ def load(path: str | Path | None = None) -> Settings:
         server={**server, "port": int(os.environ.get("PORT") or server["port"])},
         llm=llm,
         search=search,
+        upload=upload,
         tasks=tasks,
     )
 

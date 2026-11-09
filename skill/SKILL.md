@@ -5,7 +5,7 @@ description: 社工工作助手：检索知识库（政策文件、项目资料�
 
 # social-work
 
-服务端 API：`https://140.83.62.161/sw-api/api`（token 存 `~/.dsh/skills/social-work/.token`）。
+服务端 API：由 `SOCIALWORK_API` 指定（形如 `https://<host>/sw-api/api`，token 存 `~/.dsh/skills/social-work/.token`）。
 
 ## 命令
 
@@ -27,4 +27,4 @@ description: 社工工作助手：检索知识库（政策文件、项目资料�
 
 - 含真实姓名/证件号/电话/精确地址 → 提醒用户先脱敏，不代为脱敏
 - 不编造政策文号、统计数据、案例细节；引用给可核查来源；正文 ≤14,000 字
-- token 失效（401）→ 让用户重新登录 `https://140.83.62.161/sw/` 并更新 `.token`
+- token 失效（401）→ 让用户重新登录 `${SOCIALWORK_WEB:-https://<host>/sw/}` 并更新 `.token`

@@ -101,5 +101,20 @@ def test_brief_error_truncates():
     assert len(eq.brief_error("x" * 1000, limit=50)) == 50
 
 
+def test_find_open_by_id_and_file(tmp_path):
+    entry, _ = eq.add(tmp_path, file="x.pdf", error="坏")
+    assert eq.find_open(tmp_path, eid=entry["id"])["file"] == "x.pdf"
+    assert eq.find_open(tmp_path, file="x.pdf")["id"] == entry["id"]
+    assert eq.find_open(tmp_path, eid="nope") is None
+
+
+def test_cli_list_and_resolve(tmp_path, capsys):
+    entry, _ = eq.add(tmp_path, file="x.pdf", error="坏")
+    assert eq.main(["--root", str(tmp_path), "list"]) == 0
+    assert "x.pdf" in capsys.readouterr().out
+    assert eq.main(["--root", str(tmp_path), "resolve", "--id", entry["id"]]) == 0
+    assert eq.list_open(tmp_path) == []
+
+
 def test_brief_error_empty_uses_type_name():
     assert eq.brief_error(ValueError()) == "ValueError"

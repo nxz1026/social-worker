@@ -22,6 +22,7 @@
 import hashlib
 import json
 import os
+import sys
 import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -107,8 +108,17 @@ def add(root, file, error, extra=None, log=None):
     # 全量流水：每次都记（便于事后按时间查）
     try:
         trail_path(root).parent.mkdir(parents=True, exist_ok=True)
-        with open(trail_path(root), "a", encoding="utf-8") as f:
+        try:
+            os.chmod(trail_path(root).parent, 0o700)
+        except OSError:
+            pass
+        fd = os.open(str(trail_path(root)), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        with os.fdopen(fd, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        try:
+            os.chmod(trail_path(root), 0o600)
+        except OSError:
+            pass
     except OSError as exc:
         if log:
             log(f"  ! 错误流水写入失败：{exc}")
@@ -130,6 +140,16 @@ def _read_open(root) -> list:
 def list_open(root) -> list:
     """未处理的错误（按入队时间升序）。"""
     return sorted(_read_open(root), key=lambda e: e.get("ts", ""))
+
+
+def find_open(root, eid: str | None = None, file: str | None = None) -> dict | None:
+    """按 id 或文件找一条未处理错误。"""
+    for entry in _read_open(root):
+        if eid and entry.get("id") == eid:
+            return entry
+        if file and entry.get("file") == file:
+            return entry
+    return None
 
 
 def count_open(root) -> int:
@@ -160,3 +180,37 @@ def close_by_file(root, file, log=None) -> int:
         if log:
             log(f"  ✓ {file} 的 {n} 条错误已关闭")
     return n
+
+
+def main(argv=None) -> int:
+    """命令行入口：list / resolve，供运维在人工修复后闭环。"""
+    import argparse
+
+    ap = argparse.ArgumentParser(description="错误队列：查看 / 关闭")
+    ap.add_argument("--root", default="/srv/social-work")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("list", help="列出未处理错误")
+    r = sub.add_parser("resolve", help="关闭一条错误")
+    r.add_argument("--id", help="错误 id")
+    r.add_argument("--file", help="文件相对路径（关闭该文件全部错误）")
+    args = ap.parse_args(argv)
+
+    if args.cmd == "list":
+        rows = list_open(args.root)
+        print(f"未处理 {len(rows)} 条")
+        for e in rows:
+            print(f"  {e.get('id')}  {e.get('display') or e.get('file')}  {e.get('error')}")
+        return 0
+
+    if not args.id and not args.file:
+        print("resolve 需要 --id 或 --file", file=sys.stderr)
+        return 2
+    if args.id:
+        ok = resolve(args.root, args.id, log=print)
+        return 0 if ok else 1
+    n = close_by_file(args.root, args.file, log=print)
+    return 0 if n else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

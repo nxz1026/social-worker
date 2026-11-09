@@ -13,6 +13,7 @@ DSH 侧只调这一条，不再手工分步（落 sources/ + 转 md + 入库 + �
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import shutil
 import subprocess
@@ -23,6 +24,7 @@ from pathlib import Path
 import config as _cfg
 import classify_rules as _cr
 import image_policy as _ip
+import manifest as _mf
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic", ".bmp", ".tiff", ".tif"}
 
@@ -77,23 +79,36 @@ def dest_rel(action, name):
     return Path(name)
 
 
-def verify(root, name):
-    """校验结果。返回 (ok, lines)。"""
-    import yaml
+def sha256_of(path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
+
+def verify_result(root, name, digest=None):
+    """校验归档结果，返回 (ok, lines, token, entry)。
+
+    同时按文件名 + sha256 匹配，避免同名文件串条目。
+    """
     lines, ok = [], True
+    entry = token = None
     mpath = root / "state" / "manifest.yaml"
-    entry = None
-    if mpath.is_file():
-        try:
-            manifest = yaml.safe_load(mpath.read_text(encoding="utf-8")) or {}
-            for rec in (manifest.get("files") or {}).values():
-                if rec.get("name") == name:
-                    entry = rec
-                    break
-        except Exception as exc:
-            lines.append(f"台账读取失败：{exc}")
-            ok = False
+    try:
+        manifest = _mf.load(mpath)
+    except _mf.ManifestCorrupt as exc:
+        return False, [f"台账读取失败：{exc}"], None, None
+    for tok, rec in (manifest.get("files") or {}).items():
+        if not isinstance(rec, dict):
+            continue
+        # 图片会被重命名（日期-单位-关键词），所以有 sha256 时优先按内容匹配
+        if digest and rec.get("sha256") == digest:
+            entry, token = rec, tok
+            break
+        if not digest and rec.get("name") == name:
+            entry, token = rec, tok
+            break
     if entry:
         lines.append(f"台账有记录：{entry.get('project')} / {entry.get('category')}")
         md = entry.get("md")
@@ -106,6 +121,12 @@ def verify(root, name):
     else:
         lines.append("台账里没有这个文件 —— 归档可能失败了，看 scan-inbox 输出")
         ok = False
+    return ok, lines, token, entry
+
+
+def verify(root, name):
+    """兼容旧调用：只返回 (ok, lines)。"""
+    ok, lines, _, _ = verify_result(root, name)
     return ok, lines
 
 
@@ -118,6 +139,8 @@ def main(argv=None):
                     help="图片处置动作；auto=按 config/image_policy.yaml")
     ap.add_argument("--root", default=None)
     ap.add_argument("--dry-run", action="store_true", help="只看会做什么，不动文件")
+    ap.add_argument("--json", action="store_true",
+                    help="最后一行输出 __RESULT__ {json}，供 API 解析回执")
     args = ap.parse_args(argv)
 
     CFG = _cfg.load_config(Path(args.root) if args.root else None)
@@ -128,6 +151,7 @@ def main(argv=None):
     if not src.is_file():
         print(f"✗ 文件不存在：{src}")
         return 2
+    digest = sha256_of(src)
     if src.parent.resolve() == (root / "inbox").resolve():
         print("· 文件已在 inbox/，跳过复制")
 
@@ -183,9 +207,21 @@ def main(argv=None):
         return 4
 
     print(f"\n=== 校验结果（{time.time() - t0:.1f}s）===")
-    ok, lines = verify(root, src.name)
+    ok, lines, token, entry = verify_result(root, src.name, digest)
     for ln in lines:
         print(f"  {'✓' if ok else '·'} {ln}")
+    if args.json:
+        receipt = {
+            "ok": ok,
+            "token": token,
+            "project": (entry or {}).get("project"),
+            "category": (entry or {}).get("category"),
+            "status": (entry or {}).get("status"),
+            "md": (entry or {}).get("md"),
+            "feishu_token": (entry or {}).get("feishu_token"),
+            "lines": lines,
+        }
+        print("__RESULT__ " + json.dumps(receipt, ensure_ascii=False))
     return 0 if ok else 5
 
 
