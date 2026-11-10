@@ -145,6 +145,15 @@ def test_upload_timeout_returns_202_with_token(monkeypatch):
     assert body["token"] == "local-" + hashlib.sha256(b"x").hexdigest()[:16]
 
 
+def test_upload_scan_timeout_exit_code_also_202(monkeypatch):
+    """archive.py 自己等 scan-inbox 超时会返回 6，语义同外层超时。"""
+    user = _prep(monkeypatch)
+    _fake_archive(monkeypatch, rc=6)
+    resp = app.upload_doc(FakeRequest(), FakeUpload(b"y"), "huadu", "", user, None)
+    assert resp.status_code == 202
+    assert json.loads(resp.body)["accepted"] is True
+
+
 def test_upload_duplicate_returns_same_token_without_archiving(monkeypatch):
     user = _prep(monkeypatch)
     called = []

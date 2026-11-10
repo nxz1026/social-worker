@@ -702,6 +702,11 @@ def _archive_timeout() -> int:
     return int(SETTINGS.tasks["archive_timeout_seconds"])
 
 
+def _scan_timeout() -> int:
+    """archive.py 内部等 scan-inbox 的秒数，比外层短一点，让它先自己收尾。"""
+    return max(30, _archive_timeout() - 15)
+
+
 def run_archive(cmd: list[str], timeout: float) -> tuple[int | None, str, str, bool]:
     """跑 archive.py，返回 (returncode, stdout, stderr, timed_out)。
 
@@ -812,7 +817,7 @@ def upload_doc(
               request.client.host)
 
         cmd = ["python3", str(SCRIPTS / "archive.py"), "--file", tmp_path, "--json",
-               "--no-cognify", "--only-self", "--scan-timeout", str(_archive_timeout())]
+               "--no-cognify", "--only-self", "--scan-timeout", str(_scan_timeout())]
         if project:
             cmd += ["--project", project]
         if category:
@@ -820,7 +825,9 @@ def upload_doc(
         rc, out, err, timed_out = run_archive(cmd, _archive_timeout())
         receipt = _parse_archive_receipt(out)
 
-        if timed_out:
+        # rc=6 是 archive.py 自己等 scan-inbox 超时（它杀完进程组后返回），
+        # 和外层超时是同一件事，都给 202 + 可查询的 token
+        if timed_out or rc == 6:
             audit(conn, user["id"], "create", project or receipt.get("project"), token_hint,
                   {"returncode": None, "timeout": True, "sha256": sha, "size": size,
                    "category": category}, request.client.host)
@@ -1192,15 +1199,15 @@ def pending_archive(body: dict, request: Request,
         raise HTTPException(400, f"未知项目 {project}")
     action = str(body.get("action") or "").strip()
     cmd = ["python3", str(SCRIPTS / "archive.py"), "--file", str(path),
-           "--no-cognify", "--scan-timeout", str(_archive_timeout())]
+           "--no-cognify", "--scan-timeout", str(_scan_timeout())]
     if project:
         cmd += ["--project", project]
     if action in ("archive_only", "ocr", "vision"):
         cmd += ["--action", action]
     rc, stdout, stderr, timed_out = run_archive(cmd, _archive_timeout())
-    if timed_out:
+    if timed_out or rc == 6:
         audit(conn, user["id"], "pending_archive", project or None, path.name,
-              {"returncode": None, "timeout": True}, request.client.host)
+              {"returncode": rc, "timeout": True}, request.client.host)
         raise HTTPException(504, "归档超时（已终止进程组，文件仍在 _待确认）")
     ok = rc == 0
     moved = ""
