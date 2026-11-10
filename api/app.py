@@ -9,11 +9,13 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import mimetypes
 import os
 import secrets
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -28,7 +30,7 @@ import psycopg
 import yaml
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 
 from settings import SETTINGS
 import status as status_mod
@@ -696,8 +698,52 @@ def _parse_archive_receipt(stdout: str) -> dict:
     return {}
 
 
+def _archive_timeout() -> int:
+    return int(SETTINGS.tasks["archive_timeout_seconds"])
+
+
+def run_archive(cmd: list[str], timeout: float) -> tuple[int | None, str, str, bool]:
+    """跑 archive.py，返回 (returncode, stdout, stderr, timed_out)。
+
+    超时要杀**整个进程组**：archive.py → scan-inbox.py → reconcile.py/cognify
+    是一条链，subprocess.run 的 timeout 只杀第一层，孙子进程会变孤儿继续跑。
+    """
+    proc = subprocess.Popen(cmd, cwd=str(ROOT), stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, text=True, start_new_session=True)
+    try:
+        out, err = proc.communicate(timeout=timeout)
+        return proc.returncode, out, err, False
+    except subprocess.TimeoutExpired:
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            try:
+                os.killpg(os.getpgid(proc.pid), sig)
+            except OSError:
+                pass
+            try:
+                out, err = proc.communicate(timeout=10)
+                break
+            except subprocess.TimeoutExpired:
+                continue
+        else:
+            out, err = proc.communicate()
+        return None, out, err, True
+
+
+def _find_by_sha256(sha: str) -> tuple[str, dict] | None:
+    """按内容 hash 找已归档条目（上传幂等用）。"""
+    try:
+        manifest = _load_manifest()
+    except HTTPException:
+        return None
+    for tok, rec in (manifest.get("files") or {}).items():
+        if (isinstance(rec, dict) and rec.get("sha256") == sha
+                and rec.get("status") in {"done", "pending_review"}):
+            return tok, rec
+    return None
+
+
 @app.post("/api/docs")
-async def upload_doc(
+def upload_doc(
     request: Request,
     file: UploadFile = File(...),
     project: str = Form(""),
@@ -705,11 +751,24 @@ async def upload_doc(
     user=Depends(require_write),
     conn=Depends(db),
 ):
+    """上传一个文件并归档。
+
+    同步返回（客户端要 token），但**不在上传链路里重建索引**：归档只做
+    落 inbox → 分类 → 转 md → 写台账 → 飞书归档，索引交给 15 分钟一次的
+    reconcile 定时器。以前每传 1 张都跑一次全库对账，HTTP 响应被拖到 200–600 秒。
+    端点用普通 def：Starlette 会丢线程池，不会像 async def 里 subprocess.run 那样
+    把事件循环占死。
+    """
     if project:
         check_project(user, project)
     elif set(user["projects"]) != set(ALL_PROJECTS):
         # 自动判项目会把文件写进用户没权限的项目；没有全部项目权限时必须显式指定
         raise HTTPException(400, "请指定项目（project）：当前账号没有全部项目权限，不能自动判定归属")
+
+    category = (category or "").strip()
+    categories = [str(c) for c in (_flow().get("categories") or [])]
+    if category and categories and category not in categories:
+        raise HTTPException(400, f"未知类别 {category}（可选：{'、'.join(categories)}）")
 
     filename = Path(file.filename or "upload.bin").name
     max_mb = int(SETTINGS.upload.get("max_mb", 50))
@@ -717,42 +776,75 @@ async def upload_doc(
     tmpdir = tempfile.mkdtemp()
     tmp_path = os.path.join(tmpdir, filename)
     size = 0
+    digest = hashlib.sha256()
     try:
         with open(tmp_path, "wb") as f:
             while True:
-                chunk = await file.read(1 << 20)
+                chunk = file.file.read(1 << 20)
                 if not chunk:
                     break
                 size += len(chunk)
                 if size > max_bytes:
                     raise HTTPException(413, f"文件超过 {max_mb} MB 限制")
+                digest.update(chunk)
                 f.write(chunk)
         if size == 0:
             raise HTTPException(400, "空文件")
+        sha = digest.hexdigest()
+        # 本地来源的台账 key 由内容 hash 决定，归档前就能算出来，超时也能给客户端一个可查的 token
+        token_hint = f"local-{sha[:16]}"
 
-        cmd = ["python3", str(SCRIPTS / "archive.py"), "--file", tmp_path, "--json"]
+        # 幂等：同一份内容已经归档过 → 直接回同一个 token，不产生第二份档案
+        dup = _find_by_sha256(sha)
+        if dup:
+            dup_token, rec = dup
+            audit(conn, user["id"], "upload_duplicate", rec.get("project"), rec.get("name"),
+                  {"sha256": sha, "token": dup_token, "size": size},
+                  request.client.host)
+            return {"ok": True, "token": dup_token, "duplicate": True,
+                    "project": rec.get("project"), "category": rec.get("category"),
+                    "name": rec.get("name"), "status": rec.get("status"),
+                    "md": rec.get("md")}
+
+        # 受理即写审计：之后无论超时、断连还是服务重启，都能查到「谁在什么时候传了什么」
+        audit(conn, user["id"], "upload_accepted", project, filename,
+              {"sha256": sha, "size": size, "token": token_hint, "category": category},
+              request.client.host)
+
+        cmd = ["python3", str(SCRIPTS / "archive.py"), "--file", tmp_path, "--json",
+               "--no-cognify", "--only-self", "--scan-timeout", str(_archive_timeout())]
         if project:
             cmd += ["--project", project]
-        try:
-            proc = subprocess.run(cmd, cwd=str(ROOT), capture_output=True, text=True,
-                                  timeout=int(SETTINGS.tasks["archive_timeout_seconds"]))
-        except subprocess.TimeoutExpired:
-            raise HTTPException(504, "归档超时（后台可能仍在跑，稍后用台账查询）")
+        if category:
+            cmd += ["--category", category]
+        rc, out, err, timed_out = run_archive(cmd, _archive_timeout())
+        receipt = _parse_archive_receipt(out)
 
-        receipt = _parse_archive_receipt(proc.stdout)
-        audit(conn, user["id"], "create", project, receipt.get("token") or filename,
-              {"returncode": proc.returncode, "size": size,
-               "token": receipt.get("token"), "archived_project": receipt.get("project")},
+        if timed_out:
+            audit(conn, user["id"], "create", project or receipt.get("project"), token_hint,
+                  {"returncode": None, "timeout": True, "sha256": sha, "size": size,
+                   "category": category}, request.client.host)
+            return JSONResponse(status_code=202, content={
+                "ok": False, "accepted": True, "token": token_hint, "status": "unknown",
+                "message": ("归档超时，已终止整个进程组。用该 token 查 "
+                            "/api/docs/{token}/status；同一内容重复提交不会重复建档"),
+            })
+
+        audit(conn, user["id"], "create", project or receipt.get("project"),
+              receipt.get("token") or filename,
+              {"returncode": rc, "size": size, "sha256": sha,
+               "token": receipt.get("token"), "archived_project": receipt.get("project"),
+               "category": receipt.get("category")},
               request.client.host)
-        if proc.returncode != 0:
-            raise HTTPException(500, f"归档失败：{proc.stdout[-300:]}")
+        if rc != 0:
+            raise HTTPException(500, f"归档失败：{(out or err)[-300:]}")
         if not receipt.get("ok"):
-            raise HTTPException(500, f"归档结果未通过校验：{proc.stdout[-300:]}")
+            raise HTTPException(500, f"归档结果未通过校验：{(out or err)[-300:]}")
 
         archived_project = str(receipt.get("project") or "")
         if archived_project and archived_project not in user["projects"]:
             raise HTTPException(403, f"归档到无权限项目 {archived_project}，请联系管理员处理")
-        return {"ok": True, **receipt, "output": proc.stdout[-800:]}
+        return {"ok": True, **receipt, "output": (out or "")[-800:]}
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -1099,17 +1191,18 @@ def pending_archive(body: dict, request: Request,
     if project and project not in ALL_PROJECTS:
         raise HTTPException(400, f"未知项目 {project}")
     action = str(body.get("action") or "").strip()
-    cmd = ["python3", str(SCRIPTS / "archive.py"), "--file", str(path)]
+    cmd = ["python3", str(SCRIPTS / "archive.py"), "--file", str(path),
+           "--no-cognify", "--scan-timeout", str(_archive_timeout())]
     if project:
         cmd += ["--project", project]
     if action in ("archive_only", "ocr", "vision"):
         cmd += ["--action", action]
-    try:
-        proc = subprocess.run(cmd, cwd=str(ROOT), capture_output=True, text=True,
-                              timeout=int(SETTINGS.tasks["archive_timeout_seconds"]))
-    except subprocess.TimeoutExpired:
-        raise HTTPException(504, "归档超时（后台可能仍在跑）")
-    ok = proc.returncode == 0
+    rc, stdout, stderr, timed_out = run_archive(cmd, _archive_timeout())
+    if timed_out:
+        audit(conn, user["id"], "pending_archive", project or None, path.name,
+              {"returncode": None, "timeout": True}, request.client.host)
+        raise HTTPException(504, "归档超时（已终止进程组，文件仍在 _待确认）")
+    ok = rc == 0
     moved = ""
     if ok:
         # 归档成功后兜底目录里的这份就是残留（旧口径会一直提示「待人工确认」）
@@ -1118,10 +1211,10 @@ def pending_archive(body: dict, request: Request,
         except OSError:
             moved = ""
     audit(conn, user["id"], "pending_archive", project or None, path.name,
-          {"returncode": proc.returncode, "moved_to": moved}, request.client.host)
-    out = (proc.stdout or "")[-800:]
+          {"returncode": rc, "moved_to": moved}, request.client.host)
+    out = (stdout or "")[-800:]
     if not ok:
-        raise HTTPException(500, f"归档失败：{out or proc.stderr[-300:]}")
+        raise HTTPException(500, f"归档失败：{out or (stderr or '')[-300:]}")
     return {"ok": True, "moved_to": moved, "output": out}
 
 

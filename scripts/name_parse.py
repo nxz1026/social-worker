@@ -69,14 +69,22 @@ def parse_unit(name: str, aliases: dict | None = None,
     return best[1], labels.get(best[1], best[1]), best[2]
 
 
-def parse_content(name: str, date: str = "", matched: str = "") -> str:
-    """文件名里去掉日期、单位词和噪声后剩下的内容关键词。"""
+def parse_content(name: str, date: str = "", matched: str = "",
+                  words: tuple[str, ...] | list[str] = ()) -> str:
+    """文件名里去掉日期、单位词和噪声后剩下的内容关键词。
+
+    要传的是**单位标签**（「惠民」「花都」），不是命中的那个别名：别名可能是
+    项目内的小地名（`2026-11-10-惠民-民乐北巷-回访卡.jpg` 命中「民乐北巷」），
+    按别名删会把有用的内容关键词吃掉。而标签不删干净，规范化后的名字就会
+    出现「惠民-惠民-…」这种重复拼接。
+    """
     text = Path(str(name)).stem
     text = _DATE_SEP.sub(" ", text)
     text = _DATE_TS.sub(" ", text)
     text = _DATE_COMPACT.sub(" ", text)
-    if matched:
-        text = text.replace(matched, " ")
+    for word in sorted({w for w in ([matched] if matched else []) + list(words or ()) if w},
+                       key=len, reverse=True):
+        text = text.replace(word, " ")
     text = _NOISE.sub(" ", text)
     text = _SEP.sub("-", text).strip("-")
     text = re.sub(r"-{2,}", "-", text)
@@ -95,7 +103,7 @@ def parse(name: str, aliases: dict | None = None, labels: dict | None = None) ->
         "unit": unit,
         "unit_label": unit_label,
         "matched": matched,
-        "content": parse_content(name, date, matched),
+        "content": parse_content(name, date, unit_label),
     }
 
 

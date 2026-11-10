@@ -93,8 +93,25 @@ def test_parse_content_drops_digits_only():
 
 def test_parse_returns_all_fields():
     info = np.parse("世纪光华2026.11.5入户照片.jpg", ALIASES, LABELS)
+    # 只删「单位标签」（花都），不删命中的别名（世纪光华）：别名常是项目内的
+    # 小地名，删掉就丢了有用的内容关键词。标签不删干净则会出现「花都-花都-…」。
     assert info == {"date": "2026-11-05", "unit": "huadu", "unit_label": "花都",
-                    "matched": "世纪光华", "content": "入户"}
+                    "matched": "世纪光华", "content": "世纪光华-入户"}
+
+
+def test_content_does_not_repeat_unit_label():
+    """回归：2026-11-10 客户端上传时台账名变成「惠民-惠民-…」。"""
+    info = np.parse("2026-11-10-惠民-民乐北巷停车长效治理回访卡-01.jpg", ALIASES, LABELS)
+    assert info["unit_label"] == "惠民"
+    assert info["matched"] == "民乐北巷"
+    # 内容里不能再有「惠民」，但项目内小地名「民乐北巷」要留着
+    assert info["content"] == "民乐北巷停车长效治理回访卡-01"
+
+
+def test_content_keeps_place_name_when_label_absent():
+    info = np.parse("民乐北巷-2026-11-10-停车治理回访卡.jpg", ALIASES, LABELS)
+    assert info["unit_label"] == "惠民"
+    assert info["content"] == "民乐北巷-停车治理回访卡"
 
 
 def test_usable_needs_date_or_unit():

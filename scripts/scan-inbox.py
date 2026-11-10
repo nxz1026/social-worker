@@ -27,6 +27,7 @@
 """
 
 import argparse
+import fcntl
 import hashlib
 import importlib.util
 import json
@@ -36,6 +37,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.request
 from datetime import datetime, timezone, timedelta
 from pathlib import Path, PurePosixPath
@@ -178,6 +180,56 @@ for txt in (txts or []):
 
 def log(msg: str) -> None:
     print(msg, flush=True)
+
+
+def flock_file(filename: str, timeout: float, what: str):
+    """拿 state/ 下的全局互斥锁；拿到返回 fd，等超时返回 None。
+
+    整条归档链路（拉取 → 分类 → 转 md → 飞书搬运 → 写台账）以前只在写台账那一下
+    加锁，扫描和飞书搬运是全裸的：并发上传时两个进程会同时处理同一批文件、互相
+    抢飞书目录，再叠加各自的 reconcile 就把机器拖死。这里用一把进程级 flock 串起来。
+    fd 由调用方持有，进程退出时内核自动释放，异常路径不会留下死锁。
+    """
+    path = ROOT / "state" / filename
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o644)
+    deadline = time.time() + max(0.0, float(timeout))
+    waited = False
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            if not waited:
+                log(f"· 等待{what}锁（另一个进程正在跑）")
+                waited = True
+            if time.time() >= deadline:
+                os.close(fd)
+                log(f"  ! 等{what}锁超过 {timeout:.0f}s，本次放弃")
+                return None
+            time.sleep(0.5)
+            continue
+        try:
+            os.ftruncate(fd, 0)
+            os.write(fd, f"pid={os.getpid()} at={datetime.now(TZ).isoformat(timespec='seconds')}\n"
+                         .encode())
+        except OSError:
+            pass
+        if waited:
+            log(f"· 已拿到{what}锁")
+        return fd
+
+
+def funlock(fd) -> None:
+    if fd is None:
+        return
+    try:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+    except OSError:
+        pass
+    try:
+        os.close(fd)
+    except OSError:
+        pass
 
 
 def sha256_of(path: Path) -> str:
@@ -583,11 +635,9 @@ def archive_one(src: Path, token: str, digest: str, decision: dict, cfg: dict,
     if project:
         original_dir = f"sources/projects/{project}/{category}"
         vault = ROOT / projects[project]["vault"]
-        md_dir = unique_dir(vault / "md" / category, src.stem, token)
     else:
         # 未分类：原件落 sources/_待确认/<类别>/（与 PENDING、fallback.py 保持一致）
         original_dir = f"sources/_待确认/{category}"
-        md_dir = unique_dir(PENDING / "_md" / category, src.stem, token)
 
     if dry_run:
         log(f"  [dry-run] {name} → {original_dir}/{name}")
@@ -600,9 +650,11 @@ def archive_one(src: Path, token: str, digest: str, decision: dict, cfg: dict,
         "status": "pending", "converter": conv["converter"],
         "seen_at": datetime.now(TZ).isoformat(timespec="seconds"),
         "detected_project": decision.get("detected_project"),
+        # 上传名与规范化名分开留：图片会被改名（日期-单位-关键词），
+        # 出问题时还要能按原来的文件名对回客户端
+        "original_name": src.name,
     })
 
-    md_dir.mkdir(parents=True, exist_ok=True)
     # 原件落位（只存档图片按日期命名，同一天多张会撞名 → unique_dest 加序号）
     dest_dir = ROOT / original_dir
     dest_dir.mkdir(parents=True, exist_ok=True)
@@ -613,6 +665,16 @@ def archive_one(src: Path, token: str, digest: str, decision: dict, cfg: dict,
     if dest.name != name:
         name = dest.name
         entry["name"] = name
+        entry["original"] = f"{original_dir}/{name}"
+
+    # md 目录/文件名统一用**规范化后**的名字：以前用上传原名建目录、台账写改名后的
+    # 名字，图片一被改名两边就对不上（按名称关联台账与 md 会漏档）
+    md_stem = Path(name).stem
+    if project:
+        md_dir = unique_dir(vault / "md" / category, md_stem, token)
+    else:
+        md_dir = unique_dir(PENDING / "_md" / category, md_stem, token)
+    md_dir.mkdir(parents=True, exist_ok=True)
 
     if work_photo:
         # 只归档：有项目才往 vault media 放副本
@@ -627,7 +689,7 @@ def archive_one(src: Path, token: str, digest: str, decision: dict, cfg: dict,
             # M10：手写/图片资料按文件名元数据建「档案条目」，喂 Cognee 建日期+单位关系
             body = image_entry_md(src, name, decision, cfg, name_info,
                                   entry["original"], ocr_text=conv.get("text", ""))
-            md_file = md_dir / (src.stem + ".md")
+            md_file = md_dir / (md_stem + ".md")
             md_file.write_text(header + body, encoding="utf-8")
             entry["md"] = _mf.rel_posix(md_file, ROOT)
             log(f"     → {entry['md']}（文件名元数据条目）")
@@ -640,23 +702,23 @@ def archive_one(src: Path, token: str, digest: str, decision: dict, cfg: dict,
         body = f"![](media/{name})\n"
         if conv["text"]:
             body += f"\n## OCR\n\n{conv['text']}\n"
-        (md_dir / (src.stem + ".md")).write_text(header + body, encoding="utf-8")
+        (md_dir / (md_stem + ".md")).write_text(header + body, encoding="utf-8")
     elif conv["converter"] in {"pandoc", "docling"}:
         text = normalize_images(conv["text"], conv["outdir"])
         text, hits = insert_links(text, entity_names(project))
         entry["links"] = hits
-        (md_dir / (src.stem + ".md")).write_text(header + text, encoding="utf-8")
+        (md_dir / (md_stem + ".md")).write_text(header + text, encoding="utf-8")
     elif conv["converter"] == "copy":
         text, hits = insert_links(conv["text"], entity_names(project))
         entry["links"] = hits
-        (md_dir / (src.stem + ".md")).write_text(header + text, encoding="utf-8")
+        (md_dir / (md_stem + ".md")).write_text(header + text, encoding="utf-8")
     else:
         entry["status"] = "unsupported"
         log(f"  ! 不支持的格式：{name}")
         return "unsupported"
 
     if not work_photo:
-        entry["md"] = (md_dir.relative_to(ROOT) / (src.stem + ".md")).as_posix()
+        entry["md"] = (md_dir.relative_to(ROOT) / (md_stem + ".md")).as_posix()
 
     # 未分类图片不产 md：md_dir 是上面刚建的空壳，收掉，别在档案里留空目录
     if not entry.get("md"):
@@ -674,7 +736,7 @@ def archive_one(src: Path, token: str, digest: str, decision: dict, cfg: dict,
                 if ft:
                     entry["feishu_token"] = ft
                     # md 顶部补原件链接（和飞书来源的 md 保持一致）
-                    md_file = md_dir / (src.stem + ".md")
+                    md_file = md_dir / (md_stem + ".md")
                     if md_file.exists():
                         url = cfg["feishu"]["url_template"].format(token=ft)
                         txt = md_file.read_text(encoding="utf-8")
@@ -708,6 +770,11 @@ def main() -> int:
     ap.add_argument("--no-cognify", action="store_true")
     ap.add_argument("--verbose", action="store_true")
     ap.add_argument("--config", metavar="PATH", help="配置文件路径（默认 config/config.yaml）")
+    ap.add_argument("--only", metavar="REL",
+                    help="只处理 inbox/ 下的这一个文件（API 上传用，不顺手处理别人刚放的文件）")
+    ap.add_argument("--no-pull", action="store_true", help="不拉飞书未分类，只处理本地 inbox/")
+    ap.add_argument("--lock-timeout", type=float, default=300,
+                    help="等全局归档锁的秒数（默认 300）")
     args = ap.parse_args()
 
     if args.config:
@@ -743,9 +810,18 @@ def main() -> int:
         except Exception as exc:
             log(f"  ! 图片策略加载失败，本次不拦图片：{exc}")
 
-    log("=== 拉取飞书未分类 ===")
-    items = pull_inbox(cfg["feishu"]["inbox"])
-    log(f"  {len(items)} 个文件" if items else "  (空)")
+    # 整轮归档串行化：并发上传 / 15 分钟定时扫描同时进来时排队，不互相抢飞书目录
+    lock_fd = flock_file(".archive.lock", args.lock_timeout, "归档")
+    if lock_fd is None:
+        return 6
+
+    if args.no_pull:
+        log("=== 跳过飞书拉取（--no-pull）===")
+        items = []
+    else:
+        log("=== 拉取飞书未分类 ===")
+        items = pull_inbox(cfg["feishu"]["inbox"])
+        log(f"  {len(items)} 个文件" if items else "  (空)")
 
     # M5：inbox/ 就是待处理队列 —— 文件从飞书拉下来、或 archive.py 手工放进来，
     # 都走同一条处理路径。飞书来的有 token，手工放的用内容 hash 当 key。
@@ -763,6 +839,16 @@ def main() -> int:
         local_count += 1
     if local_count:
         log(f"  inbox/ 里还有 {local_count} 个本地文件待处理")
+
+    if args.only:
+        only = str(args.only).replace("\\", "/")
+        only = only[2:] if only.startswith("./") else only.lstrip("/")
+        picked = [it for it in items if it.get("rel_path") == only]
+        if picked:
+            items = picked
+            log(f"  · 只处理指定文件：{only}")
+        else:
+            log(f"  ! 指定文件 {only} 不在待处理列表，改为处理全部 {len(items)} 个")
 
     try:
         manifest = _mf.load(MANIFEST_PATH)
@@ -861,17 +947,30 @@ def main() -> int:
             is_photo = src.suffix.lower() in IMAGE_EXTS and action == "archive_only"
             # 读 archive.py 写的元数据（指定项目时强制，类别仍自动判）
             forced_project = None
+            forced_category = ""
             meta_path = src.with_name(src.name + ".meta.json")
             if meta_path.is_file():
                 try:
                     meta = json.loads(meta_path.read_text(encoding="utf-8"))
                     forced_project = meta.get("project")
+                    forced_category = str(meta.get("category") or "").strip()
                     if forced_project:
                         log(f"  · 指定项目（元数据）：{forced_project}")
+                    if forced_category:
+                        log(f"  · 指定类别（元数据）：{forced_category}")
                 except Exception:
                     pass
+            if forced_category and forced_category not in categories:
+                log(f"  ! 元数据里的类别「{forced_category}」不在配置清单，忽略")
+                forced_category = ""
             decision = None
-            if forced_project:
+            if forced_project and forced_category:
+                # 项目和类别都由调用方指定：没有要判的东西，不调 LLM（上传链路要快）
+                decision = {"project": forced_project, "detected_project": "",
+                            "category": forced_category, "confidence": 1.0,
+                            "reason": "forced（项目+类别由调用方指定）", "title": ""}
+                log(f"  · 指定项目+类别：{forced_project} / {forced_category}（跳过分类）")
+            elif forced_project:
                 d = classify(rel, conv["text"], llm, projects, categories, args.verbose)
                 d["detected_project"] = d.get("project")   # 覆盖前记录内容识别结果
                 d["project"] = forced_project
@@ -888,6 +987,8 @@ def main() -> int:
                     log(f"  · 规则判定 {decision['project']} / {decision['category']}")
             if not decision:
                 decision = classify(rel, conv["text"], llm, projects, categories, args.verbose)
+            if forced_category and decision.get("category") != forced_category:
+                decision["category"] = forced_category
             if decision["confidence"] < min_conf and decision["project"] and not forced_project:
                 log(f"  ! 置信度 {decision['confidence']:.2f} < {min_conf}，转待确认")
                 decision["project"] = ""
@@ -923,6 +1024,11 @@ def main() -> int:
             if status == "done":
                 # 飞书侧已归档，清掉本地副本，下次扫描才干净
                 src.unlink()
+                # 元数据跟着原件一起清：同名文件下次上传不该继承上一次的项目/类别
+                try:
+                    src.with_name(src.name + ".meta.json").unlink()
+                except OSError:
+                    pass
             if status == "pending_review":
                 new_pending.append({"file": rel, "display": _mask_rel(rel),
                                     "note": decision.get("pending_reason")})
@@ -949,7 +1055,11 @@ def main() -> int:
         _alert_pending(new_pending, log=log)
 
     if args.no_cognify or args.dry_run:
+        funlock(lock_fd)
         return 3 if alert_failed else 0
+
+    # 归档阶段结束，先放锁再对账：对账可能跑很久，不能把后面的上传全堵在这
+    funlock(lock_fd)
 
     # 对账：vault 是真相源，用户在 Obsidian 里的增/改/删都从这里传播
     log("\n=== 对账（vault → Cognee / 飞书 / 台账）===")

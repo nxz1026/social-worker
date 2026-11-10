@@ -14,6 +14,7 @@ vault 是真相源。用户在 Obsidian 里改的、删的，经 Syncthing 同�
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import json
 import os
@@ -33,6 +34,29 @@ import manifest as _mf
 TZ = timezone(timedelta(hours=8))
 MANIFEST_REL = "state/manifest.yaml"
 TRASH_DIRNAME = ".trash"
+
+
+def try_lock(root: Path):
+    """对账互斥：拿不到就返回 None（跳过这一轮），绝不排队等。
+
+    以前只有写台账那一下加锁，两个 reconcile（定时器 + 上传链路 + 手工执行）
+    可以同时跑：各自把整库 md 镜像进 Cognee 再 cognify，机器直接被拖死。
+    这里用非阻塞 flock，后来者直接让路，下一轮 15 分钟定时器会补上。
+    """
+    path = root / "state" / ".reconcile.lock"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o644)
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return None
+    try:
+        os.ftruncate(fd, 0)
+        os.write(fd, f"pid={os.getpid()} at={datetime.now(TZ).isoformat(timespec='seconds')}\n"
+                     .encode())
+    except OSError:
+        pass
+    return fd
 
 
 # ---------- PG 审计 ----------
@@ -305,6 +329,10 @@ def main():
 
     cfg = load_config(args.config)
     root = Path(cfg.root)
+    lock_fd = try_lock(root)
+    if lock_fd is None:
+        log("· 另一个对账正在跑，本轮跳过（定时器下一轮会补）")
+        return 0
     flow_path = root / "feishu-flow.yaml"
     flow = yaml.safe_load(flow_path.read_text(encoding="utf-8")) if flow_path.is_file() else {}
     flow = flow or {}
@@ -347,6 +375,7 @@ def main():
         + (f" 失败 {total['errors']}" if total["errors"] else ""))
     if lines and not args.no_notify and not args.dry_run:
         notify_send("社工知识库对账：\n" + "\n".join(lines), root)
+    os.close(lock_fd)
     return 0
 
 

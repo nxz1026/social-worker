@@ -15,7 +15,9 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -130,13 +132,51 @@ def verify(root, name):
     return ok, lines
 
 
+def run_scan(root, extra, timeout):
+    """跑 scan-inbox.py，返回 (returncode, stdout, stderr, timed_out)。
+
+    超时要把**整个进程组**一起杀掉：scan-inbox 会派 reconcile.py / cognify，
+    subprocess.run 的 timeout 只杀直接子进程，孙子进程会变成孤儿继续跑，
+    几个孤儿同时啃 Cognee 就把机器拖死（现场 load 5.31 就是这么来的）。
+    """
+    cmd = [sys.executable, str(root / "scripts" / "scan-inbox.py"), *extra]
+    proc = subprocess.Popen(cmd, cwd=str(root), stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, text=True, start_new_session=True)
+    try:
+        out, err = proc.communicate(timeout=timeout)
+        return proc.returncode, out, err, False
+    except subprocess.TimeoutExpired:
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            try:
+                os.killpg(os.getpgid(proc.pid), sig)
+            except OSError:
+                pass
+            try:
+                out, err = proc.communicate(timeout=10)
+                break
+            except subprocess.TimeoutExpired:
+                continue
+        else:
+            out, err = proc.communicate()
+        return None, out, err, True
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="一条命令归档（M5）")
     ap.add_argument("--file", required=True, help="要归档的文件（任意路径）")
     ap.add_argument("--project", help="项目（huadu/huimin）；不给则先按文件名判，判不了读正文再判")
+    ap.add_argument("--category", default="",
+                    help="类别（发票票据/项目计划/项目执行/日常工作佐证/政策文件/其他）；"
+                         "给了就强制用这个类别，不再让规则/模型猜")
     ap.add_argument("--action", default="auto",
                     choices=["auto", "archive_only", "ocr", "vision"],
                     help="图片处置动作；auto=按 config/image_policy.yaml")
+    ap.add_argument("--no-cognify", action="store_true",
+                    help="归档后不重建索引（上传链路默认走这个，交给 15 分钟对账定时器）")
+    ap.add_argument("--only-self", action="store_true",
+                    help="只处理刚放进 inbox 的这个文件，不顺手处理别人刚放进去的")
+    ap.add_argument("--scan-timeout", type=float, default=600,
+                    help="scan-inbox 的超时秒数（默认 600）")
     ap.add_argument("--root", default=None)
     ap.add_argument("--dry-run", action="store_true", help="只看会做什么，不动文件")
     ap.add_argument("--json", action="store_true",
@@ -186,24 +226,39 @@ def main(argv=None):
         shutil.copy2(src, dest)
         print(f"  已复制（{src.stat().st_size} 字节）")
 
-    # 指定项目时写元数据，scan-inbox 会尊重它（项目强制，类别仍自动判）
+    # 指定项目 / 类别时写元数据，scan-inbox 会尊重它（没指定就让规则/模型判）
+    # 每次都重写：同名文件上一次留下的 meta.json 不能继续生效
+    meta = {}
     if args.project:
-        meta = dest.with_name(dest.name + ".meta.json")
-        meta.write_text(json.dumps({"project": args.project}, ensure_ascii=False),
-                        encoding="utf-8")
-        print(f"  元数据：{meta.name}（project={args.project}）")
+        meta["project"] = args.project
+    if args.category:
+        meta["category"] = args.category
+    meta_path = dest.with_name(dest.name + ".meta.json")
+    meta_path.write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+    if meta:
+        print(f"  元数据：{meta_path.name}（" +
+              " / ".join(f"{k}={v}" for k, v in meta.items()) + "）")
 
     t0 = time.time()
     print("\n=== 跑 scan-inbox.py ===")
-    proc = subprocess.run([sys.executable, str(root / "scripts" / "scan-inbox.py")],
-                          cwd=str(root), capture_output=True, text=True)
-    tail = [ln for ln in proc.stdout.splitlines() if ln.strip()][-12:]
+    extra = []
+    if args.no_cognify:
+        extra.append("--no-cognify")
+    if args.only_self:
+        # 只处理自己这个文件时不必再拉飞书：拉取由 15 分钟定时扫描负责，
+        # 上传链路少一次网络往返，也不会顺带把别人刚传的文件卷进来
+        extra += ["--only", rel.as_posix(), "--no-pull"]
+    rc, out, err, timed_out = run_scan(root, extra, args.scan_timeout)
+    tail = [ln for ln in (out or "").splitlines() if ln.strip()][-12:]
     for ln in tail:
         print(ln)
-    if proc.returncode != 0:
-        print(f"✗ scan-inbox 退出码 {proc.returncode}")
-        if proc.stderr.strip():
-            print(proc.stderr.strip()[-500:])
+    if timed_out:
+        print(f"✗ scan-inbox 超过 {args.scan_timeout:g}s，已终止整个进程组")
+        return 6
+    if rc != 0:
+        print(f"✗ scan-inbox 退出码 {rc}")
+        if (err or "").strip():
+            print(err.strip()[-500:])
         return 4
 
     print(f"\n=== 校验结果（{time.time() - t0:.1f}s）===")
@@ -216,6 +271,8 @@ def main(argv=None):
             "token": token,
             "project": (entry or {}).get("project"),
             "category": (entry or {}).get("category"),
+            "name": (entry or {}).get("name"),
+            "original_name": (entry or {}).get("original_name"),
             "status": (entry or {}).get("status"),
             "md": (entry or {}).get("md"),
             "feishu_token": (entry or {}).get("feishu_token"),
