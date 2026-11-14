@@ -182,3 +182,71 @@ def test_upload_returns_receipt(monkeypatch):
     assert out["ok"] is True
     assert out["token"] == "abc"
     assert out["project"] == "huadu"
+
+
+# ---------- 图片 / PDF 命名护栏 ----------
+
+def test_upload_rejects_image_without_date_or_project(monkeypatch):
+    user = _prep(monkeypatch)
+    called = []
+    _fake_archive(monkeypatch, out=_receipt(), called=called)
+    with pytest.raises(app.HTTPException) as ei:
+        app.upload_doc(FakeRequest(), FakeUpload(b"x", "微信图片_20261105.jpg"),
+                       "huadu", "", user, None)
+    assert ei.value.status_code == 400
+    assert "文件名不规范" in ei.value.detail
+    assert called == []
+
+
+def test_upload_rejects_image_missing_project_name(monkeypatch):
+    user = _prep(monkeypatch)
+    called = []
+    _fake_archive(monkeypatch, out=_receipt(), called=called)
+    with pytest.raises(app.HTTPException) as ei:
+        app.upload_doc(FakeRequest(), FakeUpload(b"x", "2026-11-05-签到表.jpg"),
+                       "huadu", "", user, None)
+    assert ei.value.status_code == 400
+    assert "项目名称" in ei.value.detail
+    assert called == []
+
+
+def test_upload_rejects_unnamed_pdf(monkeypatch):
+    user = _prep(monkeypatch)
+    called = []
+    _fake_archive(monkeypatch, out=_receipt(), called=called)
+    with pytest.raises(app.HTTPException) as ei:
+        app.upload_doc(FakeRequest(), FakeUpload(b"x", "扫描件.pdf"), "huadu", "", user, None)
+    assert ei.value.status_code == 400
+    assert "文件名不规范" in ei.value.detail
+    assert called == []
+
+
+def test_upload_accepts_well_named_image(monkeypatch):
+    user = _prep(monkeypatch)
+    called = []
+    _fake_archive(monkeypatch, out=_receipt(), called=called)
+    out = app.upload_doc(FakeRequest(),
+                         FakeUpload(b"x", "2026-11-05-花都-爱邻议事会第一期活动签到表.jpg"),
+                         "huadu", "", user, None)
+    assert out["ok"] is True
+    assert called and "--no-cognify" in called[0]
+
+
+def test_upload_naming_rule_does_not_apply_to_documents(monkeypatch):
+    user = _prep(monkeypatch)
+    called = []
+    _fake_archive(monkeypatch, out=_receipt(), called=called)
+    out = app.upload_doc(FakeRequest(), FakeUpload(b"x", "a.docx"), "huadu", "", user, None)
+    assert out["ok"] is True
+    assert called
+
+
+def test_check_api_upload_name_direct(monkeypatch):
+    monkeypatch.setattr(app, "_flow",
+                        lambda: {"projects": {"huadu": {"label": "花都"},
+                                              "huimin": {"label": "惠民"}}})
+    assert app.check_api_upload_name("2026-11-05-花都-签到表.jpg") == ""
+    assert app.check_api_upload_name("2026-11-05-花都-签到表.pdf") == ""
+    assert app.check_api_upload_name("a.docx") == ""
+    assert "日期" in app.check_api_upload_name("花都-签到表.jpg")
+    assert "图片描述" in app.check_api_upload_name("2026-11-05-花都.jpg")

@@ -41,6 +41,7 @@ if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 import manifest as _mf  # noqa: E402
 import error_queue as _eq  # noqa: E402
+import name_parse as _np  # noqa: E402
 PG_DSN = SETTINGS.db_dsn
 TZ = timezone(timedelta(hours=SETTINGS.timezone_offset_hours))
 TOKEN_TTL_HOURS = SETTINGS.token_ttl_hours
@@ -747,6 +748,50 @@ def _find_by_sha256(sha: str) -> tuple[str, dict] | None:
     return None
 
 
+# 图片 / PDF 经 API 上传时必须规范命名，否则拒收（服务端不再替客户端 OCR/识图）
+_API_OCR_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tif", ".tiff", ".pdf"}
+
+
+def _project_alias_maps() -> tuple[dict, dict]:
+    """项目别名（config/project_aliases.yaml）+ 项目标签（feishu-flow.yaml）。"""
+    aliases: dict[str, list[str]] = {}
+    p = ROOT / "config" / "project_aliases.yaml"
+    if p.is_file():
+        try:
+            data = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+            if isinstance(data, dict):
+                aliases = {str(k): [str(w) for w in (v or []) if w]
+                           for k, v in data.items() if isinstance(v, list)}
+        except Exception:
+            aliases = {}
+    labels = {str(k): str(v.get("label"))
+              for k, v in (_flow().get("projects") or {}).items()
+              if isinstance(v, dict) and v.get("label")}
+    return aliases, labels
+
+
+def check_api_upload_name(filename: str) -> str:
+    """图片/PDF 命名护栏：缺日期 / 项目名称 / 图片描述任一 → 返回拒收原因。
+
+    只从文件名取信息（name_parse），不读正文、不 OCR、不调视觉模型；
+    合规返回空串。文档类（docx/xlsx/md 等）不在此列。
+    """
+    ext = Path(filename or "").suffix.lower()
+    if ext not in _API_OCR_EXTS:
+        return ""
+    aliases, labels = _project_alias_maps()
+    info = _np.parse(filename, aliases, labels)
+    missing = [label for key, label in
+               (("date", "日期"), ("unit", "项目名称"), ("content", "图片描述"))
+               if not info.get(key)]
+    if not missing:
+        return ""
+    return ("文件名不规范（缺少：" + "、".join(missing) + "）。"
+            "图片/PDF 经 API 上传必须按「日期-项目名称-图片描述」规范命名"
+            "（例：2026-11-05-花都-爱邻议事会第一期活动签到表.jpg）；"
+            "请客户端自行 OCR 并规范命名后重新上传，服务端不再对未规范命名的图片/PDF 做 OCR/识图。")
+
+
 @app.post("/api/docs")
 def upload_doc(
     request: Request,
@@ -763,6 +808,9 @@ def upload_doc(
     reconcile 定时器。以前每传 1 张都跑一次全库对账，HTTP 响应被拖到 200–600 秒。
     端点用普通 def：Starlette 会丢线程池，不会像 async def 里 subprocess.run 那样
     把事件循环占死。
+
+    图片 / PDF 先过命名护栏（check_api_upload_name）：缺日期 / 项目名称 / 图片描述
+    一律 400 拒收，让客户端自行 OCR + 规范命名，服务端不再替它 OCR/识图。
     """
     if project:
         check_project(user, project)
@@ -776,6 +824,9 @@ def upload_doc(
         raise HTTPException(400, f"未知类别 {category}（可选：{'、'.join(categories)}）")
 
     filename = Path(file.filename or "upload.bin").name
+    name_error = check_api_upload_name(filename)
+    if name_error:
+        raise HTTPException(400, name_error)
     max_mb = int(SETTINGS.upload.get("max_mb", 50))
     max_bytes = max_mb * 1024 * 1024
     tmpdir = tempfile.mkdtemp()

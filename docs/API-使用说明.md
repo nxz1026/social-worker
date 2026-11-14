@@ -24,7 +24,7 @@ POST /api/login  body: {"username","password"}
 | GET | `/api/docs/{token}/status` | 登录 + 项目 | 五态详情（含 sha256 / md5 / 飞书链接 / 实体数） |
 | GET | `/api/docs/{token}/source` | 登录 + 项目 | 下载原件（二进制，逐次写审计） |
 | GET | `/api/docs/{token}/relations` | 登录 + 项目 | 实体分组 + 反链 + 共享实体 |
-| POST | `/api/docs` | editor/admin | 上传归档（multipart：`file`、可选 `project`、`category`）；超限 413、归档超时 202 |
+| POST | `/api/docs` | editor/admin | 上传归档（multipart：`file`、可选 `project`、`category`）；超限 413、归档超时 202；图片/PDF 命名不合规 400 |
 | PATCH | `/api/docs/{token}` | editor/admin | 修改内容（JSON：`{"content": "..."}`） |
 | DELETE | `/api/docs/{token}` | **admin** | 删除（trash 模式，可恢复） |
 | POST | `/api/docs/{token}/feishu` | admin | 旧副本改名 → 上传新副本 → 旧副本进飞书回收站 |
@@ -52,7 +52,7 @@ POST /api/login  body: {"username","password"}
 
 | 操作 | 耗时 | 说明 |
 |---|---|---|
-| 上传归档 | 通常 3–30s | 同步返回结构化回执；**上传链路不重建索引**（交给 15 分钟一次的 reconcile 定时器，见下）；有全部项目权限时 `project` 可省略（按文件名+内容判），否则必须显式指定（400）；`category` 可选，须是配置里的类别（否则 400）；超过 `upload.max_mb`（默认 50）返回 413；归档超时返回 **202**（见下） |
+| 上传归档 | 通常 3–30s | 同步返回结构化回执；**上传链路不重建索引**（交给 15 分钟一次的 reconcile 定时器，见下）；有全部项目权限时 `project` 可省略（按文件名+内容判），否则必须显式指定（400）；`category` 可选，须是配置里的类别（否则 400）；超过 `upload.max_mb`（默认 50）返回 413；归档超时返回 **202**（见下）；**图片/PDF 必须先规范命名**（日期+项目名称+图片描述，例 `2026-11-05-花都-爱邻议事会第一期活动签到表.jpg`），缺任一项返回 400，客户端需自行 OCR 并规范命名后重传 |
 | 检索 | 10–90s / 项目 | 不带 project 时按项目**串行**检索再合并，多项目耗时叠加；全部超时返回 `{"ok":true,"output":"","note":"检索超时..."}` |
 | 文书生成 | 2–6 分钟 | 先检索素材再调 LLM；超时（240s 无响应）返回 504 |
 | PATCH | 1–3 分钟 | 触发索引重建（同步阻塞） |
@@ -204,7 +204,7 @@ curl -sS --cacert "$CA_FILE" -X POST "$BASE/docs" -H "x-token: $TOKEN" \
 
 ## 注意
 
-- 归档文件名起描述性名（日期+项目+内容关键词），便于检索与溯源
+- 归档文件名起描述性名（日期+项目+内容关键词），便于检索与溯源；**图片/PDF 经 API 上传时这是硬要求**（缺日期/项目名称/图片描述一律 400 拒收，服务端不代做 OCR/识图）
 - 客户端脚本一律从环境变量 `SOCIALWORK_API` 取服务地址，不要把 IP/域名写进脚本；证书自签时用 `SSL_CERT_FILE` 或 `--cacert`，只有本机调试才临时设 `SOCIALWORK_INSECURE=1`（`skill/api.sh` 支持）
 - 显式 `project` 优先于内容判定，归档后可用详情里的 `detected_project` 对照内容识别结果
 - 检索/生成失败时先看 `note` 字段（超时提示）；`ok=false` 且无 `note` 才是真异常
