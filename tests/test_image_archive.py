@@ -142,3 +142,26 @@ def test_pending_item_shows_up_in_daily_reminder(tmp_path, monkeypatch):
     item = next(i for i in fb.collect(root, day) if i["file"] == "乱七八糟.jpg")
     assert item["problem"] == "文件名无日期/单位", "汇总要能说出为什么落这儿"
     assert item["where"].endswith("乱七八糟.jpg"), "得给出原件在哪"
+
+
+def test_deleted_entry_not_resurrected_from_inbox(tmp_path, monkeypatch):
+    """已下架文档的 inbox 副本不该被重新归档复活，且副本要清掉。"""
+    import hashlib
+    name = "2026-11-05-花都-已下架.jpg"
+    data = b"fake-jpeg-deleted"
+    root = _sandbox(tmp_path, {name: data})
+    sha = hashlib.sha256(data).hexdigest()
+    token = "local-" + sha[:16]
+    (root / "state").mkdir(parents=True, exist_ok=True)
+    (root / "state" / "manifest.yaml").write_text(yaml.safe_dump({"files": {
+        token: {"name": name, "project": "huadu", "category": "其他",
+                "sha256": sha, "status": "deleted",
+                "original": f"sources/projects/huadu/其他/{name}"}}},
+        allow_unicode=True), encoding="utf-8")
+
+    _, rc, called = _scan(root, monkeypatch)
+
+    assert rc == 0
+    assert called == [], "已下架文档不该再走分类/归档"
+    assert not (root / "inbox" / name).exists(), "inbox 副本要清掉，否则下轮又复活"
+    assert _entries(root)[token]["status"] == "deleted"

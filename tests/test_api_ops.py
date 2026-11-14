@@ -186,3 +186,30 @@ def test_trash_file_keeps_relative_path_for_restore(tmp_path, monkeypatch):
     assert (tmp_path / rel).is_file()
     assert app._restore_dest_parts(tuple(Path(rel).parts)) == (
         "sources", ("_待确认", "其他", "a.docx"))
+
+
+def test_delete_doc_allows_empty_project_for_admin(tmp_path, monkeypatch):
+    """待确认条目 project 为空，admin 删除不能因 check_project("") 403。"""
+    monkeypatch.setattr(app, "ROOT", tmp_path)
+    monkeypatch.setattr(app, "_load_manifest",
+                        lambda: {"files": {"tok1": {"name": "x.jpg", "project": "",
+                                                   "category": "其他",
+                                                   "status": "pending_review"}}})
+    monkeypatch.setattr(app, "audit", lambda *a, **k: None)
+    called = []
+
+    class R:
+        returncode = 0
+        stdout = "ok"
+        stderr = ""
+
+    def fake_run(cmd, **kw):
+        called.append(cmd)
+        return R()
+
+    monkeypatch.setattr(app.subprocess, "run", fake_run)
+    user = {"id": 1, "role": "admin", "projects": ["huadu", "huimin"]}
+    req = type("Req", (), {"client": type("C", (), {"host": "127.0.0.1"})()})()
+    out = app.delete_doc("tok1", req, user, None)
+    assert out["ok"] is True
+    assert called

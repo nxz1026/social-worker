@@ -743,7 +743,7 @@ def _find_by_sha256(sha: str) -> tuple[str, dict] | None:
         return None
     for tok, rec in (manifest.get("files") or {}).items():
         if (isinstance(rec, dict) and rec.get("sha256") == sha
-                and rec.get("status") in {"done", "pending_review"}):
+                and rec.get("status") in {"done", "pending", "pending_review"}):
             return tok, rec
     return None
 
@@ -948,7 +948,10 @@ def delete_doc(token: str, request: Request, user=Depends(require_admin),
     e = (manifest.get("files") or {}).get(token)
     if not e:
         raise HTTPException(404, "文档不存在")
-    check_project(user, e.get("project"))
+    # 待确认条目 project 为空（不属于任何项目），admin 端点直接放行；
+    # 否则 check_project("") 会因 admin 的 projects 不含空串而 403
+    if e.get("project"):
+        check_project(user, e.get("project"))
     try:
         proc = subprocess.run(
             ["python3", str(SCRIPTS / "delete.py"), token, "--mode", "trash", "--yes"],

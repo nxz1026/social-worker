@@ -59,6 +59,41 @@ def trash_md(root, vault, md_rel, dry_run):
     return dest.relative_to(root).as_posix()
 
 
+def find_orphan_mds(root, vault, stem, keep_rel):
+    """同名 md 的其他副本（重复上传残留的孤儿目录），返回相对路径列表。
+
+    只认同一 vault/md 下、与台账 md 同 stem 的 .md；排除 .trash 与台账指向的那份。
+    孤儿 md 不被台账引用，删台账 md 时不会被动到，随后会被 reconcile 重新索引，
+    让已删文档在 Cognee 里复活 —— 所以删除时要一并清掉。
+    """
+    out = []
+    if not stem:
+        return out
+    md_root = Path(vault) / "md"
+    if not md_root.is_dir():
+        return out
+    keep = _mf.normalize_rel(str(keep_rel)) if keep_rel else ""
+    for p in md_root.rglob("*.md"):
+        if ".trash" in p.parts or p.stem != stem:
+            continue
+        rel = _mf.rel_posix(p, root)
+        if rel and rel != keep:
+            out.append(rel)
+    return out
+
+
+def trash_source(root, orig_rel):
+    """把 sources 下的原件移到 sources/.trash/<日期>/<原相对路径>，返回目标相对路径。"""
+    src = Path(root) / orig_rel
+    rel = src.relative_to(Path(root))
+    sub = rel.parts[1:] if rel.parts[:1] == ("sources",) else (src.name,)
+    dest = (Path(root) / "sources" / TRASH_DIRNAME
+            / datetime.now(TZ).strftime("%Y-%m-%d") / Path(*sub))
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(src), str(dest))
+    return dest.relative_to(root).as_posix()
+
+
 def main():
     ap = argparse.ArgumentParser(description="删除一个已归档的文档")
     ap.add_argument("identifier", help="台账 token / 文件名 / md 路径 / 飞书 file_token")
@@ -100,27 +135,35 @@ def main():
         print("\n(dry-run，加 --yes 才真删)")
         return 0
 
-    # 1) vault md
+    # 1) vault md（含同 stem 的孤儿 md：重复上传残留、台账不引用，
+    #    只删台账那份的话孤儿会被 reconcile 重新索引，已删文档在 Cognee 复活）
     md_rel = entry.get("md")
+    stem = Path(md_rel).stem if md_rel else Path(name).stem
+    md_rels = [md_rel] if md_rel else []
     if md_rel:
+        md_rels += find_orphan_mds(root, vault, stem, md_rel)
+    for rel in md_rels:
         if args.mode == "trash":
-            moved = trash_md(root, vault, md_rel, False)
+            moved = trash_md(root, vault, rel, False)
             if moved:
                 print(f"  md → {moved}")
         else:
-            p = Path(root) / md_rel
+            p = Path(root) / rel
             if p.is_file():
                 p.unlink()
                 print("  md 已删除")
     # 2) sources 原件
+    orig = entry.get("original")
     if args.mode == "purge":
-        orig = entry.get("original")
         if orig and (Path(root) / orig).is_file():
             (Path(root) / orig).unlink()
             print(f"  原件已删除：{orig}")
+    elif not md_rel and orig and (Path(root) / orig).is_file():
+        # 无 md 的待确认条目：原件是唯一产物，下架到 sources/.trash，
+        # 否则会永远留在 _待确认 里
+        print(f"  原件 → {trash_source(root, orig)}")
     # 3) Cognee
     dataset = pcfg.get("dataset")
-    stem = Path(md_rel).stem if md_rel else Path(name).stem
     if dataset:
         key = _cg.load_key()
         try:

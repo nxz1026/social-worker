@@ -140,6 +140,64 @@ def test_main_dry_run_does_not_touch_files(tmp_path, monkeypatch):
     assert data["files"]["tok1"]["status"] == "done"
 
 
+# ---------- 孤儿 md / 无 md 原件 ----------
+
+def test_find_orphan_mds_same_stem_other_dir(tmp_path):
+    vault = tmp_path / "vault-huadu"
+    _write(vault / "md" / "其他" / "doc" / "doc.md")
+    _write(vault / "md" / "其他" / "doc-local-" / "doc.md")
+    _write(vault / ".trash" / "2026-11-14" / "md" / "其他" / "doc" / "doc.md")
+    got = dele.find_orphan_mds(tmp_path, vault, "doc", "vault-huadu/md/其他/doc/doc.md")
+    assert got == ["vault-huadu/md/其他/doc-local-/doc.md"]
+
+
+def test_trash_source_moves_under_sources_trash(tmp_path):
+    src = _write(tmp_path / "sources" / "_待确认" / "其他" / "x.jpg", "img")
+    moved = dele.trash_source(tmp_path, "sources/_待确认/其他/x.jpg")
+    assert not src.exists()
+    assert (tmp_path / moved).is_file()
+    assert ".trash" in moved and moved.endswith("_待确认/其他/x.jpg")
+
+
+def test_main_trashes_source_for_pending_review(tmp_path, monkeypatch):
+    """无 md 的待确认条目：原件是唯一产物，删除时要下架，不能留在 _待确认。"""
+    src = _write(tmp_path / "sources" / "_待确认" / "其他" / "x.jpg", "img")
+    _setup_root(tmp_path, {
+        "tok1": {"name": "x.jpg", "project": "", "category": "其他",
+                 "md": None, "original": "sources/_待确认/其他/x.jpg",
+                 "status": "pending_review"},
+    })
+    monkeypatch.setattr(dele, "load_config", lambda path=None: _fake_config(tmp_path))
+    monkeypatch.setattr(sys, "argv", ["delete.py", "tok1", "--yes", "--no-notify"])
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        assert dele.main() == 0
+    assert not src.exists()
+    assert "原件 →" in buf.getvalue()
+    data = yaml.safe_load((tmp_path / "state" / "manifest.yaml").read_text(encoding="utf-8"))
+    assert data["files"]["tok1"]["status"] == "deleted"
+
+
+def test_main_removes_orphan_md(tmp_path, monkeypatch):
+    """重复上传残留的孤儿 md 要一并下架，否则 reconcile 会把它重新索引。"""
+    keep = _write(tmp_path / "vault-huadu" / "md" / "其他" / "doc" / "doc.md", "a")
+    orphan = _write(tmp_path / "vault-huadu" / "md" / "其他" / "doc-local-" / "doc.md", "a")
+    _setup_root(tmp_path, {
+        "tok1": {"name": "doc.pdf", "project": "huadu", "category": "其他",
+                 "md": "vault-huadu/md/其他/doc/doc.md", "status": "done"},
+    })
+    monkeypatch.setattr(dele, "load_config", lambda path=None: _fake_config(tmp_path))
+    monkeypatch.setattr(sys, "argv", ["delete.py", "tok1", "--yes", "--no-notify"])
+    monkeypatch.setattr(dele._cg, "load_key", lambda: "k")
+    monkeypatch.setattr(dele._cg, "delete_by_name", lambda *a, **k: 1)
+    monkeypatch.setattr(dele._cg, "cognify", lambda *a, **k: True)
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        assert dele.main() == 0
+    assert not keep.exists() and not orphan.exists()
+    assert buf.getvalue().count("md →") == 2
+
+
 if __name__ == "__main__":
     for fn in (
         test_find_entries_match_and_multi,
