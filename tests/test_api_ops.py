@@ -213,3 +213,30 @@ def test_delete_doc_allows_empty_project_for_admin(tmp_path, monkeypatch):
     out = app.delete_doc("tok1", req, user, None)
     assert out["ok"] is True
     assert called
+
+
+def test_delete_doc_purge_passes_mode(tmp_path, monkeypatch):
+    """purge=true 走 delete.py --mode purge（连 sources 原件一起彻底删）。"""
+    monkeypatch.setattr(app, "ROOT", tmp_path)
+    monkeypatch.setattr(app, "_load_manifest",
+                        lambda: {"files": {"tok1": {"name": "a.docx", "project": "huadu",
+                                                   "status": "deleted"}}})
+    monkeypatch.setattr(app, "audit", lambda *a, **k: None)
+    called = []
+
+    class R:
+        returncode = 0
+        stdout = "ok"
+        stderr = ""
+
+    def fake_run(cmd, **kw):
+        called.append(cmd)
+        return R()
+
+    monkeypatch.setattr(app.subprocess, "run", fake_run)
+    user = {"id": 1, "role": "admin", "projects": ["huadu", "huimin"]}
+    req = type("Req", (), {"client": type("C", (), {"host": "127.0.0.1"})()})()
+    out = app.delete_doc("tok1", req, user, None, purge=True)
+    assert out["mode"] == "purge"
+    cmd = called[0]
+    assert cmd[cmd.index("--mode") + 1] == "purge"

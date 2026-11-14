@@ -943,7 +943,8 @@ def update_doc(token: str, body: dict, request: Request,
 
 @app.delete("/api/docs/{token}")
 def delete_doc(token: str, request: Request, user=Depends(require_admin),
-               conn=Depends(db)):
+               conn=Depends(db), purge: bool = False):
+    """删除文档。默认 trash（下架，可恢复）；purge=true 连 sources 原件一起彻底删。"""
     manifest = _load_manifest()
     e = (manifest.get("files") or {}).get(token)
     if not e:
@@ -952,18 +953,19 @@ def delete_doc(token: str, request: Request, user=Depends(require_admin),
     # 否则 check_project("") 会因 admin 的 projects 不含空串而 403
     if e.get("project"):
         check_project(user, e.get("project"))
+    mode = "purge" if purge else "trash"
     try:
         proc = subprocess.run(
-            ["python3", str(SCRIPTS / "delete.py"), token, "--mode", "trash", "--yes"],
+            ["python3", str(SCRIPTS / "delete.py"), token, "--mode", mode, "--yes"],
             cwd=str(ROOT), capture_output=True, text=True,
             timeout=int(SETTINGS.tasks["delete_timeout_seconds"]))
     except subprocess.TimeoutExpired:
         raise HTTPException(504, "删除超时（后台可能仍在跑，请稍后查回收站）")
     audit(conn, user["id"], "delete", e.get("project"), e.get("name"),
-          {"mode": "trash", "returncode": proc.returncode}, request.client.host)
+          {"mode": mode, "returncode": proc.returncode}, request.client.host)
     if proc.returncode != 0:
         raise HTTPException(500, f"删除失败：{proc.stdout[-300:]}")
-    return {"ok": True, "output": proc.stdout[-500:]}
+    return {"ok": True, "mode": mode, "output": proc.stdout[-500:]}
 
 
 # ---------- 文档操作：关系 / 飞书 / 索引 / 待确认 / 回收站 ----------

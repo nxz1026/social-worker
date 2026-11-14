@@ -26,7 +26,7 @@ POST /api/login  body: {"username","password"}
 | GET | `/api/docs/{token}/relations` | 登录 + 项目 | 实体分组 + 反链 + 共享实体 |
 | POST | `/api/docs` | editor/admin | 上传归档（multipart：`file`、可选 `project`、`category`）；超限 413、归档超时 202；图片/PDF 命名不合规 400 |
 | PATCH | `/api/docs/{token}` | editor/admin | 修改内容（JSON：`{"content": "..."}`） |
-| DELETE | `/api/docs/{token}` | **admin** | 删除（trash 模式，可恢复） |
+| DELETE | `/api/docs/{token}` | **admin** | 删除；默认 trash（下架，可恢复），`?purge=true` 连 `sources/` 原件一起彻底删 |
 | POST | `/api/docs/{token}/feishu` | admin | 旧副本改名 → 上传新副本 → 旧副本进飞书回收站 |
 | DELETE | `/api/docs/{token}/feishu` | admin | 删除飞书副本（本地原件/md/索引不动） |
 | POST | `/api/docs/{token}/reindex` | admin | 按项目数据集重建索引（同步，可能几十秒） |
