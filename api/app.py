@@ -636,9 +636,9 @@ def get_doc(token: str, user=Depends(current_user)):
     e = (manifest.get("files") or {}).get(token)
     if not e:
         raise HTTPException(404, "文档不存在")
-    check_project(user, e.get("project"))
     if e.get("status") == "deleted":
         raise HTTPException(404, "文档已删除")
+    check_project(user, e.get("project"))
     content = ""
     md_path = _mf.entry_path(ROOT, e)
     if md_path and md_path.is_file():
@@ -655,6 +655,8 @@ def get_doc_status(token: str, user=Depends(current_user)):
     e = _manifest_entry(token)
     if not e:
         raise HTTPException(404, "文档不存在")
+    if e.get("status") == "deleted":
+        raise HTTPException(404, "文档已删除")
     check_project(user, str(e.get("project") or ""))
     ds = _dataset_for(str(e.get("project") or ""))
     return status_mod.doc_status(
@@ -670,6 +672,8 @@ def download_source(token: str, request: Request,
     e = _manifest_entry(token)
     if not e:
         raise HTTPException(404, "文档不存在")
+    if e.get("status") == "deleted":
+        raise HTTPException(404, "文档已删除")
     check_project(user, str(e.get("project") or ""))
     rel = _mf.normalize_rel(str(e.get("original") or ""))
     if not rel:

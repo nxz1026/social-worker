@@ -162,6 +162,19 @@ def main():
         # 无 md 的待确认条目：原件是唯一产物，下架到 sources/.trash，
         # 否则会永远留在 _待确认 里
         print(f"  原件 → {trash_source(root, orig)}")
+    # 2.5) inbox 上传副本：文档已删就把暂存副本清掉，
+    #      否则定时扫描会拿它重新归档（已删文档复活）
+    inbox = Path(root) / "inbox"
+    for nm in {str(entry.get("original_name") or ""), str(entry.get("name") or "")}:
+        if not nm:
+            continue
+        for p in (inbox / nm, inbox / (nm + ".meta.json")):
+            try:
+                if p.is_file():
+                    p.unlink()
+                    print(f"  inbox 副本已清：{p.relative_to(root).as_posix()}")
+            except OSError:
+                pass
     # 3) Cognee
     dataset = pcfg.get("dataset")
     if dataset:

@@ -162,10 +162,12 @@ def test_trash_source_moves_under_sources_trash(tmp_path):
 def test_main_trashes_source_for_pending_review(tmp_path, monkeypatch):
     """无 md 的待确认条目：原件是唯一产物，删除时要下架，不能留在 _待确认。"""
     src = _write(tmp_path / "sources" / "_待确认" / "其他" / "x.jpg", "img")
+    inbox_copy = _write(tmp_path / "inbox" / "x.jpg", "img")
+    _write(tmp_path / "inbox" / "x.jpg.meta.json", "{}")
     _setup_root(tmp_path, {
         "tok1": {"name": "x.jpg", "project": "", "category": "其他",
                  "md": None, "original": "sources/_待确认/其他/x.jpg",
-                 "status": "pending_review"},
+                 "original_name": "x.jpg", "status": "pending_review"},
     })
     monkeypatch.setattr(dele, "load_config", lambda path=None: _fake_config(tmp_path))
     monkeypatch.setattr(sys, "argv", ["delete.py", "tok1", "--yes", "--no-notify"])
@@ -174,6 +176,7 @@ def test_main_trashes_source_for_pending_review(tmp_path, monkeypatch):
         assert dele.main() == 0
     assert not src.exists()
     assert "原件 →" in buf.getvalue()
+    assert not inbox_copy.exists(), "inbox 上传副本要清掉，否则定时扫描会复活它"
     data = yaml.safe_load((tmp_path / "state" / "manifest.yaml").read_text(encoding="utf-8"))
     assert data["files"]["tok1"]["status"] == "deleted"
 

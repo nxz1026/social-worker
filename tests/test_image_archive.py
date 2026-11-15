@@ -144,8 +144,8 @@ def test_pending_item_shows_up_in_daily_reminder(tmp_path, monkeypatch):
     assert item["where"].endswith("乱七八糟.jpg"), "得给出原件在哪"
 
 
-def test_deleted_entry_not_resurrected_from_inbox(tmp_path, monkeypatch):
-    """已下架文档的 inbox 副本不该被重新归档复活，且副本要清掉。"""
+def test_readd_of_deleted_content_rearchives(tmp_path, monkeypatch):
+    """已删内容再次上传要能重新归档，不能被“已删”永久挡住。"""
     import hashlib
     name = "2026-11-05-花都-已下架.jpg"
     data = b"fake-jpeg-deleted"
@@ -159,9 +159,9 @@ def test_deleted_entry_not_resurrected_from_inbox(tmp_path, monkeypatch):
                 "original": f"sources/projects/huadu/其他/{name}"}}},
         allow_unicode=True), encoding="utf-8")
 
-    _, rc, called = _scan(root, monkeypatch)
+    _, rc, _ = _scan(root, monkeypatch)
 
     assert rc == 0
-    assert called == [], "已下架文档不该再走分类/归档"
-    assert not (root / "inbox" / name).exists(), "inbox 副本要清掉，否则下轮又复活"
-    assert _entries(root)[token]["status"] == "deleted"
+    entry = _entries(root)[token]
+    assert entry["status"] in {"done", "pending"}, "已删内容应可重新归档"
+    assert entry.get("md"), "重新上传要产出 md"

@@ -886,22 +886,10 @@ def main() -> int:
         # 手工放进来的文件没有飞书 token，用内容 hash 当台账 key
         token = it.get("file_token") or f"local-{digest[:16]}"
         prev = manifest["files"].get(token)
-        if prev and prev.get("sha256") == digest:
-            status = prev.get("status")
-            if status == "deleted":
-                # 已下架的文档：inbox 里的上传副本不该再复活它，清掉副本
-                log(f"  = 跳过（已下架，清掉 inbox 副本）{rel}")
-                try:
-                    src.unlink()
-                    src.with_name(src.name + ".meta.json").unlink()
-                except OSError:
-                    pass
-                skipped += 1
-                continue
-            if status in {"done", "pending_review"}:
-                log(f"  = 跳过（已处理）{rel}")
-                skipped += 1
-                continue
+        if prev and prev.get("sha256") == digest and prev.get("status") in {"done", "pending_review"}:
+            log(f"  = 跳过（已处理）{rel}")
+            skipped += 1
+            continue
 
         if _mf.normalize_rel(rel) in open_error_files:
             log(f"  = 跳过（已有未处理错误）{rel} —— 处理后用 fallback.py --list 查看")
