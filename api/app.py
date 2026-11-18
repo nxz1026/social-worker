@@ -43,7 +43,14 @@ ROOT = SETTINGS.root
 SCRIPTS = ROOT / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
+# engine 是仓库根下的包，不在 scripts 里，单独把仓库根加进 sys.path
+REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 import name_parse as _np  # noqa: E402
+from engine import activities as _activities  # noqa: E402
+from engine import coding as _coding  # noqa: E402
+from engine import projects as _projects  # noqa: E402
 PG_DSN = SETTINGS.db_dsn
 TZ = timezone(timedelta(hours=SETTINGS.timezone_offset_hours))
 TOKEN_TTL_HOURS = SETTINGS.token_ttl_hours
@@ -1171,6 +1178,184 @@ def admin_audit(limit: int = 100, conn=Depends(db), user=Depends(require_admin))
     return {"items": [dict(zip(
         ["id", "username", "action", "project", "target", "detail", "ip", "ts"], r))
         for r in rows]}
+
+# ---------- 项目/活动 ----------
+def _project_short(item: dict) -> str:
+    """项目 yaml 的 short（= 目录名）；没配 short 时退回目录名。"""
+    data = item.get("data") or {}
+    proj = data.get("project") if isinstance(data, dict) else None
+    if not isinstance(proj, dict):
+        return str(item.get("name") or "")
+    return str(proj.get("short") or item.get("name") or "")
+
+
+def _project_allowed(user, item: dict) -> bool:
+    """admin 看全部；其余账号按 user_projects 与 project.short 的对应关系过滤。"""
+    if user["role"] == "admin":
+        return True
+    return _project_short(item) in scopes_of(user)
+
+
+@app.get("/api/projects")
+def api_list_projects(user=Depends(current_user)):
+    """列全部项目。admin 看到全部；editor/viewer 按授权项目过滤。"""
+    items = [p for p in _projects.list_projects() if _project_allowed(user, p)]
+    return {"total": len(items), "items": items}
+
+
+@app.get("/api/projects/{name}")
+def api_get_project(name: str, user=Depends(current_user)):
+    """单个项目主数据。没配置 yaml 的项目按 404 处理。"""
+    item = next((p for p in _projects.list_projects() if p["name"] == name), None)
+    if item is None or not item.get("has_config"):
+        raise HTTPException(404, f"项目不存在：{name}")
+    if not _project_allowed(user, item):
+        raise HTTPException(403, f"无项目 {name} 权限")
+    return item
+
+
+@app.get("/api/projects/{name}/activities")
+def api_list_activities(name: str, user=Depends(current_user)):
+    """活动清单：计划拆出来的 / 磁盘已有的 / 缺的 / 多出来的。"""
+    try:
+        data = _projects.load_project(name)
+    except FileNotFoundError:
+        raise HTTPException(404, f"项目不存在：{name}")
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    short = str((data.get("project") or {}).get("short") or name)
+    if user["role"] != "admin" and short not in scopes_of(user):
+        raise HTTPException(403, f"无项目 {name} 权限")
+
+    planned = _activities.plan_activities(data)
+    existing = _activities.list_existing_activities(Path(_projects.PROJECTS_ROOT) / name)
+    planned_names = [a["dirname"] for a in planned]
+    existing_set = set(existing)
+    planned_set = set(planned_names)
+    return {
+        "planned": planned,
+        "existing": existing,
+        "missing": [d for d in planned_names if d not in existing_set],
+        "extra": [d for d in existing if d not in planned_set],
+    }
+
+# ---------- engine P2：编号生成 / 活动目录 ----------
+def _project_meta_or_404(name: str) -> dict:
+    """取项目元数据：目录 / yaml 缺失按 404，yaml 损坏按 400。"""
+    try:
+        meta = _projects.project_meta(name)
+    except FileNotFoundError:
+        raise HTTPException(404, f"项目不存在：{name}")
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    if not meta["has_config"]:
+        raise HTTPException(404, f"项目没有 yaml：{name}")
+    return meta
+
+
+def _require_project_write(user, meta: dict) -> None:
+    """写权限：admin/editor；非 admin 还要求该项目在授权范围内。"""
+    if user["role"] not in ("admin", "editor"):
+        raise HTTPException(403, "无写权限（需 editor/admin）")
+    if user["role"] != "admin" and meta["short"] not in scopes_of(user):
+        raise HTTPException(403, f"无项目 {meta['name']} 权限")
+
+
+def _existing_codes(meta: dict) -> list[str]:
+    """本项目已有编号：project.code + 以编号命名的活动目录（解析不了的自动跳过）。"""
+    codes = [meta["code"]] if meta.get("code") else []
+    project_dir = Path(_projects.PROJECTS_ROOT) / meta["name"]
+    codes.extend(_activities.activity_dirs(project_dir).keys())
+    return codes
+
+
+def _project_year(name: str) -> int:
+    """立项年份取 project.period.start 的年份，缺失时退回当前年。"""
+    try:
+        data = _projects.load_project(name)
+    except (FileNotFoundError, ValueError):
+        return datetime.now(TZ).year
+    period = data.get("period") if isinstance(data.get("period"), dict) else {}
+    start = str(period.get("start") or "")
+    if len(start) >= 4 and start[:4].isdigit():
+        return int(start[:4])
+    return datetime.now(TZ).year
+
+
+@app.get("/api/projects/{name}/code")
+def api_project_code(name: str, act_type: int, act_month: int, serial: int = 0,
+                     user=Depends(current_user)):
+    """生成一个项目编号。serial=0 表示自动取下一个流水号。"""
+    meta = _project_meta_or_404(name)
+    if user["role"] != "admin" and meta["short"] not in scopes_of(user):
+        raise HTTPException(403, f"无项目 {name} 权限")
+    establish_month = meta["establish_month"]
+    if not establish_month:
+        raise HTTPException(400, "项目没有配置 code_rules.establish_month")
+    act_types = meta["act_types"]
+    if act_types and act_type not in set(act_types.values()):
+        raise HTTPException(400, f"活动类型号 {act_type} 不在项目配置里")
+    year = _project_year(name)
+    if not serial:
+        serial = _coding.next_serial(_existing_codes(meta), act_type=act_type, year=year)
+    try:
+        code = _coding.make_code(year=year, establish_month=establish_month,
+                                 act_type=act_type, act_month=act_month, serial=serial)
+        parsed = _coding.parse_code(code)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    return {"code": code, "parsed": parsed}
+
+
+@app.post("/api/projects/{name}/activities/split")
+def api_split_activities(name: str, body: dict, user=Depends(current_user)):
+    """按 indicators 建活动目录。body: {"dry_run": true/false}，默认只预演。"""
+    meta = _project_meta_or_404(name)
+    _require_project_write(user, meta)
+    try:
+        data = _projects.load_project(name)
+    except FileNotFoundError:
+        raise HTTPException(404, f"项目不存在：{name}")
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    planned = _activities.plan_activities(data)
+    planned_names = [a["dirname"] for a in planned]
+    project_dir = Path(_projects.PROJECTS_ROOT) / name
+
+    if bool(body.get("dry_run", True)):
+        existing = set(_activities.list_existing_activities(project_dir))
+        return {
+            "dry_run": True,
+            "would_create": [d for d in planned_names if d not in existing],
+            "would_skip": [d for d in planned_names if d in existing],
+        }
+
+    created = _activities.create_activity_dirs(project_dir, planned)
+    created_set = set(created)
+    return {
+        "dry_run": False,
+        "created": created,
+        "skipped": [d for d in planned_names if d not in created_set],
+    }
+
+
+@app.patch("/api/projects/{name}/activities/{dirname}")
+def api_rename_activity(name: str, dirname: str, body: dict,
+                        user=Depends(current_user)):
+    """重命名活动目录。body: {"new_name": "..."}。"""
+    meta = _project_meta_or_404(name)
+    _require_project_write(user, meta)
+    new_name = str(body.get("new_name") or "").strip()
+    if not new_name:
+        raise HTTPException(400, "new_name 不能为空")
+    project_dir = Path(_projects.PROJECTS_ROOT) / name
+    try:
+        _activities.rename_activity_dir(project_dir, dirname, new_name)
+    except FileNotFoundError:
+        raise HTTPException(404, f"活动目录不存在：{dirname}")
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    return {"ok": True, "old": dirname, "new": new_name}
 
 if __name__ == "__main__":
     import uvicorn

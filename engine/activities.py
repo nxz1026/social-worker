@@ -1,0 +1,138 @@
+#!/usr/bin/env python3
+"""按 indicators 拆活动清单。
+
+活动目录命名规则：<两位序号>-<指标名>-第<中文序数>期。
+序号全局连续，不按 indicator 的 code 走（code 可能写成 "02-04" 这种区间）。
+"""
+from __future__ import annotations
+
+from pathlib import Path
+
+CN_NUMS = "一二三四五六七八九十"
+_CN_DIGITS = "零一二三四五六七八九"
+
+
+def ordinal(n: int) -> str:
+    """1→一 … 10→十 … 12→十二 … 20→二十；超出 1..99 直接 str(n)。"""
+    try:
+        n = int(n)
+    except (TypeError, ValueError):
+        return str(n)
+    if n < 1 or n > 99:
+        return str(n)
+    if n <= 10:
+        return CN_NUMS[n - 1]
+    tens, ones = divmod(n, 10)
+    head = "" if tens == 1 else _CN_DIGITS[tens]
+    return head + "十" + (_CN_DIGITS[ones] if ones else "")
+
+
+def plan_activities(data: dict) -> list[dict]:
+    """按 indicators 拆活动。
+
+    返回 [{seq, dirname, indicator_name, target, budget, activity_budget}]；
+    count 缺省 1，count=N 时拆成 N 期，预算按 N 均摊。indicators 为空返回 []。
+    """
+    indicators = (data or {}).get("indicators") or []
+    out: list[dict] = []
+    seq = 0
+    for ind in indicators:
+        if not isinstance(ind, dict):
+            continue
+        name = str(ind.get("name") or "").strip()
+        try:
+            count = int(ind.get("count") or 1)
+        except (TypeError, ValueError):
+            count = 1
+        if count < 1:
+            count = 1
+        budget = ind.get("budget")
+        if budget is None or budget == "":
+            budget = 0
+        elif not isinstance(budget, (int, float)):
+            try:
+                budget = float(budget)
+            except (TypeError, ValueError):
+                budget = 0
+        for period in range(1, count + 1):
+            seq += 1
+            out.append({
+                "seq": seq,
+                "dirname": f"{seq:02d}-{name}-第{ordinal(period)}期",
+                "indicator_name": name,
+                "target": ind.get("target"),
+                "budget": budget,
+                # count=1 时就是 budget 本身，不引入浮点尾数
+                "activity_budget": budget if count == 1 else round(budget / count, 2),
+            })
+    return out
+
+
+def list_existing_activities(project_dir: Path) -> list[str]:
+    """读 <project_dir>/活动/ 下的子目录名，排序返回；目录不存在返回 []。"""
+    act_dir = Path(project_dir) / "活动"
+    if not act_dir.is_dir():
+        return []
+    return sorted(p.name for p in act_dir.iterdir() if p.is_dir())
+
+
+def no_extras(code: str) -> str:
+    """项目编号校验占位：返回去空白后的 code；是否为空由调用方判断。"""
+    return str(code if code is not None else "").strip()
+
+
+def _safe_dirname(name: str) -> str:
+    """活动目录名校验：空串、`.`、`..`、含路径分隔符一律拒绝。"""
+    raw = str(name if name is not None else "").strip()
+    if not raw:
+        raise ValueError("活动目录名不能为空")
+    if raw in (".", "..") or ".." in raw:
+        raise ValueError(f"活动目录名非法：{raw}")
+    if "/" in raw or "\\" in raw:
+        raise ValueError(f"活动目录名不能包含路径分隔符：{raw}")
+    return raw
+
+
+def activity_dirs(project_dir: Path) -> dict[str, Path]:
+    """返回 {目录名: 绝对路径}，只收 <project_dir>/活动/ 下的一级子目录。"""
+    act_dir = Path(project_dir) / "活动"
+    if not act_dir.is_dir():
+        return {}
+    return {p.name: p.resolve() for p in sorted(act_dir.iterdir()) if p.is_dir()}
+
+
+def create_activity_dirs(project_dir: Path, planned: list[dict]) -> list[str]:
+    """按 planned 建活动目录，幂等：已存在跳过。
+
+    只 mkdir，不写任何文件。返回实际新建的目录名列表。
+    """
+    if not planned:
+        return []
+    act_dir = Path(project_dir) / "活动"
+    act_dir.mkdir(parents=True, exist_ok=True)
+    created: list[str] = []
+    for item in planned:
+        dirname = _safe_dirname(item.get("dirname") if isinstance(item, dict) else item)
+        target = act_dir / dirname
+        if target.exists():
+            continue
+        target.mkdir()
+        created.append(dirname)
+    return created
+
+
+def rename_activity_dir(project_dir: Path, old: str, new: str) -> None:
+    """重命名活动目录。
+
+    old 不存在抛 FileNotFoundError；new 已存在抛 ValueError；名字非法抛 ValueError。
+    """
+    old_name = _safe_dirname(old)
+    new_name = _safe_dirname(new)
+    act_dir = Path(project_dir) / "活动"
+    old_path = act_dir / old_name
+    new_path = act_dir / new_name
+    if not old_path.is_dir():
+        raise FileNotFoundError(f"活动目录不存在：{old_name}")
+    if new_path.exists():
+        raise ValueError(f"目标目录已存在：{new_name}")
+    old_path.rename(new_path)
