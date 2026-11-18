@@ -1,0 +1,150 @@
+#!/usr/bin/env python3
+"""活动数据装载层：把项目 yaml + activity.yaml + 用户输入合成填充数据。
+
+产出的 dict 的 key 就是模板里的占位符名字（不带花括号），可直接交给
+engine.fill.render_* 使用。缺的字段留 None，不抛错——让 fill 的 missing
+列表告诉用户还缺什么，而不是在建数据阶段就中断。
+"""
+from __future__ import annotations
+
+import re
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+from . import projects
+from .ingest import read_activity_yaml
+
+# 中国标准时间（UTC+8），服务器时区不可靠时也能拿到当天日期
+CST = timezone(timedelta(hours=8))
+
+# 必须出现在返回结果里的 key；顺序即文档顺序
+REQUIRED_KEYS = (
+    "项目名称", "活动名称", "活动时间", "活动地点", "服务对象", "预计人数",
+    "实际人数", "项目社工", "项目负责人", "项目编号", "年月日", "填表日期",
+    "执行社工", "出纳", "经办人", "收款单位", "帐号", "开户行", "费用归属部门",
+    "领取人数", "测评人数", "总得分", "满意率", "平均分", "评定等级",
+)
+
+
+def _text(value) -> str | None:
+    """空值统一成 None，其余转字符串（编号这类字段 yaml 里可能写成数字）。"""
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _today_text() -> str:
+    """当天 CST 日期，格式 2026年11月18日。"""
+    now = datetime.now(CST)
+    return f"{now.year}年{now.month}月{now.day}日"
+
+
+def _name_from_dir(dirname: str) -> str | None:
+    """从活动目录名反推活动名称。
+
+    「11-共治行动-第一期」→「共治行动（第一期）」
+    「01-走访调研-第一期」→「走访调研（第一期）」
+    """
+    raw = re.sub(r"^\d+[-_]", "", str(dirname or "").strip())
+    if not raw:
+        return None
+    match = re.match(r"^(.*?)[-_]第(.+期)$", raw)
+    if match:
+        return f"{match.group(1)}（第{match.group(2)}）"
+    return raw
+
+
+def _resolve_activity_dir(project_name: str, activity_dir: str) -> Path:
+    """活动目录定位：支持绝对路径、目录名，也容忍「项目名/目录名」写法。"""
+    raw = str(activity_dir if activity_dir is not None else "").strip()
+    if not raw:
+        raise ValueError("活动目录不能为空")
+
+    path = Path(raw)
+    if path.is_absolute():
+        return path
+
+    parts = list(path.parts)
+    if len(parts) > 1 and parts[0] == project_name:
+        parts = parts[1:]
+    if not parts:
+        raise ValueError(f"活动目录不能只写项目名：{raw}")
+    return projects.activity_dir(project_name, str(Path(*parts)))
+
+
+def _load_project(project_name: str) -> dict:
+    """读项目 yaml；项目目录或 yaml 不存在时返回空 dict（字段留 None）。"""
+    try:
+        return projects.load_project(project_name)
+    except FileNotFoundError:
+        return {}
+
+
+def _project_code(project_name: str) -> str | None:
+    """项目 yaml 里已写回的 project.code（通常是空串）。"""
+    try:
+        return _text(projects.project_meta(project_name).get("code"))
+    except (FileNotFoundError, ValueError):
+        return None
+
+
+def build_data(project_name: str, activity_dir: str,
+               extra: dict | None = None) -> dict:
+    """合成填充数据，返回的 key 即占位符名字（不带 {{}}）。
+
+    来源优先级：extra > activity.yaml > 项目 yaml > 目录名推断 > None。
+    """
+    project = _load_project(project_name)
+    act_dir = _resolve_activity_dir(project_name, activity_dir)
+    activity = read_activity_yaml(act_dir) if act_dir.is_dir() else {}
+
+    proj = project.get("project") if isinstance(project.get("project"), dict) else {}
+    parties = project.get("parties") if isinstance(project.get("parties"), dict) else {}
+    staff = project.get("staff") if isinstance(project.get("staff"), dict) else {}
+    executer = parties.get("executer") if isinstance(parties.get("executer"), dict) else {}
+    leader = staff.get("leader") if isinstance(staff.get("leader"), dict) else {}
+
+    today = _today_text()
+    data = {
+        # 项目 yaml
+        "项目名称": _text(proj.get("name")) or project_name,
+        "项目社工": _text(leader.get("name")),
+        "项目负责人": _text(leader.get("name")),
+        "帐号": _text(executer.get("account")),
+        "开户行": _text(executer.get("bank")),
+        "收款单位": _text(executer.get("name")),
+        # activity.yaml
+        "项目编号": (_text(activity.get("code")) or _text(activity.get("项目编号"))
+                     or _project_code(project_name)),
+        "活动名称": (_text(activity.get("活动名称")) or _text(activity.get("name"))
+                     or _name_from_dir(act_dir.name)),
+        "活动时间": (_text(activity.get("活动时间")) or _text(activity.get("time"))
+                     or _text(activity.get("date"))),
+        "活动地点": _text(activity.get("活动地点")) or _text(activity.get("place")),
+        "服务对象": _text(activity.get("服务对象")),
+        "预计人数": _text(activity.get("预计人数")),
+        "实际人数": _text(activity.get("实际人数")),
+        "执行社工": _text(activity.get("执行社工")),
+        "出纳": _text(activity.get("出纳")),
+        "经办人": _text(activity.get("经办人")),
+        "费用归属部门": _text(activity.get("费用归属部门")),
+        "领取人数": _text(activity.get("领取人数")),
+        "测评人数": _text(activity.get("测评人数")),
+        "总得分": _text(activity.get("总得分")),
+        "满意率": _text(activity.get("满意率")),
+        "平均分": _text(activity.get("平均分")),
+        "评定等级": _text(activity.get("评定等级")),
+        # 日期：当天
+        "年月日": today,
+        "填表日期": today,
+    }
+
+    # 契约兜底：即使上面漏写，也保证 REQUIRED_KEYS 里的 key 都存在
+    for key in REQUIRED_KEYS:
+        data.setdefault(key, None)
+
+    if extra:
+        for key, value in extra.items():
+            data[key] = value
+    return data
