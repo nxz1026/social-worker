@@ -35,8 +35,8 @@ DEFAULTS = {
     "db": {"dsn": ""},
     "projects": ["huadu", "huimin"],
     "llm": {
-        "endpoint": "",
-        "model": "",
+        "base_url": "",
+        "model_id": "",
         "api_key": "",
         "max_tokens": 16000,
         "timeout_seconds": 240,

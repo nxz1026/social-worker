@@ -17,6 +17,7 @@ import mimetypes
 import os
 import posixpath
 import secrets
+import socket
 import shutil
 import signal
 import subprocess
@@ -64,56 +65,69 @@ TYPE_MAP = {
 }
 
 def llm_chat(prompt: str, max_tokens: int | None = None) -> tuple[str, str]:
-    """调上游 LLM 生成文书。
+    """调上游 LLM。三个参数：base_url / api_key / model_id。
 
-    地址 / 模型 / key 的优先级：环境变量 > config/api.yaml 的 llm 段 > 服务端 .env。
-    返回 (正文, finish_reason)。LongCat 是推理模型，reasoning 与正文共用
-    max_tokens，预算给小了正文会被截断，默认值见 config/api.yaml。
+    优先级：环境变量 > config/api.yaml 的 llm 段 > 服务端 .env。
+    返回 (正文, finish_reason)。
     """
     max_tokens = max_tokens or int(SETTINGS.llm["max_tokens"])
-    import urllib.request
-    env = {}
-    for line in (ROOT / ".env").read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if line and not line.startswith("#") and "=" in line:
-            k, v = line.split("=", 1)
-            env[k.strip()] = v.strip().strip('"').strip("'")
-    endpoint = (os.environ.get("LLM_ENDPOINT")
-                or SETTINGS.llm.get("endpoint") or env.get("LLM_ENDPOINT", ""))
-    key = (os.environ.get("LLM_API_KEY")
-           or SETTINGS.llm.get("api_key") or env.get("LLM_API_KEY", ""))
-    model = (os.environ.get("LLM_MODEL")
-             or SETTINGS.llm.get("model") or env.get("LLM_MODEL", "")).split("/")[-1]
-    if not endpoint or not key or not model:
+    env: dict[str, str] = {}
+    env_file = ROOT / ".env"
+    if env_file.is_file():
+        for line in env_file.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, v = line.split("=", 1)
+                env[k.strip()] = v.strip().strip('"').strip("'")
+
+    def pick(key: str, *env_names: str) -> str:
+        for name in env_names:
+            val = os.environ.get(name)
+            if val:
+                return val
+        val = SETTINGS.llm.get(key)
+        if val:
+            return str(val)
+        for name in env_names:
+            if env.get(name):
+                return env[name]
+        return ""
+
+    base_url = pick("base_url", "LLM_BASE_URL", "LLM_ENDPOINT")
+    api_key = pick("api_key", "LLM_API_KEY")
+    model_id = pick("model_id", "LLM_MODEL_ID", "LLM_MODEL").split("/")[-1]
+    if not base_url or not api_key or not model_id:
         raise RuntimeError(
-            "LLM 未配置：在 config/api.yaml 的 llm 段或服务端 .env 填 endpoint / model / api_key")
-    body = {"model": model,
+            "LLM 未配置：在 config/api.yaml 的 llm 段填 base_url / api_key / model_id，"
+            "或设置环境变量 LLM_BASE_URL / LLM_API_KEY / LLM_MODEL_ID")
+
+    body = {"model": model_id,
             "messages": [{"role": "user", "content": prompt}],
             "temperature": float(SETTINGS.llm["temperature"]),
             "max_tokens": max_tokens}
     req = urllib.request.Request(
-        endpoint.rstrip("/") + "/chat/completions",
+        base_url.rstrip("/") + "/chat/completions",
         data=json.dumps(body).encode(),
-        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"})
+        headers={"Authorization": f"Bearer {api_key}",
+                 "Content-Type": "application/json"})
     try:
         with urllib.request.urlopen(
                 req, timeout=int(SETTINGS.llm["timeout_seconds"])) as resp:
             data = json.loads(resp.read().decode())
     except Exception as exc:
-        # 区分超时与其它错误，便于上层返回 504/500
-        # urllib 超时会包成 URLError(reason=socket.timeout)
         reason = getattr(exc, "reason", exc)
-        if isinstance(reason, TimeoutError) or "timed out" in str(exc).lower():
-            raise TimeoutError(str(exc)) from exc
+        if isinstance(reason, socket.timeout):
+            raise TimeoutError(str(exc))
         raise
+
     choice = (data.get("choices") or [{}])[0]
-    finish = choice.get("finish_reason") or ""
-    content = (choice.get("message") or {}).get("content")
-    if not isinstance(content, str) or not content.strip():
+    content = (choice.get("message") or {}).get("content") or ""
+    finish = str(choice.get("finish_reason") or "")
+    if not content:
         usage = data.get("usage") or {}
         reasoning = (usage.get("completion_tokens_details") or {}).get("reasoning_tokens")
         raise RuntimeError(
-            f"上游未返回正文（finish_reason={finish}, reasoning_tokens={reasoning}）")
+            f"上游没有返回正文（finish_reason={finish}, reasoning_tokens={reasoning}）")
     return content, finish
 
 # ---------- DB ----------
@@ -314,6 +328,26 @@ def _entry_md_path(e: dict) -> Path | None:
     """台账条目的 md 路径；没有就返回 None。"""
     rel = _normalize_rel(e.get("md") or e.get("md_path") or "")
     return (ROOT / rel) if rel else None
+
+def _normalize_rel(rel: str) -> str:
+    """台账路径归一成相对 ROOT 的 posix 形式；空值返回空串。"""
+    rel = str(rel or "").strip().replace("\\", "/")
+    if not rel:
+        return ""
+    p = Path(rel)
+    if p.is_absolute():
+        try:
+            return p.resolve().relative_to(ROOT.resolve()).as_posix()
+        except ValueError:
+            return ""
+    return posixpath.normpath(rel).lstrip("./")
+
+
+def _entry_md_path(e: dict) -> Path | None:
+    """台账条目的 md 路径；没有就返回 None。"""
+    rel = _normalize_rel(e.get("md") or e.get("md_path") or "")
+    return (ROOT / rel) if rel else None
+
 
 def _manifest_entry(token: str) -> dict | None:
     e = (_load_manifest().get("files") or {}).get(token)
@@ -1005,7 +1039,6 @@ def generate(body: dict, request: Request, user=Depends(current_user),
 - 正文 ≤14,000 字
 - 直接输出文书正文，不要额外说明"""
 
-    import socket
     import traceback
     try:
         content, finish = llm_chat(prompt)
