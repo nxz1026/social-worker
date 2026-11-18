@@ -21,9 +21,10 @@ CST = timezone(timedelta(hours=8))
 # 必须出现在返回结果里的 key；顺序即文档顺序
 REQUIRED_KEYS = (
     "项目名称", "活动名称", "活动时间", "活动地点", "服务对象", "预计人数",
-    "实际人数", "项目社工", "项目负责人", "项目编号", "年月日", "填表日期",
-    "执行社工", "出纳", "经办人", "收款单位", "帐号", "开户行", "费用归属部门",
-    "领取人数", "测评人数", "总得分", "满意率", "平均分", "评定等级",
+    "实际人数", "人手分配", "项目社工", "项目负责人", "项目编号", "年月日",
+    "填表日期", "执行社工", "出纳", "经办人", "收款单位", "帐号", "开户行",
+    "费用归属部门", "领取人数", "测评人数", "总得分", "满意率", "平均分",
+    "评定等级",
 )
 
 # 计划书里的多行表格：LLM 给的对象数组 → 模板里的 {{前缀_N}}。
@@ -101,6 +102,44 @@ def _project_code(project_name: str) -> str | None:
         return _text(projects.project_meta(project_name).get("code"))
     except (FileNotFoundError, ValueError):
         return None
+
+
+def _as_int(value) -> int | None:
+    """把「3」「3人」这类值转成整数；转不了返回 None。"""
+    match = re.match(r"^\s*(\d+)", str(value if value is not None else ""))
+    return int(match.group(1)) if match else None
+
+
+def _staff_count(staff: dict) -> int:
+    """数项目 yaml staff 段里有姓名的岗位数：leader / social_worker … 各算 1 人。
+
+    兼容 staff 写成列表的形式；一个都数不出来时按 1 人兜底，避免填出「0名项目社工」。
+    """
+    if isinstance(staff, list):
+        count = sum(1 for item in staff
+                    if isinstance(item, dict) and _text(item.get("name")))
+        return count or 1
+    count = sum(1 for item in staff.values()
+                if isinstance(item, dict) and _text(item.get("name")))
+    return count or 1
+
+
+def _staffing_text(staff: dict, data: dict) -> str:
+    """推导 {{人手分配}}：「3名项目社工，2个社区网格、0个微网格」。
+
+    社工人数优先取活动情况（extra / activity.yaml 的 社工人数），否则按项目
+    yaml 的 staff 岗位数；网格数只有明确给了才拼上，没给就只写社工。
+    """
+    count = (_as_int(data.get("社工人数")) or _as_int(data.get("项目社工人数"))
+             or _staff_count(staff))
+    text = f"{count}名项目社工"
+    grids = _as_int(data.get("社区网格数"))
+    micro = _as_int(data.get("微网格数"))
+    if grids is not None:
+        text += f"，{grids}个社区网格"
+    if micro is not None:
+        text += f"、{micro}个微网格"
+    return text
 
 
 def expand_plan_rows(data: dict, plan: dict,
@@ -199,4 +238,8 @@ def build_data(project_name: str, activity_dir: str,
                 for seq, item in enumerate(value, start=1):
                     data.setdefault(f"{key}_{seq}", item)
         expand_plan_rows(data, extra, notes)
+
+    # 人手分配要用到 extra / activity.yaml 里的社工人数与网格数，所以放在合并之后推导；
+    # extra 显式给了就尊重显式值
+    data["人手分配"] = data.get("人手分配") or _staffing_text(staff, data)
     return data

@@ -117,7 +117,7 @@ def test_build_prompt_rejects_unknown_style():
 
 def test_build_prompt_rejects_unknown_task():
     with pytest.raises(ValueError, match="未知任务"):
-        llm.build_prompt("summary", _brief_facts(), "务实")
+        llm.build_prompt("不存在的任务", _brief_facts(), "务实")
 
 
 # --------------------------------------------------------------------------
