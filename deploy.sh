@@ -44,4 +44,4 @@ n=$(curl -s http://127.0.0.1:8001/openapi.json \
 echo "  路由数: $n"
 [ "$n" -ge 30 ] || { echo "  ! 路由数异常，服务可能没起来"; exit 1; }
 
-echo "== 完成：https://140.83.62.161/sw/ =="
+echo "== 完成：https://<host>/sw/ =="
