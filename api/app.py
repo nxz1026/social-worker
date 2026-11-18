@@ -49,6 +49,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 import name_parse as _np  # noqa: E402
 from engine import activities as _activities  # noqa: E402
+from engine import checks as _checks  # noqa: E402
 from engine import coding as _coding  # noqa: E402
 from engine import projects as _projects  # noqa: E402
 PG_DSN = SETTINGS.db_dsn
@@ -1370,6 +1371,27 @@ def api_rename_activity(name: str, dirname: str, body: dict,
     except ValueError as exc:
         raise HTTPException(400, str(exc))
     return {"ok": True, "old": dirname, "new": new_name}
+
+@app.get("/api/projects/{name}/activities/{dirname}/check")
+def api_check_activity(name: str, dirname: str, user=Depends(current_user)):
+    """15 项核对。返回 check() 的结果。权限同其它 activity 端点。"""
+    try:
+        data = _projects.load_project(name)
+    except FileNotFoundError:
+        raise HTTPException(404, f"项目不存在：{name}")
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    short = str((data.get("project") or {}).get("short") or name)
+    if user["role"] != "admin" and short not in scopes_of(user):
+        raise HTTPException(403, f"无项目 {name} 权限")
+    try:
+        act_dir = _projects.activity_dir(name, dirname)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    if not act_dir.is_dir():
+        raise HTTPException(404, f"活动目录不存在：{dirname}")
+    return _checks.check(act_dir)
+
 
 if __name__ == "__main__":
     import uvicorn
