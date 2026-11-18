@@ -162,6 +162,62 @@ def test_read_workbook_skips_rows_without_key_column(empty_book: Path):
 
 
 # --------------------------------------------------------------------------
+# fill_workbook：自动写入
+# --------------------------------------------------------------------------
+
+def _step(index: int, stage: str = "执行阶段") -> dict:
+    return {"阶段": stage, "时间": "9:00", "内容": f"环节{index}",
+            "所需物资": "横幅", "人员": "社工", "备注": ""}
+
+
+def test_fill_workbook_round_trip_three_steps(empty_book: Path):
+    counts = plan_sheet.fill_workbook(empty_book, {
+        "环节": [_step(1, "准备阶段"), _step(2), _step(3, "总结归档")],
+        "困难": [{"预计困难": "下雨", "解决方案": "改到室内"}],
+        "物资": [
+            {"类别": "广告宣传费", "物资名称": "横幅", "数量\\规格": "2条", "单价": 50},
+            {"类别": "活动物资费", "物资名称": "矿泉水", "数量\\规格": "3箱", "单价": 30},
+        ],
+    })
+    assert counts == {"环节": 3, "困难": 1, "物资": 2}
+
+    book = plan_sheet.read_workbook(empty_book)
+    assert [item["内容"] for item in book["环节"]] == ["环节1", "环节2", "环节3"]
+    assert book["环节"][0]["阶段"] == "准备阶段"
+    assert book["困难"] == [{"预计困难": "下雨", "解决方案": "改到室内"}]
+    assert [item["物资名称"] for item in book["物资"]] == ["横幅", "矿泉水"]
+    assert book["物资合计"] == 190
+
+    # 小计列写公式，不写死值
+    workbook = load_workbook(str(empty_book))
+    assert workbook["物资预算"]["E2"].value.startswith("=D2*")
+    assert workbook["物资预算"]["E3"].value.startswith("=D3*")
+
+
+def test_fill_workbook_adds_rows_beyond_capacity(empty_book: Path):
+    """超过 20 行时自动加行；物资表的合计行仍在最后一行。"""
+    steps = [_step(index) for index in range(1, 26)]
+    materials = [{"类别": "活动物资费", "物资名称": f"物资{index}",
+                  "数量\\规格": "1个", "单价": 10} for index in range(1, 26)]
+
+    counts = plan_sheet.fill_workbook(
+        empty_book, {"环节": steps, "困难": [], "物资": materials})
+    assert counts == {"环节": 25, "困难": 0, "物资": 25}
+
+    workbook = load_workbook(str(empty_book))
+    assert workbook["环节安排"].max_row == 26          # 表头 + 25 行
+    material = workbook["物资预算"]
+    assert material.max_row == 27                     # 表头 + 25 行 + 合计
+    assert material["A27"].value == "合计"
+    assert material["E27"].value == "=SUM(E2:E26)"
+
+    book = plan_sheet.read_workbook(empty_book)
+    assert len(book["环节"]) == 25
+    assert len(book["物资"]) == 25
+    assert book["物资合计"] == 250
+
+
+# --------------------------------------------------------------------------
 # to_fill_data
 # --------------------------------------------------------------------------
 

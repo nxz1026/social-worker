@@ -14,6 +14,7 @@ Excel 由 scripts/make_plan_xlsx.py 从 计划书.docx 的三张表生成：
 from __future__ import annotations
 
 import re
+from copy import copy
 from pathlib import Path
 
 import openpyxl
@@ -35,6 +36,13 @@ MATERIAL_ROWS = 5
 
 # 数量\规格的前导数字："2张" → 2，"1.5米" → 1.5，"两箱" → 取不到
 _QUANTITY_RE = re.compile(r"^\s*(\d+(?:\.\d+)?)")
+
+# 小计公式：先按「个」取前缀，取不出再按前导数字取，最后按 1 算。
+# 与 scripts/make_plan_xlsx.py 共用同一份，避免两处口径漂移。
+SUBTOTAL_FORMULA = (
+    '=D{row}*IFERROR(VALUE(LEFT(C{row},FIND("个",C{row}&"个")-1)),'
+    'IFERROR(LOOKUP(9E+307,--LEFT(C{row},ROW($1:$15))),1))'
+)
 
 
 def _text(value) -> str:
@@ -118,6 +126,126 @@ def read_workbook(path: Path) -> dict:
         "物资": materials,
         "物资合计": total,
     }
+
+
+# --------------------------------------------------------------------------
+# 写入（自动填表）
+# --------------------------------------------------------------------------
+
+def _capacity(sheet, total_marker: str = "合计") -> tuple[int, int | None]:
+    """返回 (数据行数, 合计行号)。
+
+    合计行按 A 列的「合计」识别（物资预算表最后一行）；识别不到时把表尾
+    当作数据区末尾。数据行从第 2 行开始，不含表头与合计行。
+    """
+    total_row: int | None = None
+    for row in range(2, sheet.max_row + 1):
+        if _text(sheet.cell(row=row, column=1).value) == total_marker:
+            total_row = row
+            break
+    capacity = total_row - 2 if total_row else max(sheet.max_row - 1, 0)
+    return max(capacity, 0), total_row
+
+
+def _grow(sheet, capacity: int, needed: int, columns: int,
+          total_row: int | None) -> int:
+    """数据行不够时插行，并把上一行的样式复制到新行。
+
+    openpyxl 的 insert_rows 只挪单元格，不复制样式；不补样式的话新行会变成
+    默认字体、无边框，用户一眼就能看出是程序拼的。
+    """
+    if needed <= capacity:
+        return capacity
+
+    extra = needed - capacity
+    # 有合计行时插在合计行之前，保证合计仍在最后一行
+    at = total_row if total_row else capacity + 2
+    sheet.insert_rows(at, extra)
+
+    source = at - 1
+    for row in range(at, at + extra):
+        for col in range(1, columns + 1):
+            sheet.cell(row=row, column=col)._style = copy(
+                sheet.cell(row=source, column=col)._style)
+        height = sheet.row_dimensions[source].height
+        if height is not None:
+            sheet.row_dimensions[row].height = height
+    return capacity + extra
+
+
+def _write_plain(sheet, fields: tuple[str, ...], rows: list[dict]) -> int:
+    """环节 / 困难表：按列顺序逐格写文本，多余的空行写空串。"""
+    old_capacity, _ = _capacity(sheet)
+    capacity = _grow(sheet, old_capacity, len(rows), len(fields), None)
+
+    for offset in range(capacity):
+        row = 2 + offset
+        item = rows[offset] if offset < len(rows) else {}
+        for col, field in enumerate(fields, start=1):
+            sheet.cell(row=row, column=col, value=_text(item.get(field)))
+    return len(rows)
+
+
+def _write_materials(sheet, rows: list[dict]) -> int:
+    """物资预算表：小计一律写公式，单价写数字，合计行随行数下移。"""
+    old_capacity, total_row = _capacity(sheet)
+    capacity = _grow(sheet, old_capacity, len(rows), len(MATERIAL_FIELDS), total_row)
+    if total_row is not None:
+        total_row += capacity - old_capacity          # 插行后合计行下移
+
+    for offset in range(capacity):
+        row = 2 + offset
+        item = rows[offset] if offset < len(rows) else {}
+        sheet.cell(row=row, column=1, value=_text(item.get("类别")))
+        sheet.cell(row=row, column=2, value=_text(item.get("物资名称")))
+        sheet.cell(row=row, column=3, value=_text(item.get("数量\\规格")))
+
+        # 单价为空时留空单元格：空值与数字相乘按 0 算，写空串会变成 #VALUE!
+        raw_price = item.get("单价")
+        price = _money(raw_price) if _text(raw_price) else None
+        price_cell = sheet.cell(row=row, column=4, value=price)
+        price_cell.number_format = "0.00"
+
+        subtotal_cell = sheet.cell(
+            row=row, column=5, value=SUBTOTAL_FORMULA.format(row=row))
+        subtotal_cell.number_format = "0.00"
+
+    if total_row is not None:
+        sheet.cell(row=total_row, column=1, value="合计")
+        total_cell = sheet.cell(row=total_row, column=5,
+                                value=f"=SUM(E2:E{capacity + 1})")
+        total_cell.number_format = "0.00"
+    return len(rows)
+
+
+def fill_workbook(path: Path, book: dict) -> dict:
+    """把 book 内容写进已生成的 xlsx（就地覆盖空行）。
+
+    book 结构同 read_workbook 的返回：{"环节": [...], "困难": [...], "物资": [...]}。
+    环节/困难/物资 各自写入对应 sheet 的第 2 行起；超过 sheet 现有数据行数时
+    自动加行（复制上一行样式）。物资小计列写公式，不写死值。
+    返回 {"环节": n, "困难": n, "物资": n}。
+    """
+    path = Path(path)
+    workbook = openpyxl.load_workbook(str(path))
+    try:
+        missing = [name for name in (SHEET_STEP, SHEET_DIFFICULTY, SHEET_MATERIAL)
+                   if name not in workbook.sheetnames]
+        if missing:
+            raise ValueError(f"填写表缺少工作表：{'、'.join(missing)}")
+
+        counts = {
+            "环节": _write_plain(workbook[SHEET_STEP], STEP_FIELDS,
+                                 list(book.get("环节") or [])),
+            "困难": _write_plain(workbook[SHEET_DIFFICULTY], DIFFICULTY_FIELDS,
+                                 list(book.get("困难") or [])),
+            "物资": _write_materials(workbook[SHEET_MATERIAL],
+                                     list(book.get("物资") or [])),
+        }
+        workbook.save(str(path))
+    finally:
+        workbook.close()
+    return counts
 
 
 def _truncate(rows: list[dict], limit: int, label: str,

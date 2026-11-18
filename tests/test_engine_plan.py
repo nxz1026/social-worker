@@ -21,7 +21,7 @@ from engine import activity, llm  # noqa: E402
 # --------------------------------------------------------------------------
 
 def _plan_result() -> dict:
-    """一份合法的模型输出：6 段文字 + 环节 3 条 + 预计困难 2 条。"""
+    """一份合法的模型输出：6 段文字 + 环节 3 条 + 预计困难 2 条 + 物资 2 条。"""
     return {
         "活动背景内容": "民乐北巷电瓶车乱停乱放长期挤占通道。",
         "活动目的内容": "依据治理公约开展实地整治，疏通通道。",
@@ -38,14 +38,19 @@ def _plan_result() -> dict:
             {"困难": "车主不配合挪车", "方案": "提前张贴告知，联合社区劝导"},
             {"困难": "挪车时剐蹭受伤", "方案": "两人一组，备急救包"},
         ],
+        "物资": [
+            {"类别": "广告宣传费", "名称": "横幅", "规格": "5米", "单价": 12},
+            {"类别": "活动物资费", "名称": "KT板", "规格": "4个", "单价": 40},
+        ],
     }
 
 
 def test_plan_task_registered_with_fields_in_order():
     spec = llm.TASKS["plan"]
     assert spec["fields"] == ("活动背景内容", "活动目的内容", "活动目标内容",
-                             "目标人群", "宣传方式", "筛选方式", "环节", "预计困难")
-    assert set(spec["lists"]) == {"环节", "预计困难"}
+                             "目标人群", "宣传方式", "筛选方式", "环节",
+                             "预计困难", "物资")
+    assert set(spec["lists"]) == {"环节", "预计困难", "物资"}
 
 
 def test_build_prompt_plan_has_nested_skeleton_and_row_rules():
@@ -56,13 +61,16 @@ def test_build_prompt_plan_has_nested_skeleton_and_row_rules():
     # 骨架里带上了数组元素的结构
     assert '"环节"' in prompt and '"内容"' in prompt and '"人员"' in prompt
     assert '"预计困难"' in prompt and '"方案"' in prompt
+    assert '"物资"' in prompt and '"类别"' in prompt and '"单价"' in prompt
     assert "环节给 2~5 条" in prompt
     assert "预计困难给 2~4 条" in prompt
+    assert "物资清单给 3~8 条" in prompt
+    assert "预算上限" in prompt
 
 
 def test_build_prompt_plan_uses_task_intro():
     prompt = llm.build_prompt("plan", {}, "务实")
-    assert "需要生成 6 段文字与 2 个列表" in prompt
+    assert "需要生成 6 段文字与 3 个列表" in prompt
     assert "需要生成 8 段" not in prompt
 
 
@@ -78,6 +86,16 @@ def test_normalize_plan_keeps_text_and_rows():
     assert out["环节"][0] == {"内容": "集合签到，宣读公约。",
                               "物资": "签到表、公约", "人员": "聂聃"}
     assert out["预计困难"][1]["方案"] == "两人一组，备急救包"
+    assert out["物资"][0]["类别"] == "广告宣传费"
+    assert out["物资"][1]["规格"] == "4个"
+
+
+def test_normalize_plan_allows_empty_materials():
+    """预算为 0 的活动可以给空物资清单（下限 0）。"""
+    data = _plan_result()
+    data["物资"] = []
+    out = llm._normalize("plan", data)
+    assert out["物资"] == []
 
 
 def test_normalize_plan_drops_extra_row_fields():

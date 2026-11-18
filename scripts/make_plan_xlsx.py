@@ -30,6 +30,9 @@ REPO = Path(__file__).resolve().parent.parent
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
+# 小计公式与自动填表共用一份（engine/plan_sheet.fill_workbook 也写同一公式）
+from engine.plan_sheet import SUBTOTAL_FORMULA  # noqa: E402
+
 PLAN_TEMPLATE = Path("/srv/social-work/templates/library/计划书.docx")
 DEFAULT_OUT = Path("/srv/social-work/templates/library/计划书-填写表.xlsx")
 
@@ -46,13 +49,6 @@ STAGES = ("准备阶段", "执行阶段", "总结归档")
 HEADER_FONT = Font(bold=True)
 HEADER_FILL = PatternFill("solid", fgColor="D9D9D9")
 HEADER_ALIGN = Alignment(horizontal="center", vertical="center")
-
-# 小计：先按「个」取前缀（模板原有口径），取不出再按前导数字取，最后按 1 算。
-# 只写原式的话 "2张"、"5米" 会落到 1，所以补了 LOOKUP 兜底。
-SUBTOTAL_FORMULA = (
-    '=D{row}*IFERROR(VALUE(LEFT(C{row},FIND("个",C{row}&"个")-1)),'
-    'IFERROR(LOOKUP(9E+307,--LEFT(C{row},ROW($1:$15))),1))'
-)
 
 
 def _headers(doc, table_index: int) -> list[str]:
