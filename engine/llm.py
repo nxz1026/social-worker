@@ -217,10 +217,16 @@ def load_style_config(path: Path | None = None) -> dict:
         examples = spec.get("examples") or []
         if isinstance(examples, str):
             examples = [examples]
+        check = spec.get("check")
         styles[str(name)] = {
             "desc": str(spec.get("desc") or "").strip(),
             "examples": [str(item) for item in examples],
             "extra": str(spec.get("extra") or "").strip(),
+            # 生成后的规则自检配置（required_any / required_all / forbidden /
+            # min_words / max_words）；没写就是不自检
+            "check": check if isinstance(check, dict) else {},
+            # 文风要求覆盖段落骨架的开关，build_prompt 里用
+            "overwrite_skeleton": bool(spec.get("overwrite_skeleton")),
         }
 
     type_style = {
@@ -391,6 +397,122 @@ def build_prompt(task: str, facts: dict, style: str,
 
 
 # --------------------------------------------------------------------------
+# 文风自检（纯规则判断，不调 LLM）
+# --------------------------------------------------------------------------
+
+# 每命中一类问题扣的分；分数只用于展示，ok 只看有没有问题
+_PENALTY_REQUIRED_ALL = 20
+_PENALTY_REQUIRED_ANY = 20
+_PENALTY_FORBIDDEN = 15
+_PENALTY_WORDS = 15
+
+# 字数口径：中文字符 + 英文单词
+_CJK_RE = re.compile(r"[\u4e00-\u9fff]")
+_WORD_RE = re.compile(r"[A-Za-z]+(?:['-][A-Za-z]+)*")
+
+
+def _collect_text(value) -> str:
+    """把结果里所有字符串拼成一段文本：列表展开、字典展开、跳过 _ 开头的内部键。"""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        return "\n".join(_collect_text(item) for key, item in value.items()
+                         if not str(key).startswith("_"))
+    if isinstance(value, (list, tuple)):
+        return "\n".join(_collect_text(item) for item in value)
+    if value is None:
+        return ""
+    return str(value)
+
+
+def _word_count(text: str) -> int:
+    """字数：中文字符数 + 英文单词数（数字与标点不计）。"""
+    return len(_CJK_RE.findall(text)) + len(_WORD_RE.findall(text))
+
+
+def self_check(task: str, result: dict, style: str,
+               style_config: dict | None = None) -> dict:
+    """检查生成结果是否符合文风要求。
+
+    返回 {
+      "ok": bool,
+      "score": int,            # 0~100
+      "hits": {"required_all": [...命中...], "required_any": [...命中...]},
+      "miss": {"required_all": [...缺...], "required_any": bool, "forbidden": [...命中违禁词...]},
+      "words": int,
+      "issues": [str, ...]     # 人读的问题列表
+    }
+
+    统计口径：把 result 里所有字符串值拼起来算（列表也要展开）。
+    字数按中文字符 + 英文单词计。
+    带 style_scope 的任务（如总结报告）文风只作用于少数段落，因此只统计那几段，
+    也不做整篇字数判定——文风的字数区间是给整篇简报写的。
+    """
+    config = style_config if style_config is not None else load_style_config()
+    style_spec = (config.get("styles") or {}).get(str(style)) or {}
+    check = style_spec.get("check") or {}
+
+    scope = (_task_spec(task).get("style_scope")
+             if str(task or "") in TASKS else None)
+    if scope:
+        text = _collect_text({field: (result or {}).get(field) for field in scope})
+        check_words = False
+    else:
+        text = _collect_text(result or {})
+        check_words = True
+    words = _word_count(text)
+
+    required_any = [str(item) for item in check.get("required_any") or []]
+    required_all = [str(item) for item in check.get("required_all") or []]
+    forbidden = [str(item) for item in check.get("forbidden") or []]
+    min_words = check.get("min_words")
+    max_words = check.get("max_words")
+
+    hit_all = [item for item in required_all if item in text]
+    hit_any = [item for item in required_any if item in text]
+    miss_all = [item for item in required_all if item not in text]
+    hit_forbidden = [item for item in forbidden if item in text]
+    # 配了 required_any 却一个都没命中，才算「缺」
+    any_missed = bool(required_any) and not hit_any
+
+    issues: list[str] = []
+    score = 100
+    for item in miss_all:
+        issues.append(f"缺少必需短语：{item}")
+        score -= _PENALTY_REQUIRED_ALL
+    if any_missed:
+        issues.append("缺少开头句式：至少命中一个（" + " / ".join(required_any) + "）")
+        score -= _PENALTY_REQUIRED_ANY
+    for item in hit_forbidden:
+        issues.append(f"出现违禁词：{item}")
+        score -= _PENALTY_FORBIDDEN
+    if check_words and min_words and words < int(min_words):
+        issues.append(f"字数 {words}，低于下限 {min_words}")
+        score -= _PENALTY_WORDS
+    elif check_words and max_words and words > int(max_words):
+        issues.append(f"字数 {words}，超过上限 {max_words}")
+        score -= _PENALTY_WORDS
+
+    return {
+        "ok": not issues,
+        "score": max(0, min(100, score)),
+        "hits": {"required_all": hit_all, "required_any": hit_any},
+        "miss": {"required_all": miss_all, "required_any": any_missed,
+                 "forbidden": hit_forbidden},
+        "words": words,
+        "issues": issues,
+    }
+
+
+def _rewrite_note(check: dict) -> str:
+    """自检结论 → 追加在原 prompt 末尾的重写说明。"""
+    lines = ["【上一次生成不合格，请修正后重新生成】", "未满足的项："]
+    lines += [f"- {issue}" for issue in check.get("issues") or []]
+    lines.append("请严格按文风要求重写，其余内容保持不变。")
+    return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------
 # 上游调用
 # --------------------------------------------------------------------------
 
@@ -544,18 +666,8 @@ def _normalize(task: str, data: dict) -> dict:
     return out
 
 
-def write(task: str, facts: dict, *, style: str = "",
-          style_config: dict | None = None) -> dict:
-    """调 LLM 生成指定任务的字段 dict。失败重试 2 次（共 3 次），仍失败抛 LLMError。
-
-    style 留空时按 facts 里的项目名称 / 活动名称自动定文风。
-    """
-    _task_spec(task)                       # 未知任务尽早报错，不浪费调用
-    config = style_config if style_config is not None else load_style_config()
-    chosen = str(style or "").strip() or resolve_style(
-        str(facts.get("项目名称") or ""), str(facts.get("活动名称") or ""))
-    prompt = build_prompt(task, facts, chosen, style_config=config)
-
+def _generate(task: str, prompt: str) -> dict:
+    """调一次 LLM 并归一化；网络 / 解析失败重试 2 次（共 3 次），仍失败抛 LLMError。"""
     attempts = 3                           # 首次 + 2 次重试
     last_error: Exception | None = None
     for attempt in range(1, attempts + 1):
@@ -566,3 +678,42 @@ def write(task: str, facts: dict, *, style: str = "",
             last_error = exc
             print(f"LLM 第 {attempt}/{attempts} 次失败：{exc}", file=sys.stderr)
     raise LLMError(f"{task} 生成失败，已重试 {attempts - 1} 次：{last_error}")
+
+
+def write(task: str, facts: dict, *, style: str = "",
+          style_config: dict | None = None,
+          max_rewrite: int = 1) -> dict:
+    """生成 → 自检 → 不达标则带自检意见重写 → 再自检。
+
+    返回字段 dict，另带两个内部键（调用方 fill 时会忽略以 _ 开头的键）：
+    "_check" 自检结果，"_rewrites" 实际重写次数。
+    style 留空时按 facts 里的项目名称 / 活动名称自动定文风。
+    """
+    _task_spec(task)                       # 未知任务尽早报错，不浪费调用
+    config = style_config if style_config is not None else load_style_config()
+    chosen = str(style or "").strip() or resolve_style(
+        str(facts.get("项目名称") or ""), str(facts.get("活动名称") or ""))
+    prompt = build_prompt(task, facts, chosen, style_config=config)
+
+    result = _generate(task, prompt)
+    check = self_check(task, result, chosen, style_config=config)
+
+    rewrites = 0
+    limit = max(0, int(max_rewrite or 0))
+    while not check["ok"] and rewrites < limit:
+        rewrites += 1
+        try:
+            rewritten = _generate(task, prompt + "\n\n" + _rewrite_note(check))
+        except LLMError as exc:
+            # 重写失败不该把已经生成好的结果丢掉，保留原稿并在 stderr 说明
+            print(f"自检重写失败，保留上一次结果：{exc}", file=sys.stderr)
+            break
+        result = rewritten
+        check = self_check(task, result, chosen, style_config=config)
+        print(f"文风自检第 {rewrites} 次重写后：{check['score']} 分，"
+              f"{'通过' if check['ok'] else '仍未通过'}", file=sys.stderr)
+
+    out = dict(result)
+    out["_check"] = check
+    out["_rewrites"] = rewrites
+    return out

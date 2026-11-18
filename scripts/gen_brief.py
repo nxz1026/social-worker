@@ -287,7 +287,19 @@ def main(argv: list[str] | None = None) -> int:
         print(f"生成失败：{exc}", file=sys.stderr)
         return 2
 
-    print(json.dumps(result, ensure_ascii=False, indent=2))
+    check = result.get("_check") or {}
+    rewrites = int(result.get("_rewrites") or 0)
+    if check:
+        print(f"文风自检：{check.get('score', 0)} 分（{check.get('words', 0)} 字，"
+              f"{'通过' if check.get('ok') else '未通过'}，重写 {rewrites} 次）",
+              file=sys.stderr)
+        for issue in check.get("issues") or []:
+            print(f"  未达标：{issue}", file=sys.stderr)
+
+    # _check / _rewrites 是内部元信息，不进 JSON 正文
+    print(json.dumps({key: value for key, value in result.items()
+                      if not key.startswith("_")},
+                     ensure_ascii=False, indent=2))
 
     if args.out:
         try:

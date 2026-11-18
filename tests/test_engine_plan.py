@@ -141,7 +141,8 @@ def test_normalize_plan_rejects_missing_text_field():
 def test_write_plan_accepts_rows(monkeypatch):
     monkeypatch.setattr(llm, "_chat", lambda prompt, max_tokens=None: (
         "```json\n" + json.dumps(_plan_result(), ensure_ascii=False) + "\n```"))
-    result = llm.write("plan", {"活动名称": "共治行动（第一期）"}, style="务实")
+    result = llm.write("plan", {"活动名称": "共治行动（第一期）"}, style="务实",
+                       max_rewrite=0)
     assert len(result["环节"]) == 3
     assert result["活动目标内容"].startswith("1. 清理占道车辆")
 

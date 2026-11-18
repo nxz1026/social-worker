@@ -149,9 +149,10 @@ def test_write_retries_then_succeeds(monkeypatch):
         return '{"导语": "一", "目的": "二", "过程": "三", "成效": "四"}'
 
     monkeypatch.setattr(llm, "_chat", fake_chat)
-    result = llm.write("brief", _brief_facts(), style="务实")
+    result = llm.write("brief", _brief_facts(), style="务实", max_rewrite=0)
     assert calls["n"] == 3
-    assert result == {"导语": "一", "目的": "二", "过程": "三", "成效": "四"}
+    assert {k: v for k, v in result.items() if not k.startswith("_")} == {
+        "导语": "一", "目的": "二", "过程": "三", "成效": "四"}
 
 
 def test_write_raises_after_three_failures(monkeypatch):
@@ -170,5 +171,6 @@ def test_write_raises_after_three_failures(monkeypatch):
 def test_write_drops_extra_fields(monkeypatch):
     monkeypatch.setattr(llm, "_chat", lambda prompt, max_tokens=None: (
         '{"导语": "一", "目的": "二", "过程": "三", "成效": "四", "备注": "多余"}'))
-    result = llm.write("brief", _brief_facts(), style="务实")
-    assert list(result) == ["导语", "目的", "过程", "成效"]
+    result = llm.write("brief", _brief_facts(), style="务实", max_rewrite=0)
+    assert [key for key in result if not key.startswith("_")] == [
+        "导语", "目的", "过程", "成效"]

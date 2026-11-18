@@ -63,8 +63,9 @@ def test_summary_write_uses_skeleton_order(monkeypatch):
     payload = {field: f"{field}内容" for field in SUMMARY_FIELDS}
     monkeypatch.setattr(llm, "_chat", lambda prompt, max_tokens=None: (
         "```json\n" + json.dumps(payload, ensure_ascii=False) + "\n```"))
-    result = llm.write("summary", {"活动名称": "共治行动（第一期）"}, style="务实")
-    assert tuple(result) == SUMMARY_FIELDS
+    result = llm.write("summary", {"活动名称": "共治行动（第一期）"}, style="务实",
+                       max_rewrite=0)
+    assert tuple(key for key in result if not key.startswith("_")) == SUMMARY_FIELDS
 
 
 # --------------------------------------------------------------------------

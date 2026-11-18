@@ -181,6 +181,15 @@ def _all_headers_footers(doc):
 # 对外接口
 # --------------------------------------------------------------------------
 
+def _usable(data: dict) -> dict:
+    """丢掉以 _ 开头的内部键（如 llm.write 附带的 _check / _rewrites）。
+
+    这些键是给调用方看的元信息，不该被当成占位符值渲染进文档。
+    """
+    return {key: value for key, value in (data or {}).items()
+            if not str(key).startswith("_")}
+
+
 def render_docx(src: Path, dst: Path, data: dict) -> dict:
     """读 docx 模板，替换 {{字段}} 后写到 dst。
 
@@ -188,6 +197,7 @@ def render_docx(src: Path, dst: Path, data: dict) -> dict:
     返回 {"filled": int, "missing": list[str]}。
     """
     src, dst = Path(src), Path(dst)
+    data = _usable(data)
     doc = Document(str(src))
     acc: dict = {"filled": 0, "missing": set()}
 
@@ -210,6 +220,7 @@ def render_xlsx(src: Path, dst: Path, data: dict) -> dict:
     返回 {"filled": int, "missing": list[str]}。
     """
     src, dst = Path(src), Path(dst)
+    data = _usable(data)
     workbook = openpyxl.load_workbook(str(src))
     acc: dict = {"filled": 0, "missing": set()}
 

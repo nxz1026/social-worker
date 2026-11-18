@@ -965,6 +965,19 @@ async function openLlmModal() {
   actCtx.llm = { result: null };
 }
 
+/* 文风自检结果条：通过=绿色，未通过=黄色（.notice 默认色） */
+function renderSelfCheck(check, rewrites) {
+  if (!check || typeof check !== 'object') return '';
+  const score = Number(check.score) || 0;
+  const words = Number(check.words) || 0;
+  if (check.ok) {
+    return `<div class="notice green">文风自检通过（${score} 分，${words} 字${rewrites ? `，已自动重写 ${rewrites} 次` : ''}）</div>`;
+  }
+  const issues = (check.issues || []).map(esc).join('；') || '未达到文风要求';
+  return `<div class="notice">自检未通过：${issues}（${words} 字）` +
+    `<br>已自动重写 ${rewrites || 0} 次${rewrites ? '，仍未达标，可手动修改后落盘' : ''}</div>`;
+}
+
 async function runLlm() {
   if (!actCtx) return;
   const { projectName, dirname } = actCtx;
@@ -976,10 +989,16 @@ async function runLlm() {
     const r = await api(`/projects/${enc(projectName)}/activities/${enc(dirname)}/llm`, {
       method: 'POST', body: { task, style },
     });
-    actCtx.llm = { result: r.result || {} };
+    const all = r.result || {};
+    // _check / _rewrites 是内部元信息，不当作可编辑字段
+    const check = all._check || null;
+    const rewrites = Number(all._rewrites || 0);
+    const fields = Object.fromEntries(Object.entries(all).filter(([k]) => !k.startsWith('_')));
+    actCtx.llm = { result: fields, check };
     el('#llmMsg').textContent = '生成完成，可逐字段修改。';
-    el('#llmResult').innerHTML = `<div class="section-title">生成结果</div>` +
-      Object.entries(r.result || {}).map(([k, v]) => {
+    el('#llmResult').innerHTML = renderSelfCheck(check, rewrites) +
+      `<div class="section-title">生成结果</div>` +
+      Object.entries(fields).map(([k, v]) => {
         const isArr = Array.isArray(v);
         const text = isArr ? JSON.stringify(v, null, 2) : String(v ?? '');
         return `<label class="field"><span>${esc(k)}${isArr ? '（数组，JSON）' : ''}</span>
