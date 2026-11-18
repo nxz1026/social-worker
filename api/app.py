@@ -1282,10 +1282,21 @@ def _project_year(name: str) -> int:
     return datetime.now(TZ).year
 
 
+def _act_year(act_month: int, act_year: int | None = None) -> int:
+    """活动年：显式传了就用，否则按活动月与项目周期推断当前年。
+
+    简单规则：不传时取当前年份。跨年活动由调用方显式传 act_year。
+    """
+    if act_year:
+        return int(act_year)
+    return datetime.now(TZ).year
+
+
 @app.get("/api/projects/{name}/code")
-def api_project_code(name: str, act_type: int, act_month: int, serial: int = 0,
+def api_project_code(name: str, act_type: int, act_month: int,
+                     act_year: int = 0, serial: int = 0,
                      user=Depends(current_user)):
-    """生成一个项目编号。serial=0 表示自动取下一个流水号。"""
+    """生成一个项目编号。act_year=0 表示取当前年；serial=0 表示自动取下一个流水号。"""
     meta = _project_meta_or_404(name)
     if user["role"] != "admin" and meta["short"] not in scopes_of(user):
         raise HTTPException(403, f"无项目 {name} 权限")
@@ -1296,11 +1307,14 @@ def api_project_code(name: str, act_type: int, act_month: int, serial: int = 0,
     if act_types and act_type not in set(act_types.values()):
         raise HTTPException(400, f"活动类型号 {act_type} 不在项目配置里")
     year = _project_year(name)
+    act_year = _act_year(act_month, act_year or None)
     if not serial:
-        serial = _coding.next_serial(_existing_codes(meta), act_type=act_type, year=year)
+        serial = _coding.next_serial(_existing_codes(meta), act_type=act_type,
+                                     year=year, act_year=act_year)
     try:
         code = _coding.make_code(year=year, establish_month=establish_month,
-                                 act_type=act_type, act_month=act_month, serial=serial)
+                                 act_type=act_type, act_month=act_month,
+                                 serial=serial, act_year=act_year)
         parsed = _coding.parse_code(code)
     except ValueError as exc:
         raise HTTPException(400, str(exc))

@@ -17,22 +17,24 @@ HUIMIN = "惠民社区保障资金项目"
 
 def test_make_code_sample():
     code = coding.make_code(year=2026, establish_month=8, act_type=1,
-                            act_month=11, serial=1)
-    assert code == "CDYJR2026008-C-1110001"
+                            act_month=11, serial=1, act_year=2026)
+    assert code == "CDYJR2026008-C-16110001"
 
 
 def test_make_code_second_sample():
     # 旧数据 CDYJR2026005-c-1105001 有错位；新格式按 0005 / 类型 1 / 月 11 / 流水 0501
     code = coding.make_code(year=2026, establish_month=5, act_type=1,
-                            act_month=11, serial=501)
-    assert code == "CDYJR2026005-C-1110501"
+                            act_month=11, serial=501, act_year=2026)
+    assert code == "CDYJR2026005-C-16110501"
 
 
 def test_make_code_rejects_out_of_range():
-    ok = dict(year=2026, establish_month=8, act_type=1, act_month=11, serial=1)
+    ok = dict(year=2026, establish_month=8, act_type=1, act_month=11,
+              serial=1, act_year=2026)
     for field, bad in (("year", 1999), ("year", 2101),
                        ("establish_month", 0), ("establish_month", 13),
                        ("act_type", -1), ("act_type", 10),
+                       ("act_year", 1999), ("act_year", 2101),
                        ("act_month", 0), ("act_month", 13),
                        ("serial", 0), ("serial", 10000)):
         with pytest.raises(ValueError):
@@ -41,17 +43,23 @@ def test_make_code_rejects_out_of_range():
 
 def test_parse_code_roundtrip():
     code = coding.make_code(year=2026, establish_month=8, act_type=3,
-                            act_month=9, serial=42)
+                            act_month=9, serial=42, act_year=2026)
     assert coding.parse_code(code) == {
         "prefix": "CDYJR",
         "year": 2026,
         "establish_month": 8,
         "act_type": 3,
+        "act_year": 6,          # 只留个位，四位年已丢失
         "act_month": 9,
         "serial": 42,
     }
-    assert coding.make_code(**{k: v for k, v in coding.parse_code(code).items()
-                               if k != "prefix"}) == code
+    parsed = coding.parse_code(code)
+    assert coding.make_code(year=parsed["year"],
+                            establish_month=parsed["establish_month"],
+                            act_type=parsed["act_type"],
+                            act_month=parsed["act_month"],
+                            serial=parsed["serial"],
+                            act_year=2026) == code
 
 
 def test_parse_code_rejects_bad_format():
@@ -66,24 +74,62 @@ def test_parse_code_accepts_legacy_lowercase():
     assert parsed["year"] == 2026
     assert parsed["establish_month"] == 5
     assert parsed["act_type"] == 1
+    assert parsed["act_year"] is None    # 旧格式没有活动年
     assert parsed["serial"] == 5001
 
 
+def test_make_code_with_act_year():
+    assert coding.make_code(year=2026, establish_month=8, act_type=1,
+                            act_month=11, serial=1,
+                            act_year=2026) == "CDYJR2026008-C-16110001"
+    assert coding.make_code(year=2026, establish_month=8, act_type=1,
+                            act_month=5, serial=1,
+                            act_year=2027) == "CDYJR2026008-C-17050001"
+
+
+def test_cross_year_no_collision():
+    c26 = coding.make_code(year=2026, establish_month=8, act_type=1,
+                           act_month=5, serial=1, act_year=2026)
+    c27 = coding.make_code(year=2026, establish_month=8, act_type=1,
+                           act_month=5, serial=1, act_year=2027)
+    assert c26 != c27
+
+
+def test_parse_new_format():
+    p = coding.parse_code("CDYJR2026008-C-16110001")
+    assert p["act_year"] == 6 and p["act_month"] == 11 and p["serial"] == 1
+
+
+def test_parse_legacy_format():
+    p = coding.parse_code("CDYJR2026008-C-1110001")   # 旧 21 位
+    assert p["act_year"] is None
+    assert p["act_month"] == 11
+    assert p["serial"] == 1
+
+
+def test_next_serial_isolates_act_year():
+    codes = ["CDYJR2026008-C-16110001", "CDYJR2026008-C-17050001"]
+    assert coding.next_serial(codes, act_type=1, year=2026, act_year=2027) == 2
+    assert coding.next_serial(codes, act_type=1, year=2026, act_year=2026) == 2
+
+
 def test_next_serial_increments_same_type_and_year():
-    assert coding.next_serial(["CDYJR2026008-C-1110001"],
-                              act_type=1, year=2026) == 2
-    assert coding.next_serial([], act_type=1, year=2026) == 1
+    assert coding.next_serial(["CDYJR2026008-C-16110001"],
+                              act_type=1, year=2026, act_year=2026) == 2
+    assert coding.next_serial([], act_type=1, year=2026, act_year=2026) == 1
 
 
 def test_next_serial_ignores_other_type_year_and_junk():
     codes = [
-        "CDYJR2026008-C-1110001",   # 同年同类型，最大
-        "CDYJR2026008-C-1120002",   # 同年同类型（活动月不同也计入）
-        "CDYJR2026008-C-2210009",   # 不同类型
-        "CDYJR2025008-C-1110077",   # 不同年
+        "CDYJR2026008-C-16110001",   # 同年同类型同活动年，最大
+        "CDYJR2026008-C-16120002",   # 同年同类型同活动年（活动月不同也计入）
+        "CDYJR2026008-C-26100009",   # 不同类型
+        "CDYJR2025008-C-16110077",   # 不同年
+        "CDYJR2026008-C-17100003",   # 不同活动年（2027）
+        "CDYJR2026008-C-1110009",    # 旧格式（无活动年），跳过
         "随手起的目录名",
     ]
-    assert coding.next_serial(codes, act_type=1, year=2026) == 3
+    assert coding.next_serial(codes, act_type=1, year=2026, act_year=2026) == 3
 
 
 def test_project_meta_huadu_jili():
