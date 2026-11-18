@@ -28,8 +28,6 @@
   <div class="hidden" id="mainArea">
     <div class="tabs">
       <button data-tab="docs" class="active">文档</button>
-      <button data-tab="issues" id="tabIssues" class="hidden">待确认</button>
-      <button data-tab="trash" id="tabTrash" class="hidden">回收站</button>
       <button data-tab="upload">上传</button>
       <button data-tab="search">检索</button>
       <button data-tab="generate">文书生成</button>
@@ -73,9 +71,6 @@
       <div class="subtabs" id="docTabs">
         <button data-dtab="overview" class="active">概览</button>
         <button data-dtab="source">源文件</button>
-        <button data-dtab="feishu">飞书</button>
-        <button data-dtab="index">索引</button>
-        <button data-dtab="relations">关系</button>
       </div>
 
       <div id="dtab-overview">
@@ -88,45 +83,6 @@
         </div>
       </div>
       <div id="dtab-source" class="hidden"></div>
-      <div id="dtab-feishu" class="hidden"></div>
-      <div id="dtab-index" class="hidden"></div>
-      <div id="dtab-relations" class="hidden"></div>
-    </div>
-
-    <!-- 待确认 / 失败 -->
-    <div class="card hidden" id="tab-issues">
-      <div class="row">
-        <span class="muted" id="issuesSummary">加载中…</span>
-        <button id="btnIssuesRefresh" class="ghost">刷新</button>
-      </div>
-      <h3>待确认文件</h3>
-      <table>
-        <thead><tr><th>文件名</th><th>位置</th><th>状态</th><th>原因</th><th>大小</th><th>处理</th></tr></thead>
-        <tbody id="issuePending"></tbody>
-      </table>
-      <h3 style="margin-top:20px">最近失败</h3>
-      <table>
-        <thead><tr><th>时间</th><th>文件</th><th>错误</th><th></th></tr></thead>
-        <tbody id="issueFailures"></tbody>
-      </table>
-      <h3 style="margin-top:20px">错误队列</h3>
-      <table>
-        <thead><tr><th>时间</th><th>文件</th><th>错误</th></tr></thead>
-        <tbody id="issueErrors"></tbody>
-      </table>
-    </div>
-
-    <!-- 回收站 -->
-    <div class="card hidden" id="tab-trash">
-      <div class="row">
-        <span class="muted" id="trashSummary">加载中…</span>
-        <button id="btnTrashRefresh" class="ghost">刷新</button>
-      </div>
-      <p class="muted">删除的 md / 丢弃的待确认文件都在这里；「恢复」会挪回原位并自动跑一次对账（飞书副本一并恢复）。</p>
-      <table>
-        <thead><tr><th>文件名</th><th>类型</th><th>删除时间</th><th>大小</th><th>位置</th><th>操作</th></tr></thead>
-        <tbody id="trashList"></tbody>
-      </table>
     </div>
 
     <!-- 上传 -->

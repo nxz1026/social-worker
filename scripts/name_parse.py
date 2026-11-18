@@ -1,21 +1,7 @@
 #!/usr/bin/env python3
-"""M10 文件名解析层：只从**文件名**取日期与单位，不碰正文。
+"""文件名解析：只从文件名取日期 / 项目 / 内容关键词，不碰正文。
 
-手写资料的 OCR 不可能 100% 成功，所以这类资料不依赖识别正文，只取两样：
-    日期 —— 建时间关系
-    单位 —— 建项目关系（复用 config/project_aliases.yaml 的项目关键词）
-取到任一样就能归档并建 Cognee 关系；两样都取不到 → 调用方把文件落
-`_待确认/`（未分类），由每天 22:00 的审计汇总提醒人工处理。
-
-用法：
-    import name_parse
-    info = name_parse.parse("花都-2026年11月5日-织围巾登记.jpg",
-                            aliases={"huadu": ["花都"], "huimin": ["惠民"]},
-                            labels={"huadu": "花都", "huimin": "惠民"})
-    # {"date": "2026-11-05", "unit": "huadu", "unit_label": "花都",
-    #  "matched": "花都", "content": "织围巾登记"}
-    name_parse.usable(info)        # 日期或单位取到任一样 → True
-    name_parse.describe(info)      # 一行中文摘要，写日志用
+活动驱动流程仍要求上传文件按「日期-项目名称-描述」命名，本模块是校验实现。
 """
 from __future__ import annotations
 
@@ -26,10 +12,9 @@ from pathlib import Path
 _DATE_SEP = re.compile(r"(20\d{2})\s*[-./_年]\s*(\d{1,2})\s*[-./_月]\s*(\d{1,2})\s*日?")
 # 20261105103000（微信/手机导出的时间戳，取前 8 位）
 _DATE_TS = re.compile(r"(?<!\d)(20\d{2})(\d{2})(\d{2})\d{6}(?!\d)")
-# 20261105（前后不能再是数字，避免把长数字串当日期）
+# 20261105（前后不能再是数字）
 _DATE_COMPACT = re.compile(r"(?<!\d)(20\d{2})(\d{2})(\d{2})(?!\d)")
 
-# 文件名噪声：去掉后剩下的才算「内容关键词」
 _NOISE = re.compile(
     r"(微信图片|mmexport|wx_camera_?|IMG_?\d*|VID_?\d*|图片|照片|截图|screenshot|"
     r"image|新建|副本|扫描件?|_?\d{6,})",
@@ -50,13 +35,13 @@ def parse_date(name: str) -> str:
 
 def parse_unit(name: str, aliases: dict | None = None,
                labels: dict | None = None) -> tuple[str, str, str]:
-    """文件名里的单位/项目，返回 (key, label, 命中词)；取不到返回 ("", "", "")。
+    """文件名里的项目，返回 (key, label, 命中词)；取不到返回 ("", "", "")。
 
-    多个关键词命中时取**最长**的（「世纪光华」压过「光华」）。
+    多个关键词命中时取最长的（「世纪光华」压过「光华」）。
     """
     text = Path(str(name)).stem
     labels = labels or {}
-    best = None                       # (关键词长度, key, 命中词)
+    best = None
     for key, kws in (aliases or {}).items():
         for kw in kws or []:
             kw = str(kw)
@@ -71,13 +56,7 @@ def parse_unit(name: str, aliases: dict | None = None,
 
 def parse_content(name: str, date: str = "", matched: str = "",
                   words: tuple[str, ...] | list[str] = ()) -> str:
-    """文件名里去掉日期、单位词和噪声后剩下的内容关键词。
-
-    要传的是**单位标签**（「惠民」「花都」），不是命中的那个别名：别名可能是
-    项目内的小地名（`2026-11-10-惠民-民乐北巷-回访卡.jpg` 命中「民乐北巷」），
-    按别名删会把有用的内容关键词吃掉。而标签不删干净，规范化后的名字就会
-    出现「惠民-惠民-…」这种重复拼接。
-    """
+    """去掉日期、项目标签和噪声后剩下的内容关键词。"""
     text = Path(str(name)).stem
     text = _DATE_SEP.sub(" ", text)
     text = _DATE_TS.sub(" ", text)
@@ -94,7 +73,7 @@ def parse_content(name: str, date: str = "", matched: str = "",
 
 
 def parse(name: str, aliases: dict | None = None, labels: dict | None = None) -> dict:
-    """一次解析出日期与单位。返回 dict（字段见模块 docstring）。"""
+    """一次解析出日期、项目与内容关键词。"""
     name = str(name)
     date = parse_date(name)
     unit, unit_label, matched = parse_unit(name, aliases, labels)
@@ -108,13 +87,13 @@ def parse(name: str, aliases: dict | None = None, labels: dict | None = None) ->
 
 
 def usable(info: dict | None) -> bool:
-    """文件名是否至少给出日期或单位 —— 两样都没有就是「识别不了」。"""
+    """文件名是否至少给出日期或项目。"""
     info = info or {}
     return bool(info.get("date") or info.get("unit"))
 
 
 def describe(info: dict | None) -> str:
-    """一行中文摘要，写日志用。"""
+    """一行中文摘要。"""
     info = info or {}
     date = info.get("date") or "无"
     unit = info.get("unit_label") or "无"
