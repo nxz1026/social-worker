@@ -101,6 +101,24 @@ def activity_dirs(project_dir: Path) -> dict[str, Path]:
     return {p.name: p.resolve() for p in sorted(act_dir.iterdir()) if p.is_dir()}
 
 
+def find_activity_dir(project_dir: Path, keyword: str,
+                      ordinal: str = "") -> Path | None:
+    """按关键词匹配活动目录名，返回唯一匹配的 Path；无匹配或多匹配返回 None。
+
+    例：find_activity_dir(proj, "爱邻议事会", "第三期")
+    匹配规则：目录名同时包含 keyword 和 ordinal（ordinal 为空则不校验）。
+    """
+    key = str(keyword if keyword is not None else "").strip()
+    period = str(ordinal if ordinal is not None else "").strip()
+    if not key:
+        return None
+    hits = [
+        path for name, path in activity_dirs(project_dir).items()
+        if key in name and (not period or period in name)
+    ]
+    return hits[0] if len(hits) == 1 else None
+
+
 def create_activity_dirs(project_dir: Path, planned: list[dict]) -> list[str]:
     """按 planned 建活动目录，幂等：已存在跳过。
 

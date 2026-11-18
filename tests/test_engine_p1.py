@@ -67,14 +67,21 @@ def test_load_project_rejects_traversal():
         projects.load_project("/etc")
 
 
-def test_list_projects_includes_dir_without_yaml():
+def test_list_projects_includes_dir_without_yaml(tmp_path, monkeypatch):
+    """无 yaml 的项目目录也要出现在列表里（用 tmp 目录造，不依赖真实磁盘状态）。"""
+    (tmp_path / "有配置的项目").mkdir()
+    (tmp_path / "有配置的项目" / "有配置的项目.yaml").write_text(
+        "project:\n  short: 有配置的项目\n", encoding="utf-8")
+    (tmp_path / "无配置的项目").mkdir()
+    monkeypatch.setattr(projects, "PROJECTS_ROOT", tmp_path)
+
     items = projects.list_projects()
-    assert len(items) == 3
+    assert len(items) == 2
     by_name = {p["name"]: p for p in items}
-    assert by_name[HUADU_BAOZHANG]["has_config"] is False
-    assert by_name[HUADU_BAOZHANG]["data"] is None
-    assert by_name[HUADU_JILI]["has_config"] is True
-    assert by_name[HUADU_JILI]["data"]["project"]["short"] == HUADU_JILI
+    assert by_name["无配置的项目"]["has_config"] is False
+    assert by_name["无配置的项目"]["data"] is None
+    assert by_name["有配置的项目"]["has_config"] is True
+    assert by_name["有配置的项目"]["data"]["project"]["short"] == "有配置的项目"
 
 
 def test_list_existing_activities_missing_dir_returns_empty(tmp_path):

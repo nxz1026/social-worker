@@ -151,8 +151,11 @@ def test_project_meta_huimin():
     }
 
 
-def test_project_meta_without_yaml():
-    meta = projects.project_meta("花都社区保障资金项目")
+def test_project_meta_without_yaml(tmp_path, monkeypatch):
+    """无 yaml 的项目：project_meta 返回空配置（用 tmp 目录造）。"""
+    (tmp_path / "无配置的项目").mkdir()
+    monkeypatch.setattr(projects, "PROJECTS_ROOT", tmp_path)
+    meta = projects.project_meta("无配置的项目")
     assert meta["has_config"] is False
     assert meta["establish_month"] is None
     assert meta["act_types"] == {}

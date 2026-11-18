@@ -12,6 +12,8 @@ from pathlib import Path
 
 import yaml
 
+from .activities import _safe_dirname
+
 # 部署根目录；测试 / 本地可用 SOCIAL_WORK_PROJECTS 指向别处
 PROJECTS_ROOT = Path(os.environ.get("SOCIAL_WORK_PROJECTS") or "/srv/social-work/projects")
 
@@ -148,6 +150,23 @@ def project_meta(name: str) -> dict:
         "act_types": {str(k): _as_int(v) for k, v in act_types.items()},
         "has_config": True,
     }
+
+
+def activity_dir(project_name: str, dirname: str) -> Path:
+    """返回 <PROJECTS_ROOT>/<project_name>/活动/<dirname>，做路径安全校验。
+
+    只拼路径、不建目录；项目名和活动目录名都不允许越界。
+    """
+    raw_project = _safe_name(project_name)
+    # 复用活动模块的目录名校验（空串 / .. / 路径分隔符一律拒绝）
+    raw_dir = _safe_dirname(dirname)
+    root = Path(PROJECTS_ROOT)
+    path = root / raw_project / "活动" / raw_dir
+    try:
+        path.resolve().relative_to(root.resolve())
+    except ValueError:
+        raise ValueError(f"活动路径越界：{raw_project}/活动/{raw_dir}")
+    return path
 
 
 def save_project_code(name: str, code: str) -> None:
