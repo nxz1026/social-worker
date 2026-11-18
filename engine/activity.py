@@ -8,6 +8,7 @@ engine.fill.render_* 使用。缺的字段留 None，不抛错——让 fill 的
 from __future__ import annotations
 
 import re
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -24,6 +25,19 @@ REQUIRED_KEYS = (
     "执行社工", "出纳", "经办人", "收款单位", "帐号", "开户行", "费用归属部门",
     "领取人数", "测评人数", "总得分", "满意率", "平均分", "评定等级",
 )
+
+# 计划书里的多行表格：LLM 给的对象数组 → 模板里的 {{前缀_N}}。
+# columns 是「元素子字段 → 占位符前缀」，rows 是模板固定行数（超出的截断）。
+PLAN_ROW_SPECS = {
+    "环节": {
+        "columns": {"内容": "环节内容", "物资": "环节物资", "人员": "环节人员"},
+        "rows": 5,
+    },
+    "预计困难": {
+        "columns": {"困难": "预计困难", "方案": "解决方案"},
+        "rows": 2,
+    },
+}
 
 
 def _text(value) -> str | None:
@@ -89,11 +103,40 @@ def _project_code(project_name: str) -> str | None:
         return None
 
 
+def expand_plan_rows(data: dict, plan: dict,
+                     notes: list[str] | None = None) -> None:
+    """把 plan 的 环节 / 预计困难 展开成 环节内容_1… 这类带序号的值。
+
+    就地写入 data：模板每行都占位，所以行数固定——条目不足补空串（避免文档里
+    留下 {{环节内容_4}} 这类原始占位符），超出模板行数的截断并把说明追加到 notes。
+    """
+    for key, spec in PLAN_ROW_SPECS.items():
+        rows = plan.get(key)
+        if not isinstance(rows, (list, tuple)):
+            continue
+        limit = spec["rows"]
+        if len(rows) > limit:
+            note = (f"{key}共 {len(rows)} 条，模板只有 {limit} 行，"
+                    f"已截断后 {len(rows) - limit} 条")
+            if notes is not None:
+                notes.append(note)
+            else:
+                print(f"警告：{note}", file=sys.stderr)
+
+        for seq in range(1, limit + 1):
+            item = rows[seq - 1] if seq <= len(rows) else {}
+            if not isinstance(item, dict):
+                item = {}
+            for src, prefix in spec["columns"].items():
+                data[f"{prefix}_{seq}"] = _text(item.get(src)) or ""
+
+
 def build_data(project_name: str, activity_dir: str,
-               extra: dict | None = None) -> dict:
+               extra: dict | None = None, notes: list[str] | None = None) -> dict:
     """合成填充数据，返回的 key 即占位符名字（不带 {{}}）。
 
     来源优先级：extra > activity.yaml > 项目 yaml > 目录名推断 > None。
+    extra 里的「环节」「预计困难」按 PLAN_ROW_SPECS 展开；截断说明追加到 notes。
     """
     project = _load_project(project_name)
     act_dir = _resolve_activity_dir(project_name, activity_dir)
@@ -147,9 +190,13 @@ def build_data(project_name: str, activity_dir: str,
     if extra:
         for key, value in extra.items():
             data[key] = value
+            if key in PLAN_ROW_SPECS:
+                # 结构化多行由 expand_plan_rows 展开成 环节内容_1…，不走通用列表展开
+                continue
             # 列表值展开成「字段_1」「字段_2」……，供多行表格占位符按行取值；
             # 原列表 key 保留，兼容无序号占位符。显式传入的 X_1 不被覆盖。
             if isinstance(value, (list, tuple)):
                 for seq, item in enumerate(value, start=1):
                     data.setdefault(f"{key}_{seq}", item)
+        expand_plan_rows(data, extra, notes)
     return data

@@ -4,7 +4,7 @@
 本模块只依赖标准库和 yaml，不 import api 包（engine 不能依赖 FastAPI）。
 LLM 的 endpoint / api_key / model 与 api/app.py 读同一份 config/api.yaml 的 llm 段。
 
-任务用 TASKS 注册。目前只有 brief（简报）；plan / summary 后续照同样结构追加即可。
+任务用 TASKS 注册。目前有 brief（简报）与 plan（计划书文字部分）；summary 后续照同样结构追加即可。
 """
 from __future__ import annotations
 
@@ -32,6 +32,8 @@ API_CONFIG_FALLBACK = Path("/srv/social-work/config/api.yaml")
 _DEFAULT_STYLE = "务实"
 
 # 任务注册表。schema 即要求模型输出的 JSON 骨架，字段顺序就是段落顺序。
+# lists 描述结构化字段：item 是每条必填的子字段，min 是条数下限（上限由模板行数决定，
+# 在 engine/activity.py 展开时截断，不在 normalize 阶段拒绝）。
 TASKS: dict[str, dict] = {
     "brief": {
         "doc": "社区活动简报",
@@ -48,6 +50,47 @@ TASKS: dict[str, dict] = {
             "只用上面给的事实，不编造人名、数字、政策文号",
             "不写「深入贯彻落实」这类开头（党建风除外，党建风按 extra 里的要求）",
             "全文合计 600~850 字",
+        ),
+    },
+    "plan": {
+        "doc": "社区活动计划书",
+        "intro": "需要生成 6 段文字与 2 个列表，严格按下面骨架。"
+                 "只输出 JSON，不要任何解释：",
+        "fields": ("活动背景内容", "活动目的内容", "活动目标内容", "目标人群",
+                   "宣传方式", "筛选方式", "环节", "预计困难"),
+        "schema": {
+            "活动背景内容": "分三层意思写：问题现状 + 需求来源 + 回应思路，"
+                            "150~250 字，不要小标题，段内不分行",
+            "活动目的内容": "一句话目的，以「依据……开展……，达成……」这类句式，30~60 字",
+            "活动目标内容": "3~5 条可核对的结果，写成「1. ……；2. ……；3. ……」，"
+                            "分号连接，一条一句，不换行",
+            "目标人群": "从服务对象与招募要求推导出具体人群，20~50 字",
+            "宣传方式": "从通知渠道推导，列 2~4 种具体渠道，30~80 字",
+            "筛选方式": "从对象范围推导招募与筛选口径，30~80 字",
+            "环节": [
+                {"内容": "该环节做什么，40~80 字",
+                 "物资": "该环节所需物资，顿号分隔",
+                 "人员": "该环节由谁负责，写岗位或姓名"},
+            ],
+            "预计困难": [
+                {"困难": "可能出现的困难，20~40 字",
+                 "方案": "对应的可执行措施，30~60 字"},
+            ],
+        },
+        "lists": {
+            "环节": {"item": ("内容", "物资", "人员"), "min": 2},
+            "预计困难": {"item": ("困难", "方案"), "min": 2},
+        },
+        "rules": (
+            "只用上面给的事实，不编造人名、数字、政策文号，不写物资单价与金额",
+            "环节给 2~5 条，按活动从准备、执行到收尾的真实顺序排列；"
+            "每条都写清做什么、用什么物资、谁负责",
+            "预计困难给 2~4 条，每条都要有能落地的解决措施，不写「加强沟通」这类空话",
+            "活动目标 3~5 条，每条一个可核对的结果，不要写成口号",
+            "背景段里的事由、诉求必须来自上面的事实，不能凭空造场景",
+            "上面「写作要求」里的「导语段 / 过程段 / 成效段」是简报的说法，"
+            "在本文分别对应活动背景内容、环节、活动目标内容",
+            "不出现「营造出……浓厚氛围」「打造……新格局」「双向奔赴」这类套话",
         ),
     },
 }
@@ -240,8 +283,8 @@ def build_prompt(task: str, facts: dict, style: str,
         "活动基本信息：",
         _facts_text(facts) or "- （未提供）",
         "",
-        f"需要生成 {len(spec['fields'])} 段，严格按下面骨架。"
-        "只输出 JSON，不要任何解释：",
+        spec.get("intro") or (f"需要生成 {len(spec['fields'])} 段，"
+                              "严格按下面骨架。只输出 JSON，不要任何解释："),
         "",
         json.dumps(spec["schema"], ensure_ascii=False, indent=2),
         "",
@@ -367,12 +410,44 @@ def _parse_json(text: str) -> dict:
     return data
 
 
+def _normalize_rows(field: str, value, spec: dict) -> list[dict]:
+    """校验结构化字段（环节 / 预计困难）：必须是对象数组，每条子字段非空。
+
+    条数只校验下限，上限交给模板展开阶段截断——模型多给一条不该整份重写。
+    """
+    if not isinstance(value, list):
+        raise LLMError(f"字段「{field}」应为数组，实际是 {type(value).__name__}")
+    if len(value) < spec["min"]:
+        raise LLMError(f"字段「{field}」至少 {spec['min']} 条，实际 {len(value)} 条")
+
+    rows: list[dict] = []
+    for seq, item in enumerate(value, start=1):
+        if not isinstance(item, dict):
+            raise LLMError(f"「{field}」第 {seq} 条应为对象，实际是 {type(item).__name__}")
+        row: dict[str, str] = {}
+        for key in spec["item"]:
+            raw = item.get(key)
+            text = str(raw).strip() if raw is not None else ""
+            if not text:
+                raise LLMError(f"「{field}」第 {seq} 条缺「{key}」")
+            row[key] = text
+        rows.append(row)
+    return rows
+
+
 def _normalize(task: str, data: dict) -> dict:
-    """只保留任务骨架里的字段，按骨架顺序返回；缺字段抛 LLMError 触发重试。"""
+    """只保留任务骨架里的字段，按骨架顺序返回；缺字段抛 LLMError 触发重试。
+
+    结构化字段（spec["lists"] 里声明的）返回对象数组，其余字段返回去空白后的字符串。
+    """
     spec = _task_spec(task)
-    out: dict[str, str] = {}
+    lists = spec.get("lists") or {}
+    out: dict = {}
     missing: list[str] = []
     for field in spec["fields"]:
+        if field in lists:
+            out[field] = _normalize_rows(field, data.get(field), lists[field])
+            continue
         value = data.get(field)
         text = str(value).strip() if value is not None else ""
         if not text:
