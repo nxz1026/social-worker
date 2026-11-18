@@ -115,6 +115,32 @@ def list_datasets(root: Path) -> list[dict]:
     return data
 
 
+def data_count(root: Path, dataset_id: str) -> int:
+    """GET /api/v1/datasets/{id}/data/count → 数据集里的文档条数。"""
+    key = _key(root)
+    data = _request_json(
+        "GET", f"{COGNEE_BASE}/api/v1/datasets/{dataset_id}/data/count", key)
+    if not isinstance(data, dict):
+        raise _fail("GET /api/v1/datasets/{id}/data/count", f"预期对象，实际：{data}")
+    return int(data.get("count") or 0)
+
+
+def graph_summary(root: Path) -> dict[str, dict]:
+    """GET /api/v1/datasets/graph-summary → {datasetId: {numNodes, numEdges, ...}}。
+
+    一次取全部数据集的图规模，避免逐个数据集再发一遍请求。
+    """
+    key = _key(root)
+    data = _request_json("GET", f"{COGNEE_BASE}/api/v1/datasets/graph-summary", key)
+    if not isinstance(data, list):
+        raise _fail("GET /api/v1/datasets/graph-summary", f"预期数组，实际：{data}")
+    return {
+        str(item.get("datasetId")): item
+        for item in data
+        if isinstance(item, dict) and item.get("datasetId")
+    }
+
+
 def ensure_dataset(root: Path, name: str) -> dict:
     """不存在则 POST 创建，存在返回现有。返回数据集 dict（含 id）。"""
     for dataset in list_datasets(root):

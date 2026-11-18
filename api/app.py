@@ -12,6 +12,7 @@ from __future__ import annotations
 import contextlib
 import fcntl
 import hashlib
+import importlib.util
 import json
 import mimetypes
 import os
@@ -32,7 +33,8 @@ from pathlib import Path
 import bcrypt
 import psycopg
 import yaml
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import (BackgroundTasks, Depends, FastAPI, File, Form, HTTPException,
+                     Request, UploadFile)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 
@@ -49,8 +51,13 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 import name_parse as _np  # noqa: E402
 from engine import activities as _activities  # noqa: E402
+from engine import activity as _activity  # noqa: E402
 from engine import checks as _checks  # noqa: E402
 from engine import coding as _coding  # noqa: E402
+from engine import cognee_index as _cognee_index  # noqa: E402
+from engine import fill as _fill  # noqa: E402
+from engine import ingest as _ingest  # noqa: E402
+from engine import llm as _llm  # noqa: E402
 from engine import projects as _projects  # noqa: E402
 PG_DSN = SETTINGS.db_dsn
 TZ = timezone(timedelta(hours=SETTINGS.timezone_offset_hours))
@@ -1391,6 +1398,533 @@ def api_check_activity(name: str, dirname: str, user=Depends(current_user)):
     if not act_dir.is_dir():
         raise HTTPException(404, f"活动目录不存在：{dirname}")
     return _checks.check(act_dir)
+
+
+# ---------- Web 管理界面：项目管理 / 活动文件 / 材料生成 / 同步 / 仪表盘 ----------
+def _load_script(name: str):
+    """按仓库 scripts/ 的路径加载脚本模块。
+
+    部署根的 scripts/ 可能还是旧版（例如 sync_feishu 没有 ensure/push），
+    新端点要用仓库里的实现，所以显式按文件路径加载，避免被 sys.path 抢先。
+    """
+    path = REPO_ROOT / "scripts" / f"{name}.py"
+    spec = importlib.util.spec_from_file_location(f"_sw_{name}", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"无法加载脚本：{path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _run_feishu_sync(project: str) -> list[dict]:
+    """后台任务：飞书同步。单独成函数，测试可 monkeypatch。"""
+    return _load_script("sync_feishu").sync(project)
+
+
+def _run_cognee_index(project: str) -> dict:
+    """后台任务：Cognee 入库。单独成函数，测试可 monkeypatch。"""
+    return _load_script("index_cognee").run(ROOT, project)
+
+
+def _template_library() -> Path:
+    """模板库目录：<ROOT>/templates/library（唯一模板来源）。"""
+    return ROOT / "templates" / "library"
+
+
+def _find_template(name: str) -> Path:
+    """按模板名（不含扩展名）在模板库里找 docx/xlsx。
+
+    名字非法（带路径分隔符 / 通配符 / ..）→ 400；找不到 → 404。
+    """
+    raw = str(name or "").strip()
+    if (not raw or "/" in raw or "\\" in raw or ".." in raw
+            or any(ch in raw for ch in "*?[]")):
+        raise HTTPException(400, f"模板名非法：{raw}")
+    lib = _template_library()
+    hits = sorted(p for p in lib.glob(f"{raw}.*")
+                  if p.is_file() and p.suffix.lower() in (".docx", ".xlsx"))
+    if not hits:
+        raise HTTPException(404, f"模板不存在：{raw}")
+    return hits[0]
+
+
+def _activity_meta_or_404(name: str, dirname: str, user, write: bool = False):
+    """定位活动目录并校验权限，返回 (活动目录, 项目元数据)。
+
+    读：admin 或项目在授权范围内；写：admin/editor 且项目在授权范围内。
+    活动目录不存在 → 404，目录名非法 → 400。
+    """
+    meta = _project_meta_or_404(name)
+    if write:
+        _require_project_write(user, meta)
+    elif user["role"] != "admin" and meta["short"] not in scopes_of(user):
+        raise HTTPException(403, f"无项目 {name} 权限")
+    try:
+        act_dir = _projects.activity_dir(name, dirname)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    if not act_dir.is_dir():
+        raise HTTPException(404, f"活动目录不存在：{dirname}")
+    return act_dir, meta
+
+
+def _safe_rel_path(base: Path, rel: str, *, allow_empty: bool = False) -> Path:
+    """把请求里的相对路径限制在 base 目录内。
+
+    先拒绝绝对路径与任何 `..` 段，再归一化并做 resolve 越界检查；
+    这样 `../`、`a/../../b`、绝对路径都回 400，不会被 normpath 悄悄抹平。
+    """
+    raw = str(rel or "").strip().replace("\\", "/")
+    if not raw:
+        if allow_empty:
+            return base.resolve()
+        raise HTTPException(400, "缺 path")
+    if raw.startswith("/"):
+        raise HTTPException(400, "路径必须是相对路径")
+    if any(seg == ".." for seg in raw.split("/")):
+        raise HTTPException(400, "路径不能包含 ..")
+    norm = _normalize_rel(raw)
+    if not norm:
+        raise HTTPException(400, "路径非法")
+    path = (base / norm).resolve()
+    try:
+        path.relative_to(base.resolve())
+    except ValueError:
+        raise HTTPException(400, "路径越界")
+    return path
+
+
+def _activity_yaml_data(act_dir: Path) -> dict:
+    """读 activity.yaml；解析失败按空 dict 处理，详情页不因此 500。"""
+    try:
+        return _ingest.read_activity_yaml(act_dir)
+    except ValueError:
+        return {}
+
+
+def _count_files(directory: Path) -> int:
+    """目录下（递归）文件数，跳过隐藏目录（.trash 等）。"""
+    total = 0
+    for p in directory.rglob("*"):
+        if not p.is_file():
+            continue
+        rel = p.relative_to(directory)
+        if any(part.startswith(".") for part in rel.parts):
+            continue
+        total += 1
+    return total
+
+
+def _file_item(path: Path) -> dict:
+    """文件/目录条目：name / size / mtime / is_dir。"""
+    st = path.stat()
+    return {
+        "name": path.name,
+        "size": 0 if path.is_dir() else st.st_size,
+        "mtime": datetime.fromtimestamp(st.st_mtime, TZ).isoformat(),
+        "is_dir": path.is_dir(),
+    }
+
+
+def _activity_mtime(act_dir: Path) -> float:
+    """活动目录的最近改动时间：取目录本身与所有文件 mtime 的最大值。"""
+    latest = act_dir.stat().st_mtime
+    for p in act_dir.rglob("*"):
+        if p.is_file():
+            latest = max(latest, p.stat().st_mtime)
+    return latest
+
+
+@app.post("/api/projects")
+def api_create_project(body: dict, request: Request,
+                       user=Depends(require_admin), conn=Depends(db)):
+    """建项目：目录 + 方案/协议/报告/活动/其他 + 最小 yaml。
+
+    body: {name, short, code_rules?}。目录已存在 → 409。
+    """
+    require_admin(user)
+    name = str(body.get("name") or "").strip()
+    try:
+        target = _projects._project_dir(name)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    if target.exists():
+        raise HTTPException(409, f"项目目录已存在：{name}")
+
+    short = str(body.get("short") or name).strip() or name
+    rules = body.get("code_rules") or {}
+    if not isinstance(rules, dict):
+        raise HTTPException(400, "code_rules 必须是对象")
+
+    target.mkdir(parents=True)
+    for sub in ("方案", "协议", "报告", "活动", "其他"):
+        (target / sub).mkdir()
+
+    yaml_path = target / f"{name}.yaml"
+    text = yaml.safe_dump({"project": {"short": short, "code_rules": rules}},
+                          allow_unicode=True, sort_keys=False)
+    tmp = yaml_path.with_name(yaml_path.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    tmp.replace(yaml_path)
+
+    audit(conn, user["id"], "create_project", target=name,
+          detail={"short": short, "code_rules": rules}, ip=request.client.host)
+    return {"ok": True, "name": name, "short": short,
+            "path": str(target), "yaml": str(yaml_path)}
+
+
+@app.put("/api/projects/{name}")
+def api_update_project(name: str, body: dict, request: Request,
+                       user=Depends(require_admin), conn=Depends(db)):
+    """更新项目 yaml：body 是完整 yaml dict，原子写。
+
+    用 safe_dump 整体覆盖，**不保留原文件注释与字段顺序**；
+    需要留注释的改动请直接改磁盘上的 yaml。
+    """
+    require_admin(user)
+    try:
+        target = _projects._project_dir(name)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    yaml_path = _projects._yaml_in(target)
+    if yaml_path is None:
+        raise HTTPException(404, f"项目没有 yaml：{name}")
+    if not isinstance(body, dict):
+        raise HTTPException(400, "body 必须是 yaml 对象")
+
+    text = yaml.safe_dump(body, allow_unicode=True, sort_keys=False)
+    tmp = yaml_path.with_name(yaml_path.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    tmp.replace(yaml_path)
+
+    audit(conn, user["id"], "update_project", target=name,
+          detail={"keys": sorted(body)}, ip=request.client.host)
+    return {"ok": True, "name": name, "yaml": str(yaml_path)}
+
+
+@app.get("/api/projects/{name}/activities/{dirname}")
+def api_activity_detail(name: str, dirname: str, user=Depends(current_user)):
+    """活动详情：编号 / 状态 / 顶层文件 / 子目录文件数 / 15 项核对。"""
+    act_dir, _meta = _activity_meta_or_404(name, dirname, user)
+    act = _activity_yaml_data(act_dir)
+
+    files: list[dict] = []
+    dirs: list[dict] = []
+    for p in sorted(act_dir.iterdir(), key=lambda x: x.name):
+        if p.name.startswith("."):
+            continue
+        if p.is_dir():
+            dirs.append({"name": p.name, "count": _count_files(p)})
+        elif p.is_file():
+            files.append(_file_item(p))
+
+    return {
+        "dirname": dirname,
+        "code": str(act.get("code") or ""),
+        "status": str(act.get("status") or ""),
+        "files": files,
+        "dirs": dirs,
+        "check": _checks.check(act_dir),
+    }
+
+
+@app.get("/api/projects/{name}/activities/{dirname}/files")
+def api_activity_files(name: str, dirname: str, sub: str = "",
+                       user=Depends(current_user)):
+    """列活动目录（或 sub 子目录）下的一级条目，按名称排序。"""
+    act_dir, _meta = _activity_meta_or_404(name, dirname, user)
+    base = _safe_rel_path(act_dir, sub, allow_empty=True)
+    if not base.is_dir():
+        raise HTTPException(404, f"目录不存在：{sub}")
+    return [_file_item(p) for p in sorted(base.iterdir(), key=lambda x: x.name)
+            if not p.name.startswith(".")]
+
+
+@app.get("/api/projects/{name}/activities/{dirname}/download")
+def api_activity_download(name: str, dirname: str, path: str,
+                          user=Depends(current_user)):
+    """下载活动内文件。path 相对活动目录，越界 → 400。"""
+    act_dir, _meta = _activity_meta_or_404(name, dirname, user)
+    target = _safe_rel_path(act_dir, path)
+    if not target.is_file():
+        raise HTTPException(404, f"文件不存在：{path}")
+    media = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
+    return FileResponse(target, media_type=media, filename=target.name)
+
+
+@app.delete("/api/projects/{name}/activities/{dirname}/files")
+def api_activity_delete_file(name: str, dirname: str, body: dict, request: Request,
+                             user=Depends(require_write), conn=Depends(db)):
+    """删除活动内文件：移到 <活动目录>/.trash/<时间戳>/ 下，不真删。"""
+    require_write(user)
+    act_dir, _meta = _activity_meta_or_404(name, dirname, user, write=True)
+    target = _safe_rel_path(act_dir, body.get("path"))
+    if not target.is_file():
+        raise HTTPException(404, f"文件不存在：{body.get('path')}")
+
+    rel = target.relative_to(act_dir.resolve())
+    if rel.parts and rel.parts[0] == ".trash":
+        raise HTTPException(400, "不能删除回收站里的文件")
+
+    stamp = datetime.now(TZ).strftime("%Y%m%d-%H%M%S")
+    dest = act_dir / ".trash" / stamp / rel
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    n = 1
+    while dest.exists():
+        dest = dest.with_name(f"{dest.stem}-{n}{dest.suffix}")
+        n += 1
+    shutil.move(str(target), str(dest))
+
+    audit(conn, user["id"], "delete_activity_file", project=name,
+          target=rel.as_posix(),
+          detail={"activity": dirname, "trash": dest.relative_to(act_dir).as_posix()},
+          ip=request.client.host)
+    return {"ok": True, "path": rel.as_posix(),
+            "trash": dest.relative_to(act_dir).as_posix()}
+
+
+@app.get("/api/templates")
+def api_templates(user=Depends(current_user)):
+    """列模板库里的 docx/xlsx 及占位符。"""
+    lib = _template_library()
+    out: list[dict] = []
+    if not lib.is_dir():
+        return out
+    for p in sorted(lib.iterdir(), key=lambda x: x.name):
+        if not p.is_file() or p.suffix.lower() not in (".docx", ".xlsx"):
+            continue
+        try:
+            placeholders = _fill.scan_placeholders(p)
+        except Exception:
+            # 单个模板损坏不该让整个列表 500
+            placeholders = []
+        out.append({"name": p.stem,
+                    "kind": p.suffix.lower().lstrip("."),
+                    "placeholders": placeholders})
+    return out
+
+
+def _activity_require_code(act_dir: Path) -> None:
+    """模板填充前置条件：activity.yaml 必须有 code。"""
+    code = str(_activity_yaml_data(act_dir).get("code") or "").strip()
+    if not code:
+        raise HTTPException(400, "activity.yaml 缺 code，无法生成材料")
+
+
+def _fill_output(act_dir: Path, body: dict, tpl: Path) -> Path:
+    """解析输出路径：默认「模板名.扩展名」，限制在活动目录内。"""
+    default = f"{tpl.stem}{tpl.suffix}"
+    out_rel = str(body.get("output") or default).strip()
+    dst = _safe_rel_path(act_dir, out_rel)
+    if not dst.suffix:
+        dst = dst.with_name(dst.name + tpl.suffix)
+    return dst
+
+
+@app.post("/api/projects/{name}/activities/{dirname}/fill")
+def api_activity_fill(name: str, dirname: str, body: dict, request: Request,
+                      user=Depends(require_write), conn=Depends(db)):
+    """模板填充：build_data → 合并 data → render → 写到活动目录。"""
+    require_write(user)
+    act_dir, _meta = _activity_meta_or_404(name, dirname, user, write=True)
+    _activity_require_code(act_dir)
+
+    tpl = _find_template(body.get("template"))
+    extra = body.get("data") or {}
+    if not isinstance(extra, dict):
+        raise HTTPException(400, "data 必须是对象")
+    dst = _fill_output(act_dir, body, tpl)
+
+    merged = _activity.build_data(name, dirname, extra=extra)
+    try:
+        result = _fill.render(tpl, dst, merged)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+
+    rel = dst.relative_to(act_dir.resolve()).as_posix()
+    audit(conn, user["id"], "fill_template", project=name, target=rel,
+          detail={"activity": dirname, "template": tpl.stem,
+                  "filled": result["filled"]}, ip=request.client.host)
+    return {"path": rel, "filled": result["filled"],
+            "missing": result["missing"]}
+
+
+@app.post("/api/projects/{name}/activities/{dirname}/llm")
+def api_activity_llm(name: str, dirname: str, body: dict, request: Request,
+                     user=Depends(require_write), conn=Depends(db)):
+    """LLM 生成：提取 facts → llm.write()，结果直接返回，不落盘。"""
+    require_write(user)
+    act_dir, _meta = _activity_meta_or_404(name, dirname, user, write=True)
+
+    task = str(body.get("task") or "").strip()
+    if not task:
+        raise HTTPException(400, "缺 task")
+    style = str(body.get("style") or "")
+    facts = _activity.build_data(name, dirname)
+    try:
+        result = _llm.write(task, facts, style=style)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    except _llm.LLMError as exc:
+        raise HTTPException(502, f"LLM 生成失败：{exc}")
+
+    audit(conn, user["id"], "llm_generate", project=name, target=task,
+          detail={"activity": dirname, "style": style}, ip=request.client.host)
+    return {"task": task, "style": style, "result": result}
+
+
+@app.post("/api/projects/{name}/activities/{dirname}/llm-fill")
+def api_activity_llm_fill(name: str, dirname: str, body: dict, request: Request,
+                          user=Depends(require_write), conn=Depends(db)):
+    """LLM 生成 + 落盘：llm.write() → 合并进 build_data() → fill.render()。"""
+    require_write(user)
+    act_dir, _meta = _activity_meta_or_404(name, dirname, user, write=True)
+
+    task = str(body.get("task") or "").strip()
+    if not task:
+        raise HTTPException(400, "缺 task")
+    tpl = _find_template(body.get("template"))
+    style = str(body.get("style") or "")
+    dst = _fill_output(act_dir, body, tpl)
+
+    facts = _activity.build_data(name, dirname)
+    try:
+        generated = _llm.write(task, facts, style=style)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    except _llm.LLMError as exc:
+        raise HTTPException(502, f"LLM 生成失败：{exc}")
+
+    merged = _activity.build_data(name, dirname, extra=generated)
+    try:
+        result = _fill.render(tpl, dst, merged)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+
+    rel = dst.relative_to(act_dir.resolve()).as_posix()
+    audit(conn, user["id"], "llm_fill", project=name, target=rel,
+          detail={"activity": dirname, "task": task, "template": tpl.stem},
+          ip=request.client.host)
+    return {"path": rel, "filled": result["filled"],
+            "missing": result["missing"], "generated": generated}
+
+
+def _sync_targets(project: str) -> list[str]:
+    """同步范围：空 = 全部项目；指定项目必须存在。"""
+    names = [p["name"] for p in _projects.list_projects()]
+    if not project:
+        return names
+    if project not in names:
+        raise HTTPException(404, f"项目不存在：{project}")
+    return [project]
+
+
+@app.post("/api/sync/feishu")
+def api_sync_feishu(body: dict, background: BackgroundTasks, request: Request,
+                    user=Depends(require_admin), conn=Depends(db)):
+    """飞书同步。push 很慢，放后台跑，请求立即返回。"""
+    require_admin(user)
+    project = str(body.get("project") or "").strip()
+    targets = _sync_targets(project)
+    background.add_task(_run_feishu_sync, project)
+    audit(conn, user["id"], "sync_feishu", target=project or "*",
+          detail={"projects": targets}, ip=request.client.host)
+    return {
+        "started": True,
+        "task": "飞书同步已在后台开始",
+        # 目录与镜像结果要等后台跑完才知道，这里先给出范围
+        "projects": [{"name": n, "created_dir": None, "pushed": None}
+                     for n in targets],
+    }
+
+
+@app.post("/api/cognee/index")
+def api_cognee_index(body: dict, background: BackgroundTasks, request: Request,
+                     user=Depends(require_admin), conn=Depends(db)):
+    """Cognee 入库。建图很慢，放后台跑，请求立即返回。"""
+    require_admin(user)
+    project = str(body.get("project") or "").strip()
+    targets = _sync_targets(project)
+    background.add_task(_run_cognee_index, project)
+    audit(conn, user["id"], "cognee_index", target=project or "*",
+          detail={"projects": targets}, ip=request.client.host)
+    return {"started": True, "task": "Cognee 入库已在后台开始",
+            "projects": targets}
+
+
+@app.get("/api/cognee/datasets")
+def api_cognee_datasets(user=Depends(current_user)):
+    """Cognee 数据集列表 + 每个数据集的文档条数与图节点数。"""
+    try:
+        datasets = _cognee_index.list_datasets(ROOT)
+    except Exception as exc:
+        raise HTTPException(502, f"Cognee 不可用：{exc}")
+
+    try:
+        summary = _cognee_index.graph_summary(ROOT)
+    except Exception:
+        summary = {}          # 图还没建 / 接口暂不可用时节点数留 None
+
+    items: list[dict] = []
+    for ds in datasets:
+        if not isinstance(ds, dict):
+            continue
+        did = str(ds.get("id") or "")
+        try:
+            count = _cognee_index.data_count(ROOT, did) if did else None
+        except Exception:
+            count = None
+        nodes = (summary.get(did) or {}).get("numNodes")
+        items.append({
+            "id": did,
+            "name": ds.get("name"),
+            "count": count,
+            "nodes": nodes,
+            "created_at": ds.get("createdAt"),
+        })
+    return {"total": len(items), "items": items}
+
+
+@app.get("/api/dashboard")
+def api_dashboard(user=Depends(current_user)):
+    """仪表盘：项目活动进度 + 最近 10 个有改动的活动。"""
+    projects: list[dict] = []
+    recent: list[dict] = []
+
+    for item in _projects.list_projects():
+        if not _project_allowed(user, item):
+            continue
+        name = str(item.get("name") or "")
+        act_root = Path(_projects.PROJECTS_ROOT) / name / "活动"
+        dirs = ([p for p in sorted(act_root.iterdir(), key=lambda x: x.name)
+                 if p.is_dir() and not p.name.startswith(".")]
+                if act_root.is_dir() else [])
+
+        complete = 0
+        for act_dir in dirs:
+            try:
+                ok = _checks.check(act_dir)["complete"]
+            except Exception:
+                ok = False
+            if ok:
+                complete += 1
+            recent.append({
+                "project": name,
+                "activity": act_dir.name,
+                "status": str(_activity_yaml_data(act_dir).get("status") or ""),
+                "mtime": datetime.fromtimestamp(
+                    _activity_mtime(act_dir), TZ).isoformat(),
+            })
+
+        projects.append({
+            "name": name,
+            "short": _project_short(item),
+            "activity_total": len(dirs),
+            "activity_complete": complete,
+        })
+
+    recent.sort(key=lambda x: x["mtime"], reverse=True)
+    return {"projects": projects, "recent": recent[:10]}
 
 
 if __name__ == "__main__":

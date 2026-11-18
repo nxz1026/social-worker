@@ -164,6 +164,50 @@ def upload_name(item: Item) -> str:
     return item.rel.replace("/", "__") + ".md"
 
 
+def run(root: Path, project: str = "") -> dict:
+    """入库并建图（供 API 后台任务复用，行为与 CLI 非 dry-run 一致）。
+
+    返回 {"projects": [项目名], "added": 入库条数, "errors": [转换失败的文件],
+    "empty": 是否没有可入图的文档}。
+    """
+    items = scan(root, project)
+    if not items:
+        print("没有找到可入图的文档")
+        return {"projects": [], "added": 0, "errors": [], "empty": True}
+
+    by_project: dict[str, list[Item]] = defaultdict(list)
+    for item in items:
+        by_project[item.project].append(item)
+
+    errors: list[str] = []
+    added = 0
+    for proj, pitems in by_project.items():
+        dataset = cognee_index.ensure_dataset(root, proj)
+        print(f"[{proj}] 数据集 id = {dataset['id']}", flush=True)
+        for item in pitems:
+            try:
+                text = item_text(item)
+            except RuntimeError as exc:
+                sys.stderr.write(f"[error] {item.rel} 转换失败：{exc}\n")
+                errors.append(item.rel)
+                continue
+            if not text.strip():
+                print(f"  - 跳过空内容 {item.rel}", flush=True)
+                continue
+            data_id = cognee_index.add_text(root, proj, text, upload_name(item))
+            added += 1
+            print(f"  + {item.rel} -> {data_id}", flush=True)
+
+    # 全部送完后，按项目统一 cognify
+    for proj in by_project:
+        print(f"[{proj}] cognify 开始（可能几分钟）……", flush=True)
+        cognee_index.cognify(root, proj)
+        print(f"[{proj}] cognify 完成", flush=True)
+
+    return {"projects": list(by_project), "added": added, "errors": errors,
+            "empty": False}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="文档转 Markdown 后送入 Cognee 建图")
     parser.add_argument("--dry-run", action="store_true", help="只列出将入图的文件")
@@ -172,16 +216,15 @@ def main() -> int:
 
     cfg = load_config()
     root = cfg.root
-    items = scan(root, args.project)
-    if not items:
-        print("没有找到可入图的文档")
-        return 0
-
-    by_project: dict[str, list[Item]] = defaultdict(list)
-    for item in items:
-        by_project[item.project].append(item)
 
     if args.dry_run:
+        items = scan(root, args.project)
+        if not items:
+            print("没有找到可入图的文档")
+            return 0
+        by_project: dict[str, list[Item]] = defaultdict(list)
+        for item in items:
+            by_project[item.project].append(item)
         for project, pitems in by_project.items():
             print(f"[{project}] 数据集 = {project}")
             for item in pitems:
@@ -194,34 +237,13 @@ def main() -> int:
         print(f"\n共 {len(by_project)} 个项目 / {docs} 个文档 / {lists} 条照片清单")
         return 0
 
-    errors: list[str] = []
-    added = 0
-    for project, pitems in by_project.items():
-        dataset = cognee_index.ensure_dataset(root, project)
-        print(f"[{project}] 数据集 id = {dataset['id']}", flush=True)
-        for item in pitems:
-            try:
-                text = item_text(item)
-            except RuntimeError as exc:
-                sys.stderr.write(f"[error] {item.rel} 转换失败：{exc}\n")
-                errors.append(item.rel)
-                continue
-            if not text.strip():
-                print(f"  - 跳过空内容 {item.rel}", flush=True)
-                continue
-            data_id = cognee_index.add_text(root, project, text, upload_name(item))
-            added += 1
-            print(f"  + {item.rel} -> {data_id}", flush=True)
+    result = run(root, args.project or "")
+    if result["empty"]:
+        return 0
 
-    # 全部送完后，按项目统一 cognify
-    for project in by_project:
-        print(f"[{project}] cognify 开始（可能几分钟）……", flush=True)
-        cognee_index.cognify(root, project)
-        print(f"[{project}] cognify 完成", flush=True)
-
-    print(f"\n完成：入库 {added} 条，转换失败 {len(errors)} 条")
-    if errors:
-        for rel in errors:
+    print(f"\n完成：入库 {result['added']} 条，转换失败 {len(result['errors'])} 条")
+    if result["errors"]:
+        for rel in result["errors"]:
             print(f"  失败：{rel}")
         return 1
     return 0
