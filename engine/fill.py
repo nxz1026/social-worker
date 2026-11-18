@@ -14,6 +14,8 @@
 填充规则：
 - data 里没有的占位符：原样留在文件里，记入 missing，不抛错
 - data 里值为 None 或空串：替换成空串（清空该格），计入 filled
+- 带序号占位符 {{字段_N}}：先找 data["字段_N"]，再找 data["字段"]；
+  data["字段"] 是列表时取第 N 项，超出长度填空，是标量时所有序号同值
 - 输出永远写到 dst，模板文件不会被原地修改
 """
 from __future__ import annotations
@@ -26,6 +28,8 @@ from docx import Document
 from docx.table import _Cell
 
 PLACEHOLDER_RE = re.compile(r"\{\{([^{}]+)\}\}")
+# 带行号的占位符：{{字段_12}} → ("字段", 12)
+INDEXED_KEY_RE = re.compile(r"^(.*)_(\d+)$")
 
 
 class MissingField(Exception):
@@ -77,24 +81,54 @@ def _rewrite_para(para, text: str) -> None:
 # --------------------------------------------------------------------------
 
 def _to_text(value) -> str:
-    """填充值转字符串：None → 空串，整数值的浮点去掉 .0。"""
+    """填充值转字符串：None → 空串，整数值的浮点去掉 .0，列表用顿号连接。"""
     if value is None:
         return ""
     if isinstance(value, bool):
         return str(value)
+    if isinstance(value, (list, tuple)):
+        # 无序号占位符碰到列表时合并成一行，避免把 Python 列表原样写进文档
+        return "、".join(_to_text(item) for item in value)
     if isinstance(value, float) and value.is_integer():
         return str(int(value))
     return str(value)
 
 
+def _lookup(key: str, data: dict) -> tuple[bool, object]:
+    """按序号取值：先精确 key，再退回无序号 key，都没有则视为缺失。
+
+    1. data["字段_2"] 存在 → 直接用（调用方显式给出的带序号值优先）
+    2. data["字段"] 是列表 → 取第 2 项；超出长度返回空串
+    3. data["字段"] 是标量 → 所有序号都填同一个值（兼容旧用法）
+    """
+    if key in data:
+        return True, data[key]
+
+    match = INDEXED_KEY_RE.match(key)
+    if not match:
+        return False, None
+
+    base, seq = match.group(1), int(match.group(2))
+    if base not in data:
+        return False, None
+
+    value = data[base]
+    if isinstance(value, (list, tuple)):
+        if 1 <= seq <= len(value):
+            return True, value[seq - 1]
+        return True, ""                # 超出列表长度：填空，不抛错
+    return True, value
+
+
 def _substitute(text: str, data: dict, acc: dict) -> str:
-    """把 text 里的 {{字段}} 换成 data 里的值，统计 filled / missing。"""
+    """把 text 里的 {{字段}} / {{字段_N}} 换成 data 里的值，统计 filled / missing。"""
 
     def repl(match: re.Match) -> str:
         key = match.group(1).strip()
-        if key in data:
+        found, value = _lookup(key, data)
+        if found:
             acc["filled"] += 1
-            return _to_text(data[key])
+            return _to_text(value)
         acc["missing"].add(key)
         return match.group(0)          # 缺字段：原样保留
 

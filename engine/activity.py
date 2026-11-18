@@ -147,4 +147,9 @@ def build_data(project_name: str, activity_dir: str,
     if extra:
         for key, value in extra.items():
             data[key] = value
+            # 列表值展开成「字段_1」「字段_2」……，供多行表格占位符按行取值；
+            # 原列表 key 保留，兼容无序号占位符。显式传入的 X_1 不被覆盖。
+            if isinstance(value, (list, tuple)):
+                for seq, item in enumerate(value, start=1):
+                    data.setdefault(f"{key}_{seq}", item)
     return data

@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import argparse
 import re
 import sys
 from pathlib import Path
@@ -105,6 +106,22 @@ def _apply_para_rules(paragraphs, rules: dict) -> int:
     return n
 
 
+def _is_indexed_variant(current: str, target: str) -> bool:
+    """current 是否已经是 target 的带序号形式（{{X}} → {{X_1}}）。
+
+    默认模式重跑时不能把已经加过序号的格子改回 {{X}}，否则 --row-index
+    的成果会被覆盖，两种模式来回跑就不幂等了。
+    """
+    if not isinstance(current, str) or not isinstance(target, str):
+        return False
+    if not (target.startswith("{{") and target.endswith("}}")):
+        return False
+    base = target[2:-2].strip()
+    if not base or "{{" in base or "}}" in base:
+        return False
+    return re.fullmatch(r"\{\{%s_\d+\}\}" % re.escape(base), current.strip()) is not None
+
+
 def _apply_cell_ops(cell: _Cell, ops) -> int:
     """对单元格套用一组操作，返回改动处数。
 
@@ -121,7 +138,7 @@ def _apply_cell_ops(cell: _Cell, ops) -> int:
     n = 0
     for op in ops:
         if isinstance(op, str):
-            if cell.text != op:
+            if cell.text != op and not _is_indexed_variant(cell.text, op):
                 set_cell_text(cell, op)
                 n += 1
         elif op[0] == "append":
@@ -213,7 +230,7 @@ def replace_in_xlsx(p: Path, cell_map: dict) -> int:
             for op in ops:
                 cur = cell.value
                 if isinstance(op, str):
-                    if cur != op:
+                    if cur != op and not _is_indexed_variant(cur, op):
                         cell.value = op
                         n += 1
                 elif op[0] == "sub":
@@ -253,6 +270,89 @@ def renumber_column(p: Path, table_idx: int, col_idx: int) -> int:
             n += 1
     if n:
         doc.save(str(p))
+    return n
+
+
+# --------------------------------------------------------------------------
+# P3.1 多行表格占位符加行号（{{字段}} → {{字段_1}}、{{字段_2}}……）
+# --------------------------------------------------------------------------
+
+PH_RE = re.compile(r"\{\{([^{}]+)\}\}")
+
+
+def add_row_index(text: str, seq: int) -> str:
+    """把一段文本里的 {{字段}} 改成 {{字段_seq}}。
+
+    已经带 _数字 后缀的占位符原样保留，因此脚本可以反复运行而不会
+    变成 {{字段_1_1}}（幂等）。
+    """
+    def repl(match: re.Match) -> str:
+        key = match.group(1).strip()
+        if re.fullmatch(r".+_\d+", key):
+            return match.group(0)
+        return "{{%s_%d}}" % (key, seq)
+
+    return PH_RE.sub(repl, text)
+
+
+def index_docx_rows(p: Path, table_idx: int, rows, cols: dict) -> int:
+    """给 docx 表格指定数据行里的占位符加序号，返回改动处数。
+
+    rows 中的第一个行序号对应 _1，依次递增；cols 为 {物理列: 字段名}。
+    单元格为空时按字段名补占位符（决算表这类原本没标占位符的模板需要），
+    非空则只给已有占位符加后缀，不动其它文字。
+    """
+    doc = Document(str(p))
+    tb = doc.tables[table_idx]
+    n = 0
+
+    for seq, ri in enumerate(rows, start=1):
+        tcs = tb.rows[ri]._tr.tc_lst
+        for ci, field in cols.items():
+            if ci >= len(tcs):
+                raise IndexError(f"{p.name} 表{table_idx + 1} r{ri} 只有 {len(tcs)} 个物理单元格，取不到第 {ci} 列")
+            cell = _Cell(tcs[ci], tb)
+            text = cell.text
+            if "{{" in text:
+                for para in cell.paragraphs:
+                    new = add_row_index(para.text, seq)
+                    if new != para.text:
+                        set_para_text(para, new)
+                        n += 1
+            elif not text.strip() and field:
+                # 空数据格：按列名补 {{字段_序号}}
+                set_cell_text(cell, "{{%s_%d}}" % (field, seq))
+                n += 1
+
+    if n:
+        doc.save(str(p))
+    return n
+
+
+def index_xlsx_rows(p: Path, sheet_name: str, rows, cols: dict) -> int:
+    """给 xlsx 指定数据行的单元格占位符加序号，返回改动处数。
+
+    cols 为 {列字母: 字段名}；空单元格按字段名补占位符。
+    """
+    wb = openpyxl.load_workbook(str(p))
+    ws = wb[sheet_name] if sheet_name else wb.worksheets[0]
+    n = 0
+
+    for seq, ri in enumerate(rows, start=1):
+        for col, field in cols.items():
+            cell = ws[f"{col}{ri}"]
+            value = cell.value
+            if isinstance(value, str) and "{{" in value:
+                new = add_row_index(value, seq)
+                if new != value:
+                    cell.value = new
+                    n += 1
+            elif (value is None or (isinstance(value, str) and not value.strip())) and field:
+                cell.value = "{{%s_%d}}" % (field, seq)
+                n += 1
+
+    if n:
+        wb.save(str(p))
     return n
 
 
@@ -605,7 +705,104 @@ XLSX_JOBS = [
 ]
 
 
-def main() -> int:
+# --------------------------------------------------------------------------
+# P3.1 需要加行号的数据行配置
+# --------------------------------------------------------------------------
+# 每个表项：{"table": 表序号(0 起), "rows": 数据行(0 起, 不含表头/合计行),
+#            "cols": {物理列下标: 字段名}}
+# 每个表的行号都从 1 重新开始。合计行不在 rows 里，因此 {{合计金额}} 不受影响。
+ROW_INDEX_DOCX_JOBS = [
+    # 决算表 表1：6 行明细（物品名称 / 单价 / 规格 / 金额 / 备注）
+    ("决算表.docx", [
+        {"table": 0, "rows": range(1, 7),
+         "cols": {1: "物品名称", 2: "单价", 3: "规格", 4: "金额", 5: "备注"}},
+    ]),
+    # 物资领取表 表1：13 行
+    ("物资领取表.docx", [
+        {"table": 0, "rows": range(1, 14),
+         "cols": {1: "领取人姓名", 2: "领取人电话", 3: "领取物品"}},
+    ]),
+    # 志愿者补贴领取表 表1：16 行
+    ("志愿者补贴领取表.docx", [
+        {"table": 0, "rows": range(1, 17),
+         "cols": {1: "志愿者姓名", 2: "志愿者电话", 3: "志愿者身份证",
+                  4: "服务内容", 5: "金额"}},
+    ]),
+    # 劳务领取表 表1：只有 r5 一个数据行；r6 是合并的「备注」行，不属于明细
+    ("劳务领取表.docx", [
+        {"table": 0, "rows": range(5, 6),
+         "cols": {1: "服务事项", 2: "补贴金额", 3: "个税扣缴", 4: "税后金额"}},
+    ]),
+    # 计划书 三张表各自从 _1 开始
+    ("计划书.docx", [
+        {"table": 0, "rows": range(1, 6),
+         "cols": {2: "环节内容", 3: "环节物资", 4: "环节人员"}},
+        {"table": 1, "rows": range(1, 3),
+         "cols": {0: "预计困难", 1: "解决方案"}},
+        {"table": 2, "rows": range(1, 6),
+         "cols": {1: "物资名称", 2: "物资规格", 3: "物资单价", 4: "物资小计"}},
+    ]),
+]
+
+# xlsx 用列字母定位：{"sheet": 工作表名, "rows": 行号(1 起), "cols": {列字母: 字段名}}
+ROW_INDEX_XLSX_JOBS = [
+    ("报销单.xlsx", [
+        {"sheet": "费用报销单", "rows": range(6, 12),
+         "cols": {"B": "内容摘要", "C": "报销金额"}},
+    ]),
+    ("支出证明单.xlsx", [
+        {"sheet": "支出证明单", "rows": range(6, 8),
+         "cols": {"B": "内容摘要", "C": "报销金额"}},
+    ]),
+]
+
+
+def run_row_index() -> int:
+    """按 ROW_INDEX_*_JOBS 给多行表格的占位符加行号，返回总改动处数（失败 -1）。"""
+    if not TEMPLATE_DIR.is_dir():
+        print(f"模板目录不存在: {TEMPLATE_DIR}", file=sys.stderr)
+        return -1
+
+    total = 0
+    print(f"模板目录: {TEMPLATE_DIR}")
+    print("模式: 多行表格占位符加行号（--row-index）")
+    print("-" * 56)
+
+    for name, specs in ROW_INDEX_DOCX_JOBS:
+        p = TEMPLATE_DIR / name
+        if not p.exists():
+            print(f"{name} → 文件缺失，跳过")
+            continue
+        n = 0
+        for spec in specs:
+            n += index_docx_rows(p, spec["table"], spec["rows"], spec["cols"])
+        total += n
+        print(f"{name} → 改 {n} 处")
+
+    for name, specs in ROW_INDEX_XLSX_JOBS:
+        p = TEMPLATE_DIR / name
+        if not p.exists():
+            print(f"{name} → 文件缺失，跳过")
+            continue
+        n = 0
+        for spec in specs:
+            n += index_xlsx_rows(p, spec["sheet"], spec["rows"], spec["cols"])
+        total += n
+        print(f"{name} → 改 {n} 处")
+
+    print("-" * 56)
+    print(f"合计改动 {total} 处（表格数据行占位符）")
+    return total
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(description="模板占位符改造")
+    parser.add_argument("--row-index", action="store_true",
+                        help="只给多行表格的数据行占位符加序号（{{X}} → {{X_1}}）")
+    args = parser.parse_args(argv)
+    if args.row_index:
+        return 0 if run_row_index() >= 0 else 1
+
     if not TEMPLATE_DIR.is_dir():
         print(f"模板目录不存在: {TEMPLATE_DIR}", file=sys.stderr)
         return 1

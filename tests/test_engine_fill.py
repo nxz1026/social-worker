@@ -11,7 +11,7 @@ from docx.table import _Cell
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
-from engine import fill  # noqa: E402
+from engine import activity, fill  # noqa: E402
 
 TEMPLATES = Path("/srv/social-work/templates/library")
 JUE_SUAN = TEMPLATES / "决算表.docx"
@@ -120,6 +120,97 @@ def test_render_dispatches_by_suffix(tmp_path):
     assert dst.is_file()
     assert "测试项目" in _docx_text(dst)
     assert result["filled"] >= 1
+
+
+def _table_rows_text(path: Path, table_idx: int) -> list[list[str]]:
+    """按物理单元格返回 docx 表格每行的文本，便于按行断言。"""
+    doc = Document(str(path))
+    table = doc.tables[table_idx]
+    return [[_Cell(tc, table).text for tc in row._tr.tc_lst]
+            for row in table.rows]
+
+
+def test_render_docx_row_index_list_values(tmp_path):
+    """带序号的占位符按列表逐行取值：第一行横幅/10，第二行 KT板/120。"""
+    dst = tmp_path / "决算表-多行.docx"
+    data = {
+        "物品名称": ["横幅", "KT板"],
+        "单价": [10, 120],
+        "规格": ["3m×0.8m", "2m×1m"],
+        "金额": [10, 120],
+        "备注": ["含安装", ""],
+    }
+    result = fill.render_docx(JUE_SUAN, dst, data)
+
+    rows = _table_rows_text(dst, 0)
+    assert rows[1][1] == "横幅"
+    assert rows[1][2] == "10"
+    assert rows[2][1] == "KT板"
+    assert rows[2][2] == "120"
+    assert rows[1][4] == "10"
+    assert result["filled"] > 0
+
+
+def test_render_docx_row_index_out_of_range_blank(tmp_path):
+    """列表比表格行数短时，超出部分填空，不抛错。"""
+    dst = tmp_path / "决算表-短列表.docx"
+    result = fill.render_docx(JUE_SUAN, dst, {"物品名称": ["横幅"]})
+
+    rows = _table_rows_text(dst, 0)
+    assert rows[1][1] == "横幅"
+    assert rows[2][1] == ""
+    assert rows[6][1] == ""
+    # 超出长度算已填充，不进 missing
+    assert "物品名称_2" not in result["missing"]
+
+
+def test_render_docx_indexed_key_wins_over_base(tmp_path):
+    """精确的 字段_1 优先于无序号 key。"""
+    dst = tmp_path / "决算表-精确key.docx"
+    fill.render_docx(JUE_SUAN, dst, {"物品名称_1": "定制横幅", "物品名称": "通用"})
+
+    rows = _table_rows_text(dst, 0)
+    assert rows[1][1] == "定制横幅"
+    assert rows[2][1] == "通用"
+
+
+def test_render_docx_without_index_key_still_fills(tmp_path):
+    """无序号 key 兼容旧用法：所有数据行填同一个值。"""
+    dst = tmp_path / "决算表-兼容.docx"
+    result = fill.render_docx(JUE_SUAN, dst, {"物品名称": "横幅"})
+
+    rows = _table_rows_text(dst, 0)
+    assert [rows[ri][1] for ri in range(1, 7)] == ["横幅"] * 6
+    assert "物品名称_1" not in result["missing"]
+
+
+def test_render_xlsx_row_index_list_values(tmp_path):
+    """xlsx 同样按序号取列表值，超出长度填空。"""
+    dst = tmp_path / "报销单-多行.xlsx"
+    fill.render_xlsx(BAO_XIAO, dst,
+                     {"内容摘要": ["横幅", "KT板"], "报销金额": [10, 120]})
+
+    wb = openpyxl.load_workbook(str(dst))
+    sheet = wb.worksheets[0]
+    assert sheet["B6"].value == "横幅"
+    assert sheet["C6"].value == "10"
+    assert sheet["B7"].value == "KT板"
+    assert sheet["C7"].value == "120"
+    assert sheet["B8"].value in (None, "")   # 超出长度填空（openpyxl 存空串读回是 None）
+    wb.close()
+
+
+def test_build_data_expands_list_extra(tmp_path):
+    """extra 里的列表值展开成 字段_1、字段_2……，并保留原列表。"""
+    data = activity.build_data(
+        "不存在的项目", str(tmp_path),
+        extra={"内容摘要": ["横幅", "KT板"]},
+    )
+
+    assert data["内容摘要"] == ["横幅", "KT板"]
+    assert data["内容摘要_1"] == "横幅"
+    assert data["内容摘要_2"] == "KT板"
+    assert "内容摘要_3" not in data
 
 
 def test_render_rejects_unknown_suffix(tmp_path):
