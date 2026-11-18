@@ -17,6 +17,7 @@ import json
 import mimetypes
 import os
 import posixpath
+import re
 import secrets
 import socket
 import shutil
@@ -1638,6 +1639,185 @@ def api_activity_files(name: str, dirname: str, sub: str = "",
         raise HTTPException(404, f"目录不存在：{sub}")
     return [_file_item(p) for p in sorted(base.iterdir(), key=lambda x: x.name)
             if not p.name.startswith(".")]
+
+
+# 活动目录上传：允许的扩展名（与文档库一致，另加压缩包）
+_ACTIVITY_UPLOAD_EXTS = {
+    ".docx", ".xlsx", ".doc", ".xls", ".pdf",
+    ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp",
+    ".txt", ".md", ".zip", ".7z",
+}
+# 文件名里不允许出现的字符（路径分隔符与 Windows 保留字符）
+_ACTIVITY_BAD_NAME_CHARS = set('/\\:*?"<>|')
+_ACTIVITY_NAME_MAX = 120
+
+
+def _activity_sub_dir(act_dir: Path, sub: str) -> Path:
+    """把 sub 解析成活动目录内的目标子目录，逐级校验必须已存在。
+
+    sub 为空表示活动根目录；多级用 `/` 分隔（如 13-其他佐证/知识库规范命名照片）。
+    含 `..`、`.`、空段、反斜杠、绝对路径、空字节一律 400；任一级不存在也 400。
+    """
+    raw = str(sub or "").strip()
+    base = act_dir.resolve()
+    if not raw:
+        return base
+    if "\x00" in raw:
+        raise HTTPException(400, "子目录路径含空字节")
+    if "\\" in raw:
+        raise HTTPException(400, "子目录路径不能包含反斜杠")
+    if raw.startswith("/") or Path(raw).is_absolute():
+        raise HTTPException(400, "子目录必须是相对路径")
+    parts = raw.split("/")
+    if any(part in ("", ".", "..") for part in parts):
+        raise HTTPException(400, "子目录路径非法（不能包含 ..、. 或空段）")
+    cur = act_dir
+    for part in parts:
+        cur = cur / part
+        if not cur.is_dir():
+            raise HTTPException(400, f"子目录不存在：{part}")
+    path = cur.resolve()
+    try:
+        path.relative_to(base)
+    except ValueError:
+        raise HTTPException(400, "子目录越界")
+    return path
+
+
+def _activity_upload_filename(filename: str) -> str:
+    """校验上传文件名：扩展名、长度、隐藏文件、非法字符。返回原文件名。"""
+    raw = str(filename or "")
+    if not raw.strip():
+        raise HTTPException(400, "缺文件名")
+    if raw.startswith("."):
+        raise HTTPException(400, "不允许上传隐藏文件（文件名不能以 . 开头）")
+    if len(raw) > _ACTIVITY_NAME_MAX:
+        raise HTTPException(400, f"文件名超过 {_ACTIVITY_NAME_MAX} 字符")
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in raw):
+        raise HTTPException(400, "文件名含控制字符")
+    if any(ch in _ACTIVITY_BAD_NAME_CHARS for ch in raw):
+        raise HTTPException(400, '文件名不能包含 / \\ : * ? " < > |')
+    ext = Path(raw).suffix.lower()
+    if ext not in _ACTIVITY_UPLOAD_EXTS:
+        raise HTTPException(400, f"不允许的扩展名：{ext or '（无扩展名）'}")
+    return raw
+
+
+def _check_activity_code_owner(name: str, act_dir: Path) -> None:
+    """activity.yaml 有 code 时，编号前缀必须属于本项目。
+
+    前缀 = CDYJR + 立项年 + 三位立项月（如花都 CDYJR2026005）。
+    期望值优先取项目 yaml 的 code_rules；但实际数据里 yaml 的立项月可能与
+    既有编号不一致（惠民 yaml 写 6、既有活动编号却是 CDYJR2026008），
+    因此再并入「同项目其他活动」的既有前缀作为事实来源。
+    两边都对不上，说明活动目录是从别的项目混进来的，直接 400。
+    """
+    code = str(_activity_yaml_data(act_dir).get("code") or "").strip()
+    if not code:
+        return
+    m = re.match(r"^([A-Za-z0-9]+)-[cC]-", code)
+    if not m:
+        raise HTTPException(400, f"activity.yaml 的 code 格式无法识别：{code}")
+    actual = m.group(1).upper()
+
+    expected: set[str] = set()
+    month = _projects.project_meta(name).get("establish_month")
+    if month:
+        expected.add(f"{_coding.ORG_PREFIX}{_project_year(name)}{int(month):03d}".upper())
+    project_dir = Path(_projects.PROJECTS_ROOT) / name
+    for other_name, other_dir in _activities.activity_dirs(project_dir).items():
+        if other_name == act_dir.name:
+            continue
+        other_code = str(_activity_yaml_data(other_dir).get("code") or "").strip()
+        om = re.match(r"^([A-Za-z0-9]+)-[cC]-", other_code)
+        if om:
+            expected.add(om.group(1).upper())
+
+    if not expected:
+        # 项目没配立项月、也没有其他活动可参照，无从判断，不阻断
+        return
+    if actual not in expected:
+        raise HTTPException(
+            400, f"活动编号不属于本项目：期望前缀 {'/'.join(sorted(expected))}，"
+                 f"实际 {actual}（{code}）")
+
+
+def _activity_numbering_warning(act_dir: Path, filename: str) -> str:
+    """文件名以 NN- 开头且对应核对项已 ok 时，返回重复提示（不阻断上传）。"""
+    m = re.match(r"^(\d{2})-", filename)
+    if not m:
+        return ""
+    prefix = m.group(1) + "-"
+    names = [(item["no"], item["name"]) for item in _checks.CHECKLIST
+             if prefix in (item.get("prefixes") or [item.get("prefix")])]
+    if not names:
+        return ""
+    status = {it["no"]: it["status"] for it in _checks.check(act_dir).get("items") or []}
+    hit = next((label for no, label in names if status.get(no) == "ok"), "")
+    if not hit:
+        return ""
+    return f"核对项「{hit}」已齐，再上传 {prefix} 开头的文件会重复"
+
+
+@app.post("/api/projects/{name}/activities/{dirname}/upload")
+def api_activity_upload(
+    name: str, dirname: str,
+    file: UploadFile = File(...),
+    sub: str = Form(""),            # 目标子目录（空 = 活动根）
+    user=Depends(require_write),
+    conn=Depends(db),
+):
+    """往活动目录上传文件。返回 {path, size, sha256}。
+
+    校验链：写权限 → 项目/活动目录存在 → sub 逐级存在 → 文件名规范 →
+    编号归属 → 同名冲突 → 流式落盘并限大小。文件名以 NN- 开头且该核对项
+    已齐时，仍返回 200，但附带 warning 提醒会重复。
+    """
+    require_write(user)
+    act_dir, _meta = _activity_meta_or_404(name, dirname, user, write=True)
+    target_dir = _activity_sub_dir(act_dir, sub)
+    filename = _activity_upload_filename(file.filename or "")
+    _check_activity_code_owner(name, act_dir)
+    # 先按上传前的磁盘状态判断是否重复，落盘后该前缀必然已齐
+    warning = _activity_numbering_warning(act_dir, filename)
+
+    dest = target_dir / filename
+    if dest.exists():
+        raise HTTPException(409, f"同名文件已存在：{filename}（请改名或先删除）")
+
+    max_mb = int(SETTINGS.upload.get("max_mb", 50))
+    max_bytes = max_mb * 1024 * 1024
+    digest = hashlib.sha256()
+    size = 0
+    try:
+        # "xb" 独占创建：并发同名上传时只有一个能成功，其余走 409
+        with open(dest, "xb") as fh:
+            while True:
+                chunk = file.file.read(1 << 20)
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > max_bytes:
+                    raise HTTPException(413, f"文件超过 {max_mb} MB 限制")
+                digest.update(chunk)
+                fh.write(chunk)
+    except FileExistsError:
+        raise HTTPException(409, f"同名文件已存在：{filename}（请改名或先删除）")
+    except HTTPException:
+        dest.unlink(missing_ok=True)      # 超限 / 中断不留半截文件
+        raise
+    except Exception:
+        dest.unlink(missing_ok=True)
+        raise
+
+    sha = digest.hexdigest()
+    rel = dest.relative_to(act_dir.resolve()).as_posix()
+    audit(conn, user["id"], "upload_activity_file", project=name, target=rel,
+          detail={"activity": dirname, "size": size, "sha256": sha})
+    out = {"path": rel, "size": size, "sha256": sha}
+    if warning:
+        out["warning"] = warning
+    return out
 
 
 @app.get("/api/projects/{name}/activities/{dirname}/download")

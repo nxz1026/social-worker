@@ -594,6 +594,7 @@ async function pageActivity(name, dirname, params) {
       </div>
       <div class="actions">
         <button class="btn primary" data-act="open-fill" ${canWrite() ? '' : 'disabled title="需 editor/admin"'}>生成材料</button>
+        <button class="btn" data-act="act-upload" ${canWrite() ? '' : 'disabled title="需 editor/admin"'}>上传文件</button>
         <button class="btn" data-act="open-llm" ${canWrite() ? '' : 'disabled title="需 editor/admin"'}>LLM 生成</button>
         <button class="btn" data-act="do-check">核对</button>
         <button class="btn" data-act="sync-feishu" ${isAdmin() ? '' : 'disabled title="需 admin"'}>同步飞书</button>
@@ -616,7 +617,7 @@ async function pageActivity(name, dirname, params) {
           </div>
         </div>
         <div id="fileList">${renderFileRows(entries, sub, check)}</div>
-        <div class="hint" style="margin-top:10px">「上传归档」进入文档库归档流程；活动目录内的文件由归档/生成产生。</div>
+        <div class="hint" style="margin-top:10px">「上传文件」直接传到当前活动目录；「上传归档」进入文档库归档流程。</div>
       </div>
     </div>`;
 
@@ -754,6 +755,72 @@ async function recheckActivity() {
   if (sum) sum.innerHTML = checkSummary(check);
   toast(check.complete ? '核对完成：材料齐全' : `核对完成：还缺 ${check.missing_count} 项`,
     check.complete ? 'ok' : 'warn');
+}
+
+/* ---------------- 活动目录上传 ---------------- */
+async function collectActivityDirs(base, rel = '', depth = 0, acc = []) {
+  const entries = await api(base + '/files' + (rel ? '?sub=' + enc(rel) : ''));
+  for (const e of entries) {
+    if (!e.is_dir) continue;
+    const path = rel ? `${rel}/${e.name}` : e.name;
+    acc.push(path);
+    if (depth < 1) await collectActivityDirs(base, path, depth + 1, acc);
+  }
+  return acc;
+}
+
+async function openActivityUploadModal() {
+  if (!actCtx) return;
+  if (!canWrite()) { toast('需 editor/admin 权限', 'warn'); return; }
+  const { projectName, dirname } = actCtx;
+  const base = `/projects/${enc(projectName)}/activities/${enc(dirname)}`;
+  openModal('上传文件到活动目录', `
+    <div class="form-grid">
+      <label class="field"><span>目标子目录</span>
+        <select id="actUpSub"><option value="">活动根目录</option></select></label>
+      <label class="field"><span>文件（≤50MB）</span><input type="file" id="actUpFile"></label>
+    </div>
+    <div class="hint" style="margin-top:8px">
+      同名文件不会覆盖；扩展名限 docx / xlsx / doc / xls / pdf / 图片 / txt / md / zip / 7z。
+    </div>
+    <div id="actUpMsg" style="margin-top:10px"></div>
+  `, `<button class="btn" data-close-modal>取消</button>
+      <button class="btn primary" data-act="act-upload-run">上传</button>`);
+
+  const sel = el('#actUpSub');
+  try {
+    const dirs = await collectActivityDirs(base);
+    sel.innerHTML += dirs.map(d => `<option value="${esc(d)}">${esc(d)}</option>`).join('');
+    if (actCtx.sub) sel.value = actCtx.sub;
+  } catch (e) {
+    // 子目录列表拿不到时仍可传到活动根目录
+    toast('子目录列表加载失败：' + e.message, 'warn');
+  }
+}
+
+async function uploadActivityFile() {
+  if (!actCtx) return;
+  const input = el('#actUpFile');
+  const f = input && input.files[0];
+  if (!f) { toast('请选择文件', 'warn'); return; }
+  const { projectName, dirname } = actCtx;
+  const sub = el('#actUpSub').value;
+  const fd = new FormData();
+  fd.append('file', f);
+  fd.append('sub', sub);
+  el('#actUpMsg').innerHTML = '<span class="muted">上传中…</span>';
+  try {
+    const d = await api(`/projects/${enc(projectName)}/activities/${enc(dirname)}/upload`, {
+      method: 'POST', body: fd,
+    });
+    closeModal();
+    if (d.warning) toast('已上传；' + d.warning, 'warn');
+    else toast(`已上传：${d.path}`, 'ok');
+    await refreshActivity();          // 刷新文件列表与核对结果
+  } catch (e) {
+    el('#actUpMsg').innerHTML = `<div class="notice">上传失败：${esc(e.message)}</div>`;
+    toast('上传失败：' + e.message, 'err');   // 409/400/413 显示后端 detail
+  }
 }
 
 /* ---------------- 生成材料弹窗 ---------------- */
@@ -1570,6 +1637,8 @@ document.addEventListener('click', async e => {
       return;
     }
     if (act === 'open-fill') { await openFillModal(); return; }
+    if (act === 'act-upload') { await openActivityUploadModal(); return; }
+    if (act === 'act-upload-run') { await uploadActivityFile(); return; }
     if (act === 'fill-submit') { await submitFill(); return; }
     if (act === 'close-refresh') { closeModal(); await refreshActivity(); return; }
     if (act === 'open-llm') { await openLlmModal(); return; }
