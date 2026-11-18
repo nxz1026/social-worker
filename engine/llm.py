@@ -248,6 +248,16 @@ def build_prompt(task: str, facts: dict, style: str,
         "硬性要求：",
     ]
     blocks += [f"- {rule}" for rule in spec["rules"]]
+    # 文风要求覆盖骨架时：把「禁止…开头」这类与文风冲突的规则压掉，
+    # 并把 extra 里的硬性要求在末尾再强调一次（长上下文中末位权重更高）
+    if style_spec.get("overwrite_skeleton"):
+        blocks = [b for b in blocks
+                  if not (b.startswith("- ") and "深入贯彻落实" in b and "不写" in b)]
+        blocks += [
+            "",
+            "【再次强调：上面「写作要求」中标注为硬性要求的句式，优先级高于段落骨架。】",
+            "凡与骨架措辞冲突处，一律以写作要求为准。",
+        ]
     return "\n".join(blocks)
 
 
