@@ -3,7 +3,87 @@
 > 面向客户端 Agent 的接口说明。Web 管理界面用另一套 `/api/*`，本文只讲 Agent 用的 `/api/sw/*`。
 > 所有示例均为实跑验证过的输出。
 
-## 1. 基本信息
+## 1. 网络接入
+
+### 1.1 地址与端口
+
+| 项 | 值 |
+|---|---|
+| 协议 | **HTTPS**（TLS 1.2/1.3） |
+| 主机 | `<host>`（公网 IP，无域名） |
+| HTTPS 端口 | **443** |
+| HTTP 端口 | **80**（仅做重定向，不建议 Agent 使用） |
+| API Base URL | `https://<host>/sw-api` |
+| Web 管理界面 | `https://<host>/sw/` |
+| 后端上游 | `127.0.0.1:8001`（仅本机，**不对外暴露**） |
+
+**链路**：`客户端 → nginx :443 → 反代 127.0.0.1:8001`
+
+**`<host>` 是什么**：本文档用占位符代替真实地址（仓库有密钥扫描规则，禁止提交真实 IP）。
+实际部署时查一下当前地址：
+
+```bash
+# 在服务器上查公网 IP
+curl -s ifconfig.me
+# 或查 nginx 监听
+ss -ltnp | grep ':443'
+# 或直接看服务端本地配置
+cat /srv/social-work/config/server_endpoint.txt
+```
+
+### 1.2 证书（重要）
+
+服务器用的是**自签证书**，不是公共 CA 签发：
+
+```
+subject = CN=<host>
+issuer  = CN=<host>   （自签，无中间 CA）
+有效期  = 2026-09-14 ~ 2036-09-11
+```
+
+**客户端必须处理证书校验**，否则所有请求报 `SSL: CERTIFICATE_VERIFY_FAILED`。三种处理方式：
+
+| 方式 | 适用 | 命令 |
+|---|---|---|
+| 信任自签证书 | **推荐** | 把服务器证书导出后加入客户端信任库 |
+| 跳过校验 | 仅内网/自用 | `curl -k`、Python `verify=False`、Node `rejectUnauthorized: false` |
+| 指定证书文件 | 最稳 | `curl --cacert <证书路径>` |
+
+导出服务器证书：
+
+```bash
+openssl s_client -connect <host>:443 </dev/null 2>/dev/null \
+  | openssl x509 > sw.crt
+curl --cacert sw.crt https://<host>/sw-api/api/sw/capabilities
+```
+
+### 1.3 通用请求头
+
+| 头 | 值 | 说明 |
+|---|---|---|
+| `Authorization` | `Bearer sk-sw-xxx` | API Key 认证（**首选**） |
+| `x-api-key` | `sk-sw-xxx` | 同上，二选一 |
+| `x-token` | `<session>` | Web 登录态，管理操作用 |
+| `Content-Type` | `application/json` | 除文件上传外 |
+| `Content-Type` | `multipart/form-data` | 文件上传时 |
+
+### 1.4 文件上传限制
+
+| 项 | 值 |
+|---|---|
+| 单文件上限 | **50 MB**（API 层）；nginx 允许 100 MB |
+| 允许扩展名 | `.docx .xlsx .doc .xls .pdf .jpg .jpeg .png .gif .bmp .webp .txt .md .zip .7z` |
+| 上传端点 | `POST /api/projects/{p}/activities/{a}/upload` |
+
+### 1.5 超时
+
+| 项 | 值 |
+|---|---|
+| nginx 读超时 | 600 秒 |
+| LLM 调用超时 | 240 秒（`/api/sw/run` 带 `task` 时可能接近该值） |
+| 建议 Agent 客户端超时 | ≥ 300 秒 |
+
+### 1.6 Base URL 速查
 
 | 项 | 值 |
 |---|---|
