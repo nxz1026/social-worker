@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""P2.7 模板占位符统一改造
+"""模板占位符统一改造
 
 把 /srv/social-work/templates/library/ 下的 docx / xlsx 模板里的自然语言、
 星号、示例数据统一替换成 {{字段名}} 占位符。
