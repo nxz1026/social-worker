@@ -21,7 +21,7 @@ CST = timezone(timedelta(hours=8))
 # 必须出现在返回结果里的 key；顺序即文档顺序
 REQUIRED_KEYS = (
     "项目名称", "活动名称", "活动时间", "活动地点", "服务对象", "预计人数",
-    "实际人数", "人手分配", "项目社工", "项目负责人", "项目编号", "年月日",
+    "实际人数", "人手分配", "项目社工", "项目负责人", "执行社工团队", "项目编号", "年月日",
     "填表日期", "执行社工", "出纳", "经办人", "收款单位", "帐号", "开户行",
     "费用归属部门", "领取人数", "测评人数", "总得分", "满意率", "平均分",
     "评定等级",
@@ -110,6 +110,25 @@ def _as_int(value) -> int | None:
     return int(match.group(1)) if match else None
 
 
+def _count_names(text) -> int | None:
+    """从「①聂聃（…）；②刘佳（…）；③史佳红（…）」里数出人名个数。
+
+    真正的执行团队常写在 activity.yaml 的「执行社工团队」里，
+    比项目 staff 岗位数准（一项目多岗、单场活动只来部分人）。
+    数不出来返回 None，让调用方退回下一级。
+    """
+    raw = _text(text)
+    if not raw:
+        return None
+    # 圈码 ①②③… 是最可靠的段落标记
+    circled = re.findall(r"[①-⑳]", raw)
+    if circled:
+        return len(circled)
+    # 退而数「姓名（」的个数
+    found = re.findall(r"([\u4e00-\u9fa5]{2,4})\s*[（(]", raw)
+    return len(found) or None
+
+
 def _staff_count(staff: dict) -> int:
     """数项目 yaml staff 段里有姓名的岗位数：leader / social_worker … 各算 1 人。
 
@@ -130,7 +149,9 @@ def _staffing_text(staff: dict, data: dict) -> str:
     社工人数优先取活动情况（extra / activity.yaml 的 社工人数），否则按项目
     yaml 的 staff 岗位数；网格数只有明确给了才拼上，没给就只写社工。
     """
+    # 人数优先级：显式给的 > 执行社工团队里数出的姓名数 > 项目 staff 岗位数
     count = (_as_int(data.get("社工人数")) or _as_int(data.get("项目社工人数"))
+             or _count_names(data.get("执行社工团队"))
              or _staff_count(staff))
     text = f"{count}名项目社工"
     grids = _as_int(data.get("社区网格数"))
@@ -193,8 +214,14 @@ def build_data(project_name: str, activity_dir: str,
     data = {
         # 项目 yaml
         "项目名称": _text(proj.get("name")) or project_name,
-        "项目社工": _text(leader.get("name")),
-        "项目负责人": _text(leader.get("name")),
+        # 执行社工与项目负责人是两个角色：leader 是负责人，不是执行社工。
+        # 执行社工优先取 activity.yaml（每场活动可能不同），没配才退回 leader 以外的社工，
+        # 最后才用 leader 兜底（单人社工站的常见情形）。
+        "项目社工": (_text(activity.get("执行社工"))
+                     or _text((staff.get("social_worker") or {}).get("name"))
+                     or _text(leader.get("name"))),
+        "项目负责人": (_text(activity.get("项目负责人"))
+                       or _text(leader.get("name"))),
         "帐号": _text(executer.get("account")),
         "开户行": _text(executer.get("bank")),
         "收款单位": _text(executer.get("name")),
@@ -210,6 +237,7 @@ def build_data(project_name: str, activity_dir: str,
         "预计人数": _text(activity.get("预计人数")),
         "实际人数": _text(activity.get("实际人数")),
         "执行社工": _text(activity.get("执行社工")),
+        "执行社工团队": _text(activity.get("执行社工团队")),
         "出纳": _text(activity.get("出纳")),
         "经办人": _text(activity.get("经办人")),
         "费用归属部门": _text(activity.get("费用归属部门")),
