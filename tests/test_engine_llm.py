@@ -174,3 +174,33 @@ def test_write_drops_extra_fields(monkeypatch):
     result = llm.write("brief", _brief_facts(), style="务实", max_rewrite=0)
     assert [key for key in result if not key.startswith("_")] == [
         "导语", "目的", "过程", "成效"]
+
+
+# --------------------------------------------------------------------------
+# supervision（监督记录）
+# --------------------------------------------------------------------------
+
+def test_supervision_task_shape():
+    """监督记录只有一个字段，字数区间与正式用途写在骨架里。"""
+    spec = llm.TASKS["supervision"]
+
+    assert spec["doc"] == "监督记录表"
+    assert tuple(spec["fields"]) == ("活动内容",)
+    assert "300~450" in spec["schema"]["活动内容"]
+    assert any("首先/其次/再次/最后" in rule for rule in spec["rules"])
+
+
+def test_supervision_prompt_has_rules_and_facts():
+    facts = {"活动名称": "共治行动（第一期）", "活动时间": "2026年11月10日",
+             "实际人数": 19, "决算金额": 1662}
+    prompt = llm.build_prompt("supervision", facts, "务实")
+
+    assert '"活动内容"' in prompt
+    assert "以「年月日，某社区联合某机构在何处开展某事」开头" in prompt
+    assert "必须写具体数字（人数、金额、数量）" in prompt
+    assert "- 实际人数：19" in prompt
+
+
+def test_supervision_normalize_requires_content():
+    with pytest.raises(llm.LLMError, match="缺字段：活动内容"):
+        llm._normalize("supervision", {"活动内容": "  "})

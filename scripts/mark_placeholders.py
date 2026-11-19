@@ -673,14 +673,7 @@ BAO_XIAO = {
     **{f"C{r}": "{{报销金额}}" for r in range(6, 12)},
 }
 
-# 支出证明单.xlsx
-ZHI_CHU = {
-    "A2": "{{项目名称}}",
-    "A3": "费用归属部门：{{费用归属部门}}",
-    "B3": "填表日期：{{填表日期}}",
-    "C8": "=SUM(C6:J30)",
-    "C9": "{{人民币大写}}",
-}
+# 内部审计类表格不参与模板改造（清单见 config/excluded_templates.txt）
 
 
 DOC_JOBS = [
@@ -701,7 +694,6 @@ DOC_JOBS = [
 
 XLSX_JOBS = [
     ("报销单.xlsx", BAO_XIAO),
-    ("支出证明单.xlsx", ZHI_CHU),
 ]
 
 
@@ -748,10 +740,6 @@ ROW_INDEX_DOCX_JOBS = [
 ROW_INDEX_XLSX_JOBS = [
     ("报销单.xlsx", [
         {"sheet": "费用报销单", "rows": range(6, 12),
-         "cols": {"B": "内容摘要", "C": "报销金额"}},
-    ]),
-    ("支出证明单.xlsx", [
-        {"sheet": "支出证明单", "rows": range(6, 8),
          "cols": {"B": "内容摘要", "C": "报销金额"}},
     ]),
 ]
