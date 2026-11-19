@@ -106,8 +106,8 @@ def test_build_prompt_renders_facts_and_skeleton():
     prompt = llm.build_prompt("brief", _brief_facts(), "务实")
     assert "- 活动地点：民乐北巷" in prompt
     assert "- 活动目标：清理乱停车辆、划定临时停放区" in prompt   # 列表用顿号连接
-    assert '"导语"' in prompt and '"成效"' in prompt
-    assert "全文合计 600~850 字" in prompt
+    assert '"简报导语"' in prompt and '"达到目标"' in prompt
+    assert "全文合计 500~800 字" in prompt
 
 
 def test_build_prompt_rejects_unknown_style():
@@ -125,13 +125,13 @@ def test_build_prompt_rejects_unknown_task():
 # --------------------------------------------------------------------------
 
 def test_parse_json_tolerates_code_fence():
-    text = '```json\n{"导语": "一", "目的": "二", "过程": "三", "成效": "四"}\n```'
-    assert llm._parse_json(text)["导语"] == "一"
+    text = '```json\n{"简报导语": "一", "诉求描述": "二", "达到目标": "三"}\n```'
+    assert llm._parse_json(text)["简报导语"] == "一"
 
 
 def test_parse_json_tolerates_surrounding_text():
-    text = '以下是结果：\n{"导语": "一"}\n希望有帮助'
-    assert llm._parse_json(text) == {"导语": "一"}
+    text = '以下是结果：\n{"简报导语": "一"}\n希望有帮助'
+    assert llm._parse_json(text) == {"简报导语": "一"}
 
 
 def test_parse_json_rejects_non_json():
@@ -146,13 +146,13 @@ def test_write_retries_then_succeeds(monkeypatch):
         calls["n"] += 1
         if calls["n"] < 3:
             raise llm.LLMError("上游 500")
-        return '{"导语": "一", "目的": "二", "过程": "三", "成效": "四"}'
+        return '{"简报导语": "一", "诉求描述": "二", "达到目标": "三"}'
 
     monkeypatch.setattr(llm, "_chat", fake_chat)
     result = llm.write("brief", _brief_facts(), style="务实", max_rewrite=0)
     assert calls["n"] == 3
     assert {k: v for k, v in result.items() if not k.startswith("_")} == {
-        "导语": "一", "目的": "二", "过程": "三", "成效": "四"}
+        "简报导语": "一", "诉求描述": "二", "达到目标": "三"}
 
 
 def test_write_raises_after_three_failures(monkeypatch):
@@ -170,10 +170,10 @@ def test_write_raises_after_three_failures(monkeypatch):
 
 def test_write_drops_extra_fields(monkeypatch):
     monkeypatch.setattr(llm, "_chat", lambda prompt, max_tokens=None: (
-        '{"导语": "一", "目的": "二", "过程": "三", "成效": "四", "备注": "多余"}'))
+        '{"简报导语": "一", "诉求描述": "二", "达到目标": "三", "备注": "多余"}'))
     result = llm.write("brief", _brief_facts(), style="务实", max_rewrite=0)
     assert [key for key in result if not key.startswith("_")] == [
-        "导语", "目的", "过程", "成效"]
+        "简报导语", "诉求描述", "达到目标"]
 
 
 # --------------------------------------------------------------------------

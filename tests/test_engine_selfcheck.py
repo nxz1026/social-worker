@@ -49,8 +49,8 @@ def _pad(text: str, filler: str, total: int) -> str:
 
 def _brief(text: str) -> dict:
     """把一段文字放进「导语」，其余字段给短句，总字数基本等于 text 的字数。"""
-    return {"导语": text, "目的": "补充说明。", "过程": "补充说明。",
-            "成效": "补充说明。"}
+    return {"简报导语": text, "诉求描述": "补充说明。",
+            "达到目标": "补充说明。"}
 
 
 def _style_config() -> dict:
@@ -149,7 +149,7 @@ def test_write_skips_rewrite_when_max_rewrite_zero(monkeypatch):
     assert calls["n"] == 1                  # 不重写就不多调一次 LLM
     assert result["_rewrites"] == 0
     assert result["_check"]["ok"] is False
-    assert result["导语"] == short
+    assert result["简报导语"] == short
 
 
 def test_write_rewrites_once_when_check_fails(monkeypatch):
@@ -191,7 +191,7 @@ def test_write_keeps_original_when_rewrite_fails(monkeypatch):
 
     # 首次 1 次 + 重写的 3 次网络重试，全部失败后保留原稿
     assert calls["n"] == 4
-    assert result["导语"] == short
+    assert result["简报导语"] == short
     assert result["_check"]["ok"] is False
 
 
