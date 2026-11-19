@@ -25,13 +25,20 @@ def _write(path: Path, text: str = "x") -> None:
 
 @pytest.mark.skipif(not REAL_ACT.is_dir(), reason=f"真实活动目录不存在：{REAL_ACT}")
 def test_real_activity_complete():
-    """实测完整包：14 项齐、只有第 15 项不适用。"""
+    """实测包：03 有签字 PDF、04 有签字照片，09 只有 docx → 待补。
+
+    函数名沿用旧名（不删已有测试）；规则变更后此包不再 complete。
+    """
     result = checks.check(REAL_ACT)
-    assert result["complete"] is True
+    assert result["complete"] is False
     assert result["missing_count"] == 0
-    assert result["ok_count"] == 14
+    assert result["ok_count"] == 13
+    assert result["partial_count"] == 1
     assert result["na_count"] == 1
     assert [it["no"] for it in result["items"]] == list(range(1, 16))
+    item8 = next(it for it in result["items"] if it["no"] == 8)
+    assert item8["status"] == "partial"
+    assert "未签字 docx" in item8["detail"]
     assert result["items"][-1]["status"] == "na"
 
 
@@ -41,6 +48,7 @@ def test_empty_activity_missing_count(tmp_path):
     result = checks.check(tmp_path)
     assert result["complete"] is False
     assert result["ok_count"] == 1
+    assert result["partial_count"] == 0
     assert result["missing_count"] == 13
     assert result["na_count"] == 1
     assert result["items"][0]["status"] == "ok"
@@ -72,16 +80,49 @@ def test_na_by_filename_mark(tmp_path):
 
 
 def test_04_dir_does_not_count_as_survey_docx(tmp_path):
-    """04- 资料目录是附件，第 14 项只认 .docx 文件。"""
-    _write(tmp_path / "04-满意度调查表资料" / "01.jpg")
-    result = checks.check(tmp_path)
-    item14 = next(it for it in result["items"] if it["no"] == 14)
-    assert item14["status"] == "missing"
+    """第 14 项：只有 docx 算待补，04- 目录里的签字照片才算齐。
 
+    函数名沿用旧名（不删已有测试）；旧断言「04- 目录里的 jpg 不算」
+    已按新规则反转。
+    """
     _write(tmp_path / "04-服务对象满意度调查表.docx")
     result = checks.check(tmp_path)
     item14 = next(it for it in result["items"] if it["no"] == 14)
+    assert item14["status"] == "partial"
+    assert "缺签字扫描件" in item14["detail"]
+
+    _write(tmp_path / "04-满意度调查表资料" / "01.jpg")
+    result = checks.check(tmp_path)
+    item14 = next(it for it in result["items"] if it["no"] == 14)
     assert item14["status"] == "ok"
+
+
+def test_03_signin_needs_signed_photo(tmp_path):
+    """第 3 项：签到表 docx 只是待补，签字照片/PDF 才算齐。"""
+    _write(tmp_path / "03-签到表.docx")
+    result = checks.check(tmp_path)
+    item3 = next(it for it in result["items"] if it["no"] == 3)
+    assert item3["status"] == "partial"
+
+    _write(tmp_path / "03-签到表" / "扫描件.pdf")
+    result = checks.check(tmp_path)
+    item3 = next(it for it in result["items"] if it["no"] == 3)
+    assert item3["status"] == "ok"
+
+
+def test_09_supervision_only_docx_is_partial(tmp_path):
+    """第 8 项：只有未签字 docx 判待补，不能算齐。"""
+    _write(tmp_path / "09-监督记录表.docx")
+    result = checks.check(tmp_path)
+    item8 = next(it for it in result["items"] if it["no"] == 8)
+    assert item8["status"] == "partial"
+    assert "仅有未签字 docx" in item8["detail"]
+    assert result["complete"] is False
+
+    _write(tmp_path / "09-监督记录表-签字.pdf")
+    result = checks.check(tmp_path)
+    item8 = next(it for it in result["items"] if it["no"] == 8)
+    assert item8["status"] == "ok"
 
 
 def test_10_needs_dir_with_media(tmp_path):

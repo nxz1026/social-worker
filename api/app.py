@@ -55,6 +55,7 @@ from engine import activities as _activities  # noqa: E402
 from engine import activity as _activity  # noqa: E402
 from engine import checks as _checks  # noqa: E402
 from engine import coding as _coding  # noqa: E402
+from engine import project_checks as _project_checks  # noqa: E402
 from engine import cognee_index as _cognee_index  # noqa: E402
 from engine import fill as _fill  # noqa: E402
 from engine import ingest as _ingest  # noqa: E402
@@ -1399,6 +1400,50 @@ def api_check_activity(name: str, dirname: str, user=Depends(current_user)):
     if not act_dir.is_dir():
         raise HTTPException(404, f"活动目录不存在：{dirname}")
     return _checks.check(act_dir)
+
+
+@app.get("/api/projects/{name}/check")
+def api_check_project(name: str, user=Depends(current_user)):
+    """项目级 19 项核对：依据《项目管理目录.docx》，扫四个资料子目录。"""
+    meta = _project_meta_or_404(name)
+    if user["role"] != "admin" and meta["short"] not in scopes_of(user):
+        raise HTTPException(403, f"无项目 {name} 权限")
+    return _project_checks.check_project(Path(_projects.PROJECTS_ROOT) / name)
+
+
+@app.patch("/api/projects/{name}/activities/{dirname}/check")
+def api_set_na(name: str, dirname: str, body: dict,
+               user=Depends(require_write)):
+    """标记活动核对项不适用。body: {"not_applicable": [15, 3]}。
+
+    只改 activity.yaml 的 not_applicable 字段，其余字段原样保留。
+    """
+    act_dir, _meta = _activity_meta_or_404(name, dirname, user, write=True)
+    raw = body.get("not_applicable") if isinstance(body, dict) else None
+    if not isinstance(raw, list):
+        raise HTTPException(400, "not_applicable 必须是数组")
+
+    nos: set[int] = set()
+    for value in raw:
+        if isinstance(value, bool):
+            raise HTTPException(400, f"核对序号非法：{value}")
+        try:
+            no = int(value)
+        except (TypeError, ValueError):
+            raise HTTPException(400, f"核对序号非法：{value}")
+        if no < 1 or no > 15:
+            raise HTTPException(400, f"核对序号超出范围 1-15：{no}")
+        nos.add(no)
+
+    data = _ingest.read_activity_yaml(act_dir)
+    data["not_applicable"] = sorted(nos)
+    path = act_dir / _ingest.ACTIVITY_YAML
+    text = yaml.safe_dump(data, allow_unicode=True, sort_keys=False)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    tmp.replace(path)
+    return {"ok": True, "not_applicable": sorted(nos)}
+
 
 
 # ---------- Web 管理界面：项目管理 / 活动文件 / 材料生成 / 同步 / 仪表盘 ----------

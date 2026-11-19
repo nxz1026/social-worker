@@ -346,6 +346,7 @@ td.nowrap, th.nowrap { white-space: nowrap; }
 .check-item .no { width: 22px; flex: none; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
 .check-item .mark { width: 18px; flex: none; text-align: center; font-weight: 700; }
 .check-item .mark.ok { color: var(--ok); }
+.check-item .mark.partial { color: #c98a00; }
 .check-item .mark.missing { color: var(--err); }
 .check-item .mark.na { color: #9aa8b8; }
 .check-item .body { flex: 1; min-width: 0; }

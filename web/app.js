@@ -258,7 +258,11 @@ function statusBadge(status) {
 function checkBadge(check) {
   if (!check) return '<span class="badge muted">—</span>';
   if (check.complete) return '<span class="badge ok">完整</span>';
-  return `<span class="badge warn">缺 ${Number(check.missing_count || 0)} 项</span>`;
+  const missing = Number(check.missing_count || 0);
+  const partial = Number(check.partial_count || 0);
+  if (missing > 0) return `<span class="badge warn">缺 ${missing} 项</span>`;
+  if (partial > 0) return `<span class="badge warn">部分不完整（${partial} 项待补）</span>`;
+  return '<span class="badge warn">未完整</span>';
 }
 
 function setTitle(text) {
@@ -377,9 +381,11 @@ async function pageDashboard() {
 async function pageProject(name) {
   setTitle('项目概览');
   $('view').innerHTML = loading();
-  const [proj, acts] = await Promise.all([
+  const [proj, acts, projCheck] = await Promise.all([
     api('/projects/' + enc(name)),
     api(`/projects/${enc(name)}/activities`),
+    // 项目级核对失败不该拖垮整个项目页
+    api(`/projects/${enc(name)}/check`).catch(() => null),
   ]);
   const d = proj.data || {};
   const p = d.project || {};
@@ -428,6 +434,12 @@ async function pageProject(name) {
         ${kv('预算总额', esc(budget.total != null ? budget.total : '—'))}
         ${kv('项目编号', `<span class="mono">${esc(p.code || '未生成')}</span>`)}
       </div>
+    </div>
+    <div class="card checklist pad0">
+      <div class="card-head" style="padding:14px 14px 0"><h3>项目级核对</h3>
+        <span class="muted">19 项 · 依据项目管理目录</span></div>
+      <div>${projCheck ? renderChecklistHtml(projCheck) : empty('项目级核对不可用')}</div>
+      <div class="check-sum">${projCheck ? checkSummary(projCheck) : ''}</div>
     </div>
     <div class="card pad0">
       <div class="card-head" style="padding:16px 16px 0"><h3>量化指标</h3><span class="muted">指标决定活动目录拆分</span></div>
@@ -574,7 +586,7 @@ async function pageActivity(name, dirname, params) {
   ]);
   actCtx = { projectName: name, dirname, sub, detail, entries, project: proj, selected: 0 };
 
-  const check = detail.check || { items: [], ok_count: 0, missing_count: 0, na_count: 0, complete: false };
+  const check = detail.check || { items: [], ok_count: 0, partial_count: 0, missing_count: 0, na_count: 0, complete: false };
   const paths = sub.split('/').filter(Boolean);
   const crumb = ['<a href="#" data-act="go-root">根目录</a>']
     .concat(paths.map((p, i) => `<a href="#" data-act="go-sub" data-sub="${esc(paths.slice(0, i + 1).join('/'))}">${esc(p)}</a>`))
@@ -603,7 +615,7 @@ async function pageActivity(name, dirname, params) {
     <div class="act-layout">
       <div class="card checklist pad0" id="checkCard">
         <div class="card-head" style="padding:14px 14px 0"><h3>材料清单</h3>
-          <span class="muted">15 项 · ✓ 已齐 ✗ 缺 — 不适用</span></div>
+          <span class="muted">15 项 · ✓ 已齐 ◐ 待补 ✗ 缺 — 不适用</span></div>
         <div id="checkList">${renderChecklistHtml(check)}</div>
         <div class="check-sum" id="checkSum">${checkSummary(check)}</div>
       </div>
@@ -633,8 +645,8 @@ async function pageActivity(name, dirname, params) {
 }
 
 function renderChecklistHtml(check) {
-  const marks = { ok: '✓', missing: '✗', na: '—' };
-  const labels = { ok: '已齐', missing: '缺', na: '不适用' };
+  const marks = { ok: '✓', partial: '◐', missing: '✗', na: '—' };
+  const labels = { ok: '已齐', partial: '待补（有未签字文档，缺签字扫描件）', missing: '缺', na: '不适用' };
   return (check.items || []).map(it => `<div class="check-item" data-no="${it.no}">
     <span class="no">${it.no}</span>
     <span class="mark ${esc(it.status)}" title="${esc(labels[it.status] || '')}">${marks[it.status] || '—'}</span>
@@ -647,7 +659,7 @@ function renderChecklistHtml(check) {
 
 function checkSummary(check) {
   const verdict = check.complete ? '<span class="badge ok">完整</span>' : '<span class="badge warn">未完整</span>';
-  return `齐 ${check.ok_count} 项 · 缺 ${check.missing_count} 项 · 不适用 ${check.na_count} 项 ${verdict}`;
+  return `齐 ${check.ok_count} 项 · 待补 ${check.partial_count || 0} 项 · 缺 ${check.missing_count} 项 · 不适用 ${check.na_count} 项 ${verdict}`;
 }
 
 function renderFileRows(entries, sub, check) {
@@ -753,8 +765,15 @@ async function recheckActivity() {
   }
   const sum = el('#checkSum');
   if (sum) sum.innerHTML = checkSummary(check);
-  toast(check.complete ? '核对完成：材料齐全' : `核对完成：还缺 ${check.missing_count} 项`,
-    check.complete ? 'ok' : 'warn');
+  const partial = Number(check.partial_count || 0);
+  const missing = Number(check.missing_count || 0);
+  if (check.complete) {
+    toast('核对完成：材料齐全', 'ok');
+  } else if (!missing && partial) {
+    toast(`核对完成：${partial} 项待补签字件`, 'warn');
+  } else {
+    toast(`核对完成：还缺 ${missing} 项`, 'warn');
+  }
 }
 
 /* ---------------- 活动目录上传 ---------------- */
