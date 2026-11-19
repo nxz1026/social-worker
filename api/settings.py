@@ -33,7 +33,7 @@ DEFAULTS = {
     },
     "auth": {"token_ttl_hours": 12},
     "db": {"dsn": ""},
-    "projects": ["huadu", "huimin"],
+    "projects": ["惠民社区保障资金项目", "花都社区保障资金项目", "花都社区激励资金项目"],
     "llm": {
         "base_url": "",
         "model_id": "",

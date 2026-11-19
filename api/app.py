@@ -38,9 +38,12 @@ import psycopg
 import yaml
 from fastapi import (BackgroundTasks, Depends, FastAPI, File, Form, HTTPException,
                      Request, UploadFile)
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 
+import apikey as _apikey
 from settings import SETTINGS
 import status as status_mod
 
@@ -60,6 +63,7 @@ from engine import checks as _checks  # noqa: E402
 from engine import coding as _coding  # noqa: E402
 from engine import invoice as _invoice  # noqa: E402
 from engine import project_checks as _project_checks  # noqa: E402
+from engine import readme as _readme  # noqa: E402
 from engine import cognee_index as _cognee_index  # noqa: E402
 from engine import fill as _fill  # noqa: E402
 from engine import ingest as _ingest  # noqa: E402
@@ -184,7 +188,7 @@ def create_session(conn, user_id: int, ip: str, ua: str) -> str:
 def get_user(conn, token: str):
     with conn.cursor() as cur:
         cur.execute(
-            """SELECT u.id, u.username, u.role, u.enabled, s.expires_at
+            """SELECT u.id, u.username, u.role, u.enabled, s.expires_at, u.real_name
                FROM sessions s JOIN users u ON u.id = s.user_id
                WHERE s.token = %s""",
             (token,),
@@ -194,20 +198,22 @@ def get_user(conn, token: str):
         return None
     if row[4] < datetime.now(TZ):
         return None
-    return {"id": row[0], "username": row[1], "role": row[2]}
+    return {"id": row[0], "username": row[1], "role": row[2],
+            "real_name": row[5] or ""}
 
-def user_projects(conn, user_id: int, role: str) -> list[str]:
-    if role == "admin":
-        return list(ALL_PROJECTS)
-    with conn.cursor() as cur:
-        cur.execute("SELECT project FROM user_projects WHERE user_id = %s", (user_id,))
-        return [r[0] for r in cur.fetchall()]
+def user_projects(conn, user_id: int, role: str) -> dict[str, str]:
+    """项目授权：{项目名: 'readonly'|'write'}。
+
+    admin 返回配置里的全部项目（write）。普通账号查 user_projects.access；
+    零项目返回空 dict，调用方必须当成「没有数据」，不能兜底成全部。
+    """
+    return _apikey.load_projects(conn, user_id, role)
 
 # ---------- 审计 ----------
 # 审计明细里绝不能出现口令 / token / 个案正文；只保留排查需要的字段。
 _SENSITIVE_DETAIL_KEYS = {
-    "password", "passwd", "pwd", "token", "api_key", "apikey", "secret",
-    "context", "content",
+    "password", "passwd", "pwd", "token", "api_key", "apikey", "key",
+    "secret", "context", "content",
 }
 
 def _safe_detail(detail):
@@ -234,8 +240,93 @@ def audit(conn, user_id, action, project=None, target=None, detail=None, ip=None
         )
     conn.commit()
 
+# ---------- 统一错误 ----------
+class ApiError(HTTPException):
+    """机器可读的业务错误。
+
+    /api/sw/* 用 {"error": {code, message, hint}}；其余端点仍回 {"detail": ...}，
+    保持 Web 界面原有契约不变。
+    """
+
+    def __init__(self, status: int, code: str, message: str, hint: str = ""):
+        super().__init__(status_code=status, detail=message)
+        self.code = code
+        self.message = message
+        self.hint = hint
+
+
+@app.exception_handler(ApiError)
+async def api_error_handler(request: Request, exc: ApiError):
+    if request.url.path.startswith("/api/sw/"):
+        return JSONResponse(status_code=exc.status_code, content={
+            "error": {"code": exc.code, "message": exc.message, "hint": exc.hint}})
+    # 非 v1 端点：沿用 FastAPI 默认形状，避免破坏现有 Web 前端
+    return JSONResponse(status_code=exc.status_code,
+                        content={"detail": exc.message})
+
+
+# /api/sw/* 里由 FastAPI 抛出的普通 HTTPException（多为认证失败）也统一成错误码；
+# 其它路径继续走 FastAPI 默认 {"detail": ...}，Web 界面行为不变。
+_SW_STATUS_CODE = {
+    400: "VALIDATION", 401: "UNAUTHORIZED", 403: "FORBIDDEN",
+    404: "NOT_FOUND", 409: "CONFLICT", 413: "PAYLOAD_TOO_LARGE",
+    500: "INTERNAL", 502: "UPSTREAM_FAILED", 504: "TIMEOUT",
+}
+
+
+@app.exception_handler(HTTPException)
+async def http_error_handler(request: Request, exc: HTTPException):
+    if request.url.path.startswith("/api/sw/"):
+        return JSONResponse(status_code=exc.status_code, content={
+            "error": {
+                "code": _SW_STATUS_CODE.get(exc.status_code, "ERROR"),
+                "message": str(exc.detail),
+                "hint": "",
+            }})
+    return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error_handler(request: Request, exc: RequestValidationError):
+    """参数校验失败：/api/sw/* 也给出 VALIDATION 错误码。"""
+    if request.url.path.startswith("/api/sw/"):
+        errors = exc.errors()
+        message = "；".join(
+            f"{'.'.join(str(x) for x in item.get('loc') or [])}: {item.get('msg')}"
+            for item in errors) or "参数校验失败"
+        return JSONResponse(status_code=422, content={
+            "error": {"code": "VALIDATION", "message": message, "hint": ""}})
+    return JSONResponse(status_code=422,
+                        content={"detail": jsonable_encoder(exc.errors())})
+
+
 # ---------- 依赖 ----------
+def _bearer_token(request: Request) -> str:
+    """从 Authorization: Bearer ... 或 x-api-key 里取 API Key 明文。"""
+    auth = str(request.headers.get("authorization") or "").strip()
+    if auth.lower().startswith("bearer "):
+        return auth[7:].strip()
+    return str(request.headers.get("x-api-key") or "").strip()
+
+
 def current_user(request: Request, conn=Depends(db)):
+    """同时支持两种认证：
+
+    1) API Key：Authorization: Bearer sk-sw-xxx / x-api-key: sk-sw-xxx
+    2) Web 会话：x-token（保持不变）
+
+    注意：只要请求带了 sk-sw- 开头的 Key，就不会再退回 x-token，
+    避免一个错误的 Key 被同请求里的旧 session 悄悄放行。
+    """
+    key = _bearer_token(request)
+    if key:
+        if not key.startswith(_apikey.KEY_PREFIX):
+            raise HTTPException(401, "认证失败：不是有效的 API Key")
+        u = _apikey.verify(conn, key)
+        if not u:
+            raise HTTPException(401, "认证失败：API Key 无效、已吊销或已过期")
+        return u
+
     token = request.headers.get("x-token")   # 只走 header，避免 token 进 URL/日志
     if not token:
         raise HTTPException(401, "未登录")
@@ -243,9 +334,14 @@ def current_user(request: Request, conn=Depends(db)):
     if not u:
         raise HTTPException(401, "登录已过期")
     u["projects"] = user_projects(conn, u["id"], u["role"])
+    u["auth_type"] = "session"
     return u
 
 def require_write(user=Depends(current_user)):
+    """全局写权限（editor/admin）。
+
+    项目级细粒度（readonly/write）由各端点自己调 check_project(write=True)。
+    """
     if user["role"] not in ("admin", "editor"):
         raise HTTPException(403, "无写权限（需 editor/admin）")
     return user
@@ -255,21 +351,129 @@ def require_admin(user=Depends(current_user)):
         raise HTTPException(403, "需 admin")
     return user
 
-def check_project(user, project: str):
-    if project not in user["projects"]:
-        raise HTTPException(403, f"无项目 {project} 权限")
+
+_ALIAS_CACHE: dict[str, dict[str, list[str]]] = {}
+
+
+def _cached_project_aliases() -> dict[str, list[str]]:
+    """项目别名表（config/project_aliases.yaml），按 ROOT 缓存。
+
+    别名 key 是历史数据里的 huimin / huadu，值是「惠民 / 花都」等中文关键词；
+    用它把旧的英文项目键和真实项目目录名互相对应。
+    """
+    key = str(ROOT)
+    if key not in _ALIAS_CACHE:
+        try:
+            _ALIAS_CACHE[key] = _project_alias_maps()[0]
+        except Exception:
+            _ALIAS_CACHE[key] = {}
+    return _ALIAS_CACHE[key]
+
+
+def _project_keys(project: str) -> set[str]:
+    """一个项目可能的授权键：项目名（目录名）与 yaml 里的 project.short。
+
+    不再做 huimin / huadu 这类历史英文键的双向兼容：user_projects 里存的就是
+    中文项目名。传入 short 或项目名都能认，是为了调用方少踩坑。
+    """
+    raw = str(project or "").strip()
+    if not raw:
+        return set()
+    keys = {raw}
+    try:
+        meta = _projects.project_meta(raw)
+        keys.update({str(meta.get("name") or raw), str(meta.get("short") or raw)})
+        return {k for k in keys if k}
+    except (FileNotFoundError, ValueError):
+        pass
+    # 传入的可能是 short（或旧写法）：扫一遍项目列表，找回目录名与 short
+    try:
+        for item in _projects.list_projects():
+            name = str(item.get("name") or "")
+            short = _project_short(item)
+            if raw in (name, short):
+                keys.update({name, short})
+                break
+    except Exception:
+        pass
+    return {k for k in keys if k}
+
+
+def _project_access(user, project: str) -> str | None:
+    """返回该项目对当前用户的 access（readonly/write）；无权限返回 None。"""
+    projects = user.get("projects") or {}
+    for key in _project_keys(project):
+        access = projects.get(key)
+        if access:
+            return str(access)
+    return None
+
+
+def _legacy_project_name(value: str) -> str:
+    """把历史台账 / 归档回执里的 huimin、huadu 归一到中文项目名。
+
+    只用于读旧数据：user_projects 授权键本身只存项目名或 short，
+    不再经过这里的别名兜底。
+    """
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    # 已经是项目名 / short：直接归一
+    try:
+        for item in _projects.list_projects():
+            name = str(item.get("name") or "")
+            if raw in (name, _project_short(item)):
+                return name
+    except Exception:
+        pass
+    # 旧别名：config/project_aliases.yaml 里 huimin → 惠民、huadu → 花都
+    group = _cached_project_aliases().get(raw) or []
+    if group:
+        try:
+            for item in _projects.list_projects():
+                name = str(item.get("name") or "")
+                short = _project_short(item)
+                if any(word in name or word in short for word in group):
+                    return name
+        except Exception:
+            pass
+    return raw
+
+
+def can_write(user, project: str) -> bool:
+    """该项目是否可写。admin 恒 True。"""
+    if user.get("role") == "admin":
+        return True
+    return _project_access(user, project) == "write"
+
+
+def check_project(user, project: str, *, write: bool = False):
+    """项目存在性之外的授权检查：读权限 + （可选）写权限。
+
+    admin 恒通过；其它账号必须在 user_projects 授权范围内。
+    readonly 项目调写操作 → 403 READONLY。
+    """
+    if user.get("role") == "admin":
+        return
+    access = _project_access(user, project)
+    if access is None:
+        raise ApiError(403, "FORBIDDEN", f"无项目 {project} 权限")
+    if write and access != "write":
+        raise ApiError(403, "READONLY", f"项目 {project} 只读，不能执行写操作",
+                       "向管理员申请该项目的 write 权限")
+
 
 def scopes_of(user, project: str = "") -> list[str]:
-    """本次请求允许访问的项目集合。
+    """本次请求允许访问的项目集合（项目名列表）。
 
     零项目账号返回空列表 —— 绝不能兜底成 `["huadu"]` 或「不过滤」。
     调用方必须把空列表当成「没有数据」，而不是「全部数据」。
     """
     if project:
-        if project not in user["projects"]:
-            raise HTTPException(403, f"无项目 {project} 权限")
+        if user.get("role") != "admin" and _project_access(user, project) is None:
+            raise ApiError(403, "FORBIDDEN", f"无项目 {project} 权限")
         return [project]
-    return list(user["projects"])
+    return list((user.get("projects") or {}).keys())
 
 # ---------- 台账 / Cognee / 状态辅助 ----------
 COGNEE_BASE = "http://127.0.0.1:8000"
@@ -513,8 +717,9 @@ def login(request: Request, body: dict, conn=Depends(db)):
 
 @app.get("/api/me")
 def me(user=Depends(current_user)):
-    return {"username": user["username"], "role": user["role"],
-            "projects": user["projects"]}
+    return {"id": user["id"], "username": user["username"],
+            "real_name": user.get("real_name", ""),
+            "role": user["role"], "projects": user["projects"]}
 
 @app.post("/api/logout")
 def logout(request: Request, user=Depends(current_user), conn=Depends(db)):
@@ -538,7 +743,7 @@ def list_docs(project: str = "", category: str = "", q: str = "",
     for token, e in (manifest.get("files") or {}).items():
         if not isinstance(e, dict) or e.get("status") == "deleted":
             continue
-        if e.get("project") not in scopes:
+        if _legacy_project_name(str(e.get("project") or "")) not in scopes:
             continue
         if category and e.get("category") != category:
             continue
@@ -574,9 +779,10 @@ def docs_health(project: str = "", user=Depends(current_user)):
     for token, e in (manifest.get("files") or {}).items():
         if not isinstance(e, dict) or e.get("status") == "deleted":
             continue
-        if e.get("project") not in scopes:
+        entry_project = _legacy_project_name(str(e.get("project") or ""))
+        if entry_project not in scopes:
             continue
-        ds = _dataset_for(str(e.get("project") or ""))
+        ds = _dataset_for(entry_project)
         st = status_mod.doc_status(
             ROOT, token, e, entries_by_ds.get(ds), url_tpl,
             roster={},                 # 列表不显示关系，不必读名册
@@ -597,7 +803,7 @@ def get_doc(token: str, user=Depends(current_user)):
         raise HTTPException(404, "文档不存在")
     if e.get("status") == "deleted":
         raise HTTPException(404, "文档已删除")
-    check_project(user, e.get("project"))
+    check_project(user, _legacy_project_name(str(e.get("project") or "")))
     content = ""
     md_path = _entry_md_path(e)
     if md_path and md_path.is_file():
@@ -615,7 +821,7 @@ def download_source(token: str, request: Request,
         raise HTTPException(404, "文档不存在")
     if e.get("status") == "deleted":
         raise HTTPException(404, "文档已删除")
-    check_project(user, str(e.get("project") or ""))
+    check_project(user, _legacy_project_name(str(e.get("project") or "")))
     rel = _normalize_rel(str(e.get("original") or ""))
     if not rel:
         raise HTTPException(404, "台账没有原件路径")
@@ -749,7 +955,8 @@ def upload_doc(
     一律 400 拒收，让客户端自行 OCR + 规范命名，服务端不再替它 OCR/识图。
     """
     if project:
-        check_project(user, project)
+        # 上传属于写操作：readonly 项目必须拒绝
+        check_project(user, project, write=True)
     elif set(user["projects"]) != set(ALL_PROJECTS):
         # 自动判项目会把文件写进用户没权限的项目；没有全部项目权限时必须显式指定
         raise HTTPException(400, "请指定项目（project）：当前账号没有全部项目权限，不能自动判定归属")
@@ -835,8 +1042,9 @@ def upload_doc(
         if not receipt.get("ok"):
             raise HTTPException(500, f"归档结果未通过校验：{(out or err)[-300:]}")
 
-        archived_project = str(receipt.get("project") or "")
-        if archived_project and archived_project not in user["projects"]:
+        archived_project = _legacy_project_name(str(receipt.get("project") or ""))
+        if archived_project and user.get("role") != "admin" \
+                and _project_access(user, archived_project) is None:
             raise HTTPException(403, f"归档到无权限项目 {archived_project}，请联系管理员处理")
         return {"ok": True, **receipt, "output": (out or "")[-800:]}
     finally:
@@ -849,7 +1057,7 @@ def update_doc(token: str, body: dict, request: Request,
     e = (manifest.get("files") or {}).get(token)
     if not e:
         raise HTTPException(404, "文档不存在")
-    check_project(user, e.get("project"))
+    check_project(user, _legacy_project_name(str(e.get("project") or "")), write=True)
     content = body.get("content")
     if content is None:
         raise HTTPException(400, "缺 content")
@@ -886,7 +1094,7 @@ def delete_doc(token: str, request: Request, user=Depends(require_admin),
     # 待确认条目 project 为空（不属于任何项目），admin 端点直接放行；
     # 否则 check_project("") 会因 admin 的 projects 不含空串而 403
     if e.get("project"):
-        check_project(user, e.get("project"))
+        check_project(user, _legacy_project_name(str(e.get("project") or "")))
     mode = "purge" if purge else "trash"
     try:
         proc = subprocess.run(
@@ -1077,16 +1285,20 @@ def generate(body: dict, request: Request, user=Depends(current_user),
             "finish_reason": finish}
 @app.get("/api/admin/users")
 def admin_users(conn=Depends(db), user=Depends(require_admin)):
+    """用户列表：真实姓名 + 项目权限明细（{项目名: readonly/write}）。"""
     with conn.cursor() as cur:
-        cur.execute("SELECT id, username, role, enabled, created_at FROM users ORDER BY id")
+        cur.execute(
+            "SELECT id, username, real_name, role, enabled, created_at "
+            "FROM users ORDER BY id")
         rows = cur.fetchall()
     out = []
     for r in rows:
-        with conn.cursor() as cur:
-            cur.execute("SELECT project FROM user_projects WHERE user_id = %s", (r[0],))
-            projs = [x[0] for x in cur.fetchall()]
-        out.append({"id": r[0], "username": r[1], "role": r[2],
-                    "enabled": r[3], "created_at": str(r[4]), "projects": projs})
+        out.append({
+            "id": r[0], "username": r[1], "real_name": r[2] or "",
+            "role": r[3], "enabled": r[4], "created_at": str(r[5]),
+            # admin 靠角色恒有全部权限，这里同样给出配置里的全部项目
+            "projects": user_projects(conn, r[0], r[3]),
+        })
     return {"items": out}
 
 def _valid_role(role: str) -> str:
@@ -1107,13 +1319,59 @@ def _as_bool(value) -> bool:
         return False
     raise HTTPException(400, "enabled 必须是布尔值")
 
+_PROJECT_ACCESS = ("readonly", "write")
+
+def _canonical_project(name: str) -> str:
+    """项目授权统一存中文项目名（目录名）；传 short 时尽量归一到目录名。"""
+    raw = str(name or "").strip()
+    if not raw:
+        return ""
+    try:
+        for item in _projects.list_projects():
+            pname = str(item.get("name") or "")
+            if raw in (pname, _project_short(item)):
+                return pname
+    except Exception:
+        pass
+    return raw
+
+def _projects_payload(raw) -> dict[str, str]:
+    """projects 入参归一：dict{项目: readonly/write}；旧 list 按全 write 兼容。"""
+    if raw is None:
+        return {}
+    if isinstance(raw, list):
+        items = [(p, "write") for p in raw]
+    elif isinstance(raw, dict):
+        items = list(raw.items())
+    else:
+        raise HTTPException(400, "projects 必须是对象或数组")
+    out: dict[str, str] = {}
+    for name, access in items:
+        key = _canonical_project(name)
+        if not key:
+            continue
+        acc = str(access or "write").strip().lower()
+        if acc not in _PROJECT_ACCESS:
+            raise HTTPException(400, f"项目权限非法：{access}（只能 readonly / write）")
+        out[key] = acc
+    return out
+
+def _save_projects(cur, uid: int, projects: dict[str, str]) -> None:
+    """覆盖式写项目授权：先清空该用户的旧授权，再逐条插入。"""
+    cur.execute("DELETE FROM user_projects WHERE user_id=%s", (uid,))
+    for name, access in projects.items():
+        cur.execute(
+            "INSERT INTO user_projects(user_id, project, access) VALUES(%s,%s,%s)",
+            (uid, name, access))
+
 @app.post("/api/admin/users")
 def admin_create_user(body: dict, request: Request, conn=Depends(db),
                       user=Depends(require_admin)):
     username = (body.get("username") or "").strip()
     password = body.get("password") or ""
+    real_name = str(body.get("real_name") or "").strip()
     role = _valid_role(body.get("role") or "viewer")
-    projects = body.get("projects") or []
+    projects = _projects_payload(body.get("projects"))
     if not username or not password:
         raise HTTPException(400, "用户名或密码为空")
     with conn.cursor() as cur:
@@ -1121,17 +1379,16 @@ def admin_create_user(body: dict, request: Request, conn=Depends(db),
         if cur.fetchone():
             raise HTTPException(409, "用户名已存在")
         cur.execute(
-            "INSERT INTO users(username, password_hash, role) VALUES(%s,%s,%s) RETURNING id",
-            (username, hash_pw(password), role),
+            "INSERT INTO users(username, password_hash, role, real_name) "
+            "VALUES(%s,%s,%s,%s) RETURNING id",
+            (username, hash_pw(password), role, real_name),
         )
         uid = cur.fetchone()[0]
-        for p in projects:
-            if p in ALL_PROJECTS:
-                cur.execute("INSERT INTO user_projects(user_id, project) VALUES(%s,%s)",
-                            (uid, p))
+        _save_projects(cur, uid, projects)
     conn.commit()
     audit(conn, user["id"], "create_user", target=username,
-          detail={"role": role, "projects": projects}, ip=request.client.host)
+          detail={"role": role, "real_name": real_name, "projects": projects},
+          ip=request.client.host)
     return {"ok": True, "id": uid}
 
 @app.patch("/api/admin/users/{uid}")
@@ -1141,6 +1398,9 @@ def admin_update_user(uid: int, body: dict, request: Request, conn=Depends(db),
         cur.execute("SELECT id FROM users WHERE id = %s", (uid,))
         if not cur.fetchone():
             raise HTTPException(404, "用户不存在")
+        if "real_name" in body:
+            cur.execute("UPDATE users SET real_name=%s WHERE id=%s",
+                        (str(body["real_name"] or "").strip(), uid))
         if "role" in body:
             cur.execute("UPDATE users SET role=%s WHERE id=%s",
                         (_valid_role(body["role"]), uid))
@@ -1153,15 +1413,36 @@ def admin_update_user(uid: int, body: dict, request: Request, conn=Depends(db),
             # 改密后旧 token 必须立即失效，否则泄漏的会话还能用满 12 小时
             cur.execute("DELETE FROM sessions WHERE user_id=%s", (uid,))
         if "projects" in body:
-            cur.execute("DELETE FROM user_projects WHERE user_id=%s", (uid,))
-            for p in body["projects"]:
-                if p in ALL_PROJECTS:
-                    cur.execute("INSERT INTO user_projects(user_id, project) VALUES(%s,%s)",
-                                (uid, p))
+            _save_projects(cur, uid, _projects_payload(body["projects"]))
     conn.commit()
     audit(conn, user["id"], "update_user", target=str(uid),
           detail=body, ip=request.client.host)
     return {"ok": True}
+
+@app.delete("/api/admin/users/{uid}")
+def admin_delete_user(uid: int, request: Request, conn=Depends(db),
+                      user=Depends(require_admin)):
+    """硬删用户：外键 ON DELETE CASCADE 会连带清掉 api_keys/sessions/user_projects。
+
+    两条硬约束：不能删自己；不能删掉最后一个 admin（否则没人能再进管理页）。
+    """
+    if uid == user["id"]:
+        raise HTTPException(400, "不能删除自己")
+    with conn.cursor() as cur:
+        cur.execute("SELECT role FROM users WHERE id = %s", (uid,))
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(404, "用户不存在")
+        if row[0] == "admin":
+            cur.execute("SELECT count(*) FROM users WHERE role = 'admin'")
+            if int(cur.fetchone()[0]) <= 1:
+                raise HTTPException(400, "不能删除最后一个 admin")
+        cur.execute("DELETE FROM users WHERE id = %s", (uid,))
+        removed = cur.rowcount
+    conn.commit()
+    audit(conn, user["id"], "delete_user", target=str(uid),
+          detail={"removed": removed}, ip=request.client.host)
+    return {"ok": True, "id": uid, "removed": bool(removed)}
 
 @app.delete("/api/admin/users/{uid}/sessions")
 def admin_revoke_sessions(uid: int, request: Request, conn=Depends(db),
@@ -1204,10 +1485,10 @@ def _project_short(item: dict) -> str:
 
 
 def _project_allowed(user, item: dict) -> bool:
-    """admin 看全部；其余账号按 user_projects 与 project.short 的对应关系过滤。"""
+    """admin 看全部；其余账号按 user_projects 授权（项目名 / short 均可命中）。"""
     if user["role"] == "admin":
         return True
-    return _project_short(item) in scopes_of(user)
+    return _project_access(user, str(item.get("name") or "")) is not None
 
 
 @app.get("/api/projects")
@@ -1237,8 +1518,7 @@ def api_list_activities(name: str, user=Depends(current_user)):
         raise HTTPException(404, f"项目不存在：{name}")
     except ValueError as exc:
         raise HTTPException(400, str(exc))
-    short = str((data.get("project") or {}).get("short") or name)
-    if user["role"] != "admin" and short not in scopes_of(user):
+    if user["role"] != "admin" and _project_access(user, name) is None:
         raise HTTPException(403, f"无项目 {name} 权限")
 
     planned = _activities.plan_activities(data)
@@ -1268,11 +1548,11 @@ def _project_meta_or_404(name: str) -> dict:
 
 
 def _require_project_write(user, meta: dict) -> None:
-    """写权限：admin/editor；非 admin 还要求该项目在授权范围内。"""
+    """写权限：admin/editor；非 admin 还要求该项目 access=write。"""
     if user["role"] not in ("admin", "editor"):
         raise HTTPException(403, "无写权限（需 editor/admin）")
-    if user["role"] != "admin" and meta["short"] not in scopes_of(user):
-        raise HTTPException(403, f"无项目 {meta['name']} 权限")
+    # 同时认目录名与 short，历史授权数据两种写法都能命中
+    check_project(user, meta["name"], write=True)
 
 
 def _existing_codes(meta: dict) -> list[str]:
@@ -1394,8 +1674,7 @@ def api_check_activity(name: str, dirname: str, user=Depends(current_user)):
         raise HTTPException(404, f"项目不存在：{name}")
     except ValueError as exc:
         raise HTTPException(400, str(exc))
-    short = str((data.get("project") or {}).get("short") or name)
-    if user["role"] != "admin" and short not in scopes_of(user):
+    if user["role"] != "admin" and _project_access(user, name) is None:
         raise HTTPException(403, f"无项目 {name} 权限")
     try:
         act_dir = _projects.activity_dir(name, dirname)
@@ -1404,6 +1683,28 @@ def api_check_activity(name: str, dirname: str, user=Depends(current_user)):
     if not act_dir.is_dir():
         raise HTTPException(404, f"活动目录不存在：{dirname}")
     return _checks.check(act_dir)
+
+
+@app.post("/api/projects/{name}/activities/{dirname}/readme")
+def api_regen_readme(name: str, dirname: str, user=Depends(require_write)):
+    """手动重生成单个活动的 README。内容没变时 written=False。"""
+    require_write(user)
+    _activity_meta_or_404(name, dirname, user, write=True)
+    try:
+        written = _readme.write_activity_readme(name, dirname)
+    except FileNotFoundError:
+        raise HTTPException(404, f"活动目录不存在：{dirname}")
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    return {"ok": True, "written": written, "path": _readme.README_NAME}
+
+
+@app.post("/api/readme/refresh")
+def api_refresh_all_readme(user=Depends(require_admin)):
+    """全量刷新 README。只读目录 + 写 md，同步执行即可。"""
+    require_admin(user)
+    result = _readme.refresh_all()
+    return {"written": len(result["written"]), "skipped": result["skipped"]}
 
 
 @app.get("/api/projects/{name}/check")
@@ -1976,7 +2277,7 @@ def api_activity_fill(name: str, dirname: str, body: dict, request: Request,
         raise HTTPException(400, "data 必须是对象")
     dst = _fill_output(act_dir, body, tpl)
 
-    merged = _activity.build_data(name, dirname, extra=extra)
+    merged = _activity.build_data(name, dirname, extra=extra, user=user)
     try:
         result = _fill.render(tpl, dst, merged)
     except ValueError as exc:
@@ -2001,7 +2302,7 @@ def api_activity_llm(name: str, dirname: str, body: dict, request: Request,
     if not task:
         raise HTTPException(400, "缺 task")
     style = str(body.get("style") or "")
-    facts = _activity.build_data(name, dirname)
+    facts = _activity.build_data(name, dirname, user=user)
     try:
         result = _llm.write(task, facts, style=style)
     except ValueError as exc:
@@ -2028,7 +2329,7 @@ def api_activity_llm_fill(name: str, dirname: str, body: dict, request: Request,
     style = str(body.get("style") or "")
     dst = _fill_output(act_dir, body, tpl)
 
-    facts = _activity.build_data(name, dirname)
+    facts = _activity.build_data(name, dirname, user=user)
     try:
         generated = _llm.write(task, facts, style=style)
     except ValueError as exc:
@@ -2036,7 +2337,7 @@ def api_activity_llm_fill(name: str, dirname: str, body: dict, request: Request,
     except _llm.LLMError as exc:
         raise HTTPException(502, f"LLM 生成失败：{exc}")
 
-    merged = _activity.build_data(name, dirname, extra=generated)
+    merged = _activity.build_data(name, dirname, extra=generated, user=user)
     try:
         result = _fill.render(tpl, dst, merged)
     except ValueError as exc:
@@ -2186,7 +2487,7 @@ def api_activity_captions(name: str, dirname: str, body: dict,
     if not photos:
         raise HTTPException(404, f"没有可用的照片：{sub}")
 
-    facts = _activity.build_data(name, dirname)
+    facts = _activity.build_data(name, dirname, user=user)
     try:
         return _caption.write_captions(photos, facts, style=style)
     except _llm.LLMError as exc:
@@ -2374,6 +2675,577 @@ def api_cognee_datasets(user=Depends(current_user)):
             "created_at": ds.get("createdAt"),
         })
     return {"total": len(items), "items": items}
+
+
+# ==========================================================================
+# E1：/api/sw/* Agent 接口层
+# ==========================================================================
+SW_VERSION = "1.0"
+# task 走 LLM 时默认落到哪个模板（与模板库文件名一致）
+_SW_TASK_TEMPLATE = {
+    "brief": "简报",
+    "plan": "计划书",
+    "summary": "总结报告",
+    "supervision": "监督记录",
+}
+
+
+def _sw_project_meta(project: str) -> dict:
+    """取项目元数据；项目不存在统一成机器可读错误。"""
+    try:
+        return _project_meta_or_404(project)
+    except HTTPException as exc:
+        if exc.status_code == 404:
+            raise ApiError(404, "PROJECT_NOT_FOUND", f"项目不存在：{project}",
+                           "先调 GET /api/sw/projects 确认项目名")
+        raise ApiError(400, "VALIDATION", str(exc.detail))
+
+
+def _sw_activity_dir(project: str, activity: str, user, *, write: bool) -> tuple[Path, dict]:
+    """定位活动目录并做项目级授权；错误转成 ApiError。"""
+    meta = _sw_project_meta(project)
+    if write:
+        if user.get("role") not in ("admin", "editor"):
+            raise ApiError(403, "FORBIDDEN", "无写权限（需 editor/admin）")
+        check_project(user, meta["name"], write=True)
+    else:
+        check_project(user, meta["name"])
+    try:
+        act_dir = _projects.activity_dir(project, activity)
+    except (ValueError, FileNotFoundError) as exc:
+        raise ApiError(400, "VALIDATION", str(exc))
+    if not act_dir.is_dir():
+        raise ApiError(404, "ACTIVITY_NOT_FOUND", f"活动目录不存在：{activity}")
+    return act_dir, meta
+
+
+def _sw_template(name: str) -> Path:
+    try:
+        return _find_template(name)
+    except HTTPException as exc:
+        if exc.status_code == 404:
+            raise ApiError(404, "TEMPLATE_NOT_FOUND", str(exc.detail),
+                           "调 GET /api/templates 查看可用模板")
+        raise ApiError(400, "VALIDATION", str(exc.detail))
+
+
+def _sw_preview(path: Path, limit: int = 500) -> str:
+    """从生成好的 docx/xlsx 里抽前 limit 个字符，供 Agent 确认内容。"""
+    try:
+        suffix = path.suffix.lower()
+        if suffix == ".docx":
+            from docx import Document
+            doc = Document(str(path))
+            parts = [p.text for p in doc.paragraphs if p.text.strip()]
+            for table in doc.tables:
+                for row in table.rows:
+                    cells = [cell.text.strip() for cell in row.cells]
+                    line = " | ".join(c for c in cells if c)
+                    if line:
+                        parts.append(line)
+            text = "\n".join(parts)
+        elif suffix == ".xlsx":
+            import openpyxl
+            wb = openpyxl.load_workbook(str(path), data_only=True)
+            parts = []
+            for sheet in wb.worksheets:
+                for row in sheet.iter_rows(values_only=True):
+                    line = " | ".join(str(v) for v in row if v not in (None, ""))
+                    if line:
+                        parts.append(line)
+            wb.close()
+            text = "\n".join(parts)
+        else:
+            return ""
+        return text[:limit]
+    except Exception:
+        return ""
+
+
+def _sw_run_impl(body: dict, request: Request, conn, user) -> dict:
+    """一步生成的核心实现，/run 与 /batch generate 共用。"""
+    project = str(body.get("project") or "").strip()
+    activity = str(body.get("activity") or "").strip()
+    if not project or not activity:
+        raise ApiError(400, "VALIDATION", "project 与 activity 必填")
+
+    act_dir, meta = _sw_activity_dir(project, activity, user, write=True)
+
+    template = str(body.get("template") or "").strip()
+    task = str(body.get("task") or "").strip()
+    if not template and not task:
+        raise ApiError(400, "VALIDATION", "template 与 task 至少给一个")
+
+    extra = body.get("data") or {}
+    if not isinstance(extra, dict):
+        raise ApiError(400, "VALIDATION", "data 必须是对象")
+    style = str(body.get("style") or "")
+    dry_run = bool(body.get("dry_run", False))
+
+    # 生成材料的前置条件：活动必须有编号
+    try:
+        _activity_require_code(act_dir)
+    except HTTPException as exc:
+        raise ApiError(400, "CODE_MISSING", str(exc.detail),
+                       "先在 activity.yaml 配置 code，或调 PATCH 活动接口补编号")
+
+    if task:
+        # task 走 LLM 时仍要落到某个模板；不传 template 就按任务给默认模板
+        tpl_name = template or _SW_TASK_TEMPLATE.get(task, "")
+        if not tpl_name:
+            raise ApiError(400, "VALIDATION", f"未知 task：{task}",
+                           "可选：" + "、".join(_SW_TASK_TEMPLATE))
+        tpl = _sw_template(tpl_name)
+    else:
+        tpl = _sw_template(template)
+    dst_rel = _fill_output(act_dir, body, tpl)
+    generated: dict = {}
+    self_check = None
+
+    try:
+        if task:
+            facts = _activity.build_data(project, activity, user=user)
+            generated = _llm.write(task, facts, style=style)
+            self_check = (generated or {}).get("_check")
+            merged = _activity.build_data(
+                project, activity, extra={**generated, **extra}, user=user)
+        else:
+            merged = _activity.build_data(project, activity, extra=extra, user=user)
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise ApiError(400, "VALIDATION", str(exc))
+    except _llm.LLMError as exc:
+        raise ApiError(502, "LLM_FAILED", f"LLM 生成失败：{exc}")
+    except FileNotFoundError as exc:
+        raise ApiError(404, "PROJECT_NOT_FOUND", str(exc))
+
+    tmpdir: Path | None = None
+    target = dst_rel
+    if dry_run:
+        # 预演：写到临时目录，拿到真实的 filled/missing 和预览后即删
+        tmpdir = Path(tempfile.mkdtemp())
+        target = tmpdir / dst_rel.name
+    try:
+        try:
+            result = _fill.render(tpl, target, merged)
+        except ValueError as exc:
+            raise ApiError(400, "VALIDATION", str(exc))
+        preview = _sw_preview(target)
+    finally:
+        if tmpdir is not None:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    rel = (Path("活动") / act_dir.name / dst_rel.name).as_posix()
+    detail = {"activity": activity, "filled": result["filled"], "dry_run": dry_run}
+    if template:
+        detail["template"] = tpl.stem
+    if task:
+        detail["task"] = task
+    audit(conn, user["id"], "sw_run", project=meta["name"], target=rel,
+          detail=detail, ip=request.client.host)
+
+    out = {
+        "ok": True,
+        "path": rel,
+        "filled": result["filled"],
+        "missing": result["missing"],
+        "preview": preview,
+        "dry_run": dry_run,
+    }
+    if task:
+        out["self_check"] = self_check
+        out["generated"] = {k: v for k, v in generated.items()
+                            if not str(k).startswith("_")}
+    return out
+
+
+@app.get("/api/sw/capabilities")
+def api_sw_capabilities():
+    """能力自描述。不需要认证：Agent 先探能力，再拿 Key 干活。"""
+    return {
+        "version": SW_VERSION,
+        "auth": {
+            "header": "Authorization: Bearer sk-sw-xxx",
+            "alt": "x-api-key: sk-sw-xxx",
+            "issue": "POST /api/sw/keys (需 admin)",
+        },
+        "permissions": {
+            "model": "项目级 readonly/write，admin 全权",
+            "list_projects": "GET /api/sw/projects",
+        },
+        "endpoints": [
+            {"method": "GET", "path": "/api/sw/projects", "desc": "列项目", "params": {}},
+            {"method": "GET", "path": "/api/sw/projects/{p}/activities",
+             "desc": "列活动", "params": {"p": "项目名"}},
+            {"method": "GET", "path": "/api/sw/projects/{p}/activities/{a}",
+             "desc": "活动详情", "params": {}},
+            {"method": "POST", "path": "/api/sw/run", "desc": "一步生成文件",
+             "params": {"project": "项目名", "activity": "活动目录名",
+                        "template": "模板名（与 task 二选一）",
+                        "task": "LLM 任务（与 template 二选一）",
+                        "style": "文风", "data": "覆盖字段",
+                        "output": "输出文件名", "dry_run": "只预演"}},
+            {"method": "POST", "path": "/api/sw/batch", "desc": "批量操作",
+             "params": {"action": "check|generate|upload", "project": "可选",
+                        "activities": "可选", "params": "动作参数"}},
+            {"method": "GET", "path": "/api/sw/tasks/{id}", "desc": "异步任务状态",
+             "params": {}},
+            {"method": "GET", "path": "/api/sw/search", "desc": "检索",
+             "params": {"q": "关键词", "project": "可选", "limit": "默认 10"}},
+            {"method": "GET", "path": "/api/sw/me", "desc": "当前身份与权限",
+             "params": {}},
+            {"method": "GET", "path": "/api/sw/keys", "desc": "列 API Key", "params": {}},
+        ],
+        "errors": {
+            "PROJECT_NOT_FOUND": "项目不存在",
+            "ACTIVITY_NOT_FOUND": "活动目录不存在",
+            "FORBIDDEN": "无该项目权限",
+            "READONLY": "该项目只读",
+            "CODE_MISSING": "项目编号未配置",
+            "TEMPLATE_NOT_FOUND": "模板不存在",
+            "VALIDATION": "参数校验失败",
+            "LLM_FAILED": "LLM 生成失败",
+        },
+    }
+
+
+@app.get("/api/sw/projects")
+def api_sw_projects(user=Depends(current_user)):
+    """列当前 Key / 账号可见的项目，并标出 access。"""
+    items = []
+    for item in _projects.list_projects():
+        if not _project_allowed(user, item):
+            continue
+        access = "write" if can_write(user, item["name"]) else "readonly"
+        items.append({**item, "access": access})
+    return {"total": len(items), "items": items}
+
+
+@app.get("/api/sw/projects/{p}/activities")
+def api_sw_activities(p: str, user=Depends(current_user)):
+    """列活动（直接复用 Web 端点的数据结构）。"""
+    try:
+        return api_list_activities(p, user)
+    except HTTPException as exc:
+        if exc.status_code == 404:
+            raise ApiError(404, "PROJECT_NOT_FOUND", str(exc.detail))
+        if exc.status_code == 403:
+            raise ApiError(403, "FORBIDDEN", str(exc.detail))
+        raise ApiError(400, "VALIDATION", str(exc.detail))
+
+
+@app.get("/api/sw/projects/{p}/activities/{a}")
+def api_sw_activity_detail(p: str, a: str, user=Depends(current_user)):
+    """活动详情（直接复用 Web 端点的数据结构）。"""
+    try:
+        return api_activity_detail(p, a, user)
+    except HTTPException as exc:
+        if exc.status_code == 404:
+            raise ApiError(404, "ACTIVITY_NOT_FOUND", str(exc.detail))
+        if exc.status_code == 403:
+            raise ApiError(403, "FORBIDDEN", str(exc.detail))
+        raise ApiError(400, "VALIDATION", str(exc.detail))
+
+
+@app.get("/api/sw/me")
+def api_sw_me(user=Depends(current_user)):
+    """当前身份、角色、项目权限与认证方式。"""
+    return {
+        "username": user["username"],
+        "real_name": user.get("real_name", ""),
+        "role": user["role"],
+        "projects": user.get("projects") or {},
+        "auth_type": user.get("auth_type", "session"),
+    }
+
+
+@app.post("/api/sw/keys")
+def api_create_key(body: dict, request: Request, conn=Depends(db),
+                   user=Depends(require_admin)):
+    """签发 API Key。明文只在本次响应里返回一次，不落库、不进审计。"""
+    username = str(body.get("user") or user["username"]).strip()
+    name = str(body.get("name") or "").strip()
+    if not name:
+        raise ApiError(400, "VALIDATION", "name 必填")
+    expires_days = body.get("expires_days")
+    if expires_days is not None:
+        try:
+            expires_days = int(expires_days)
+        except (TypeError, ValueError):
+            raise ApiError(400, "VALIDATION", "expires_days 必须是整数或 null")
+        if expires_days <= 0:
+            raise ApiError(400, "VALIDATION", "expires_days 必须大于 0")
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT id, role, enabled FROM users WHERE username = %s",
+                    (username,))
+        row = cur.fetchone()
+    if not row or not row[2]:
+        raise ApiError(400, "VALIDATION", f"用户不存在或已禁用：{username}")
+
+    plain, digest, prefix = _apikey.generate_key()
+    expires_at = (datetime.now(TZ) + timedelta(days=expires_days)
+                  if expires_days else None)
+    scopes = body.get("scopes")
+    if scopes is not None and not isinstance(scopes, list):
+        raise ApiError(400, "VALIDATION", "scopes 必须是数组或 null")
+    with conn.cursor() as cur:
+        cur.execute(
+            """INSERT INTO api_keys(user_id, name, key_hash, key_prefix,
+                                    scopes, expires_at)
+               VALUES(%s,%s,%s,%s,%s,%s) RETURNING id""",
+            (row[0], name, digest, prefix,
+             [str(x) for x in scopes] if scopes else None, expires_at),
+        )
+        key_id = cur.fetchone()[0]
+    conn.commit()
+
+    # 审计只记前缀和名字，明文 Key 绝不落库
+    audit(conn, user["id"], "create_api_key", target=f"api_key:{key_id}",
+          detail={"user": username, "name": name, "prefix": prefix,
+                  "expires_at": str(expires_at) if expires_at else None},
+          ip=request.client.host)
+    return {
+        "key": plain,
+        "id": key_id,
+        "name": name,
+        "prefix": prefix,
+        "user": username,
+        "expires_at": expires_at.isoformat() if expires_at else None,
+    }
+
+
+@app.get("/api/sw/keys")
+def api_list_keys(conn=Depends(db), user=Depends(current_user)):
+    """admin 看全部；普通账号只看自己的。永不返回明文或完整哈希。"""
+    with conn.cursor() as cur:
+        if user["role"] == "admin":
+            cur.execute(
+                """SELECT k.id, k.user_id, u.username, u.real_name, k.name,
+                          k.key_prefix, k.scopes, k.expires_at, k.created_at,
+                          k.last_used_at, k.revoked_at
+                   FROM api_keys k JOIN users u ON u.id = k.user_id
+                   ORDER BY k.id DESC""")
+        else:
+            cur.execute(
+                """SELECT k.id, k.user_id, u.username, u.real_name, k.name,
+                          k.key_prefix, k.scopes, k.expires_at, k.created_at,
+                          k.last_used_at, k.revoked_at
+                   FROM api_keys k JOIN users u ON u.id = k.user_id
+                   WHERE k.user_id = %s ORDER BY k.id DESC""", (user["id"],))
+        rows = cur.fetchall()
+    now = datetime.now(timezone.utc)
+    items = []
+    for r in rows:
+        exp = r[7]
+        expired = bool(exp and (exp if exp.tzinfo else exp.replace(tzinfo=timezone.utc)) <= now)
+        items.append({
+            "id": r[0], "user_id": r[1], "user": r[2],
+            "real_name": r[3] or "", "name": r[4],
+            "prefix": r[5], "scopes": r[6],
+            "expires_at": str(r[7]) if r[7] else None,
+            "created_at": str(r[8]) if r[8] else None,
+            "last_used_at": str(r[9]) if r[9] else None,
+            "revoked_at": str(r[10]) if r[10] else None,
+            "revoked": r[10] is not None,
+            "active": r[10] is None and not expired,
+        })
+    return {"total": len(items), "items": items}
+
+
+@app.delete("/api/sw/keys/{key_id}")
+def api_revoke_key(key_id: int, request: Request, conn=Depends(db),
+                   user=Depends(current_user)):
+    """吊销（软删，写 revoked_at）。只能吊销自己的；admin 可吊销任何。"""
+    with conn.cursor() as cur:
+        cur.execute("SELECT user_id, name, revoked_at FROM api_keys WHERE id = %s",
+                    (key_id,))
+        row = cur.fetchone()
+    if not row:
+        raise ApiError(404, "KEY_NOT_FOUND", f"API Key 不存在：{key_id}")
+    if user["role"] != "admin" and row[0] != user["id"]:
+        raise ApiError(403, "FORBIDDEN", "只能吊销自己的 API Key")
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE api_keys SET revoked_at = now() WHERE id = %s AND revoked_at IS NULL",
+            (key_id,))
+        changed = cur.rowcount
+    conn.commit()
+    audit(conn, user["id"], "revoke_api_key", target=f"api_key:{key_id}",
+          detail={"name": row[1], "changed": changed}, ip=request.client.host)
+    return {"ok": True, "id": key_id, "revoked": bool(changed)}
+
+
+@app.post("/api/sw/run")
+def api_sw_run(body: dict, request: Request, conn=Depends(db),
+               user=Depends(current_user)):
+    """一步生成：template 走模板填充，task 走 LLM 生成后填充。"""
+    try:
+        return _sw_run_impl(body, request, conn, user)
+    except ApiError:
+        raise
+    except HTTPException as exc:
+        # 兜底：引擎里仍有用 HTTPException 抛出的参数错误，统一成机器可读格式
+        code = "VALIDATION" if exc.status_code < 500 else "INTERNAL"
+        raise ApiError(exc.status_code, code, str(exc.detail))
+
+
+def _sw_batch_projects(body: dict, user) -> list[dict]:
+    """批量操作的项目范围：指定项目或全部授权项目。"""
+    project = str(body.get("project") or "").strip()
+    items = _projects.list_projects()
+    if project:
+        meta = _sw_project_meta(project)
+        check_project(user, meta["name"])
+        return [meta]
+    return [it for it in items if _project_allowed(user, it)]
+
+
+@app.post("/api/sw/batch")
+def api_sw_batch(body: dict, request: Request, conn=Depends(db),
+                 user=Depends(current_user)):
+    """批量核对 / 生成 / 上传。每项独立执行，单项失败不影响其余项。"""
+    action = str(body.get("action") or "").strip()
+    if action not in ("check", "generate", "upload"):
+        raise ApiError(400, "VALIDATION", "action 必须是 check / generate / upload")
+    params = body.get("params") or {}
+    if not isinstance(params, dict):
+        raise ApiError(400, "VALIDATION", "params 必须是对象")
+    picked = body.get("activities") or []
+    if picked and not isinstance(picked, list):
+        raise ApiError(400, "VALIDATION", "activities 必须是数组")
+
+    results: list[dict] = []
+    for meta in _sw_batch_projects(body, user):
+        name = str(meta["name"])
+        try:
+            act_dirs = _activities.list_existing_activities(
+                Path(_projects.PROJECTS_ROOT) / name)
+        except Exception:
+            act_dirs = []
+        targets = [str(x) for x in picked] if picked else act_dirs
+        for activity in targets:
+            row = {"activity": activity, "project": name}
+            try:
+                if action == "check":
+                    act_dir, _meta = _sw_activity_dir(name, activity, user, write=False)
+                    check = _checks.check(act_dir)
+                    row.update(status="ok", detail={
+                        "complete": check.get("complete"),
+                        "issues": check.get("issues") or [],
+                    })
+                elif action == "generate":
+                    payload = {**params, "project": name, "activity": activity}
+                    out = _sw_run_impl(payload, request, conn, user)
+                    row.update(status="ok", detail={
+                        "path": out["path"], "filled": out["filled"],
+                        "missing": out["missing"]})
+                else:  # upload
+                    act_dir, _meta = _sw_activity_dir(name, activity, user, write=True)
+                    files = params.get("files") or []
+                    if not isinstance(files, list) or not files:
+                        raise ApiError(400, "VALIDATION", "upload 需要 params.files")
+                    sub = _activity_sub_dir(act_dir, str(params.get("sub") or ""))
+                    written = []
+                    for item in files:
+                        if not isinstance(item, dict):
+                            raise ApiError(400, "VALIDATION", "files 的每一项必须是对象")
+                        filename = _activity_upload_filename(item.get("name"))
+                        content = base64.b64decode(str(item.get("content_base64") or ""))
+                        dest = sub / filename
+                        if dest.exists():
+                            raise ApiError(409, "FILE_EXISTS", f"同名文件已存在：{filename}")
+                        dest.write_bytes(content)
+                        written.append(filename)
+                    row.update(status="ok", detail={"uploaded": written})
+            except ApiError as exc:
+                row.update(status="failed", detail={
+                    "code": exc.code, "message": exc.message})
+            except HTTPException as exc:
+                row.update(status="failed", detail={
+                    "code": "VALIDATION", "message": str(exc.detail)})
+            except Exception as exc:
+                row.update(status="failed", detail={
+                    "code": "INTERNAL", "message": str(exc)})
+            results.append(row)
+
+    ok = sum(1 for r in results if r["status"] == "ok")
+    return {"action": action, "total": len(results), "ok": ok,
+            "failed": len(results) - ok, "results": results}
+
+
+@app.get("/api/sw/tasks/{task_id}")
+def api_sw_task(task_id: str, user=Depends(current_user)):
+    """异步任务状态（桩）。
+
+    飞书同步 / Cognee 入库后续接真正的任务表；先给 Agent 一个稳定契约，
+    避免以后改返回结构。
+    """
+    return {
+        "id": task_id,
+        "status": "done",
+        "result": {"note": "异步任务尚未接入，当前为同步完成的占位状态"},
+    }
+
+
+@app.get("/api/sw/search")
+def api_sw_search(q: str, project: str = "", limit: int = 10,
+                  user=Depends(current_user)):
+    """统一检索：文档台账 + Cognee 图谱。"""
+    query = str(q or "").strip()
+    if not query:
+        raise ApiError(400, "VALIDATION", "q 不能为空")
+    limit = max(1, min(int(limit or 10), 50))
+    scopes = scopes_of(user, project)
+    if not scopes:
+        raise ApiError(403, "FORBIDDEN", "当前账号没有可检索的项目")
+
+    results: list[dict] = []
+    # 1) 文档台账：按文件名 / 分类 / 项目名做包含匹配，取 md 前 500 字做摘要
+    manifest = _load_manifest()
+    needle = query.lower()
+    for token, entry in (manifest.get("files") or {}).items():
+        if not isinstance(entry, dict) or entry.get("status") == "deleted":
+            continue
+        entry_project = _legacy_project_name(str(entry.get("project") or ""))
+        if user.get("role") != "admin" and _project_access(user, entry_project) is None:
+            continue
+        haystack = " ".join(str(entry.get(k) or "") for k in
+                            ("name", "category", "project", "original_name"))
+        if needle not in haystack.lower():
+            continue
+        snippet = ""
+        md = entry.get("md")
+        if md:
+            try:
+                md_path = (ROOT / md).resolve()
+                if md_path.is_file():
+                    snippet = md_path.read_text(encoding="utf-8", errors="ignore")[:500]
+            except Exception:
+                snippet = ""
+        results.append({
+            "source": "document",
+            "path": str(entry.get("original") or entry.get("md") or token),
+            "snippet": snippet or str(entry.get("name") or ""),
+            "score": 1.0 if needle in str(entry.get("name") or "").lower() else 0.6,
+        })
+
+    # 2) Cognee 图谱：检索失败不阻断文档结果
+    try:
+        ok, output, _timeout = search_datasets(query, scopes, qtype="CHUNKS")
+        if ok and output:
+            results.append({
+                "source": "cognee",
+                "path": ",".join(scopes),
+                "snippet": output[:500],
+                "score": 0.8,
+            })
+    except Exception:
+        pass
+
+    results.sort(key=lambda item: item.get("score") or 0, reverse=True)
+    return {"query": query, "results": results[:limit]}
 
 
 @app.get("/api/dashboard")

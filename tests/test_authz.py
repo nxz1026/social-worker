@@ -17,17 +17,18 @@ import app  # noqa: E402
 
 
 def _user(projects=None, role="editor"):
-    return {"id": 1, "username": "u", "role": role, "projects": projects or []}
+    # projects 现在是 {项目: 'readonly'|'write'}，不再是列表
+    return {"id": 1, "username": "u", "role": role, "projects": projects or {}}
 
 
 def test_scopes_of_zero_projects_is_empty():
-    assert app.scopes_of(_user([])) == []
-    assert app.scopes_of(_user(["huadu"])) == ["huadu"]
+    assert app.scopes_of(_user({})) == []
+    assert app.scopes_of(_user({"huadu": "write"})) == ["huadu"]
 
 
 def test_scopes_of_rejects_foreign_project():
     with pytest.raises(app.HTTPException) as exc:
-        app.scopes_of(_user(["huimin"]), "huadu")
+        app.scopes_of(_user({"huimin": "write"}), "huadu")
     assert exc.value.status_code == 403
 
 
@@ -35,17 +36,19 @@ def test_list_docs_zero_projects_returns_nothing(monkeypatch):
     monkeypatch.setattr(app, "_load_manifest", lambda: {
         "files": {"t1": {"name": "居民名单.docx", "project": "huadu",
                          "status": "done"}}})
-    out = app.list_docs("", "", "", _user([]))
+    out = app.list_docs("", "", "", _user({}))
     assert out == {"total": 0, "items": []}
 
 
 def test_list_docs_filters_foreign_project(monkeypatch):
     monkeypatch.setattr(app, "_load_manifest", lambda: {
         "files": {
-            "t1": {"name": "花都.docx", "project": "huadu", "status": "done"},
-            "t2": {"name": "惠民.docx", "project": "huimin", "status": "done"},
+            "t1": {"name": "花都.docx", "project": "花都社区保障资金项目",
+                   "status": "done"},
+            "t2": {"name": "惠民.docx", "project": "惠民社区保障资金项目",
+                   "status": "done"},
         }})
-    out = app.list_docs("", "", "", _user(["huimin"]))
+    out = app.list_docs("", "", "", _user({"惠民社区保障资金项目": "write"}))
     assert [x["token"] for x in out["items"]] == ["t2"]
 
 
@@ -53,7 +56,7 @@ def test_search_zero_projects_403(monkeypatch):
     called = []
     monkeypatch.setattr(app, "search_datasets", lambda *a, **k: called.append(a) or (True, "", False))
     with pytest.raises(app.HTTPException) as exc:
-        app.search("x", "", _user([]))
+        app.search("x", "", _user({}))
     assert exc.value.status_code == 403
     assert called == []
 
@@ -62,12 +65,12 @@ def test_generate_zero_projects_403(tmp_path, monkeypatch):
     (tmp_path / "case-record.md").write_text("模板", encoding="utf-8")
     monkeypatch.setattr(app, "TEMPLATES_DIR", tmp_path)
     with pytest.raises(app.HTTPException) as exc:
-        app.generate({"type": "个案记录", "context": "x"}, None, _user([]), None)
+        app.generate({"type": "个案记录", "context": "x"}, None, _user({}), None)
     assert exc.value.status_code == 403
 
 
 def test_docs_health_zero_projects_empty():
-    assert app.docs_health("", _user([])) == {"total": 0, "items": {}}
+    assert app.docs_health("", _user({})) == {"total": 0, "items": {}}
 
 
 def test_safe_detail_redacts_secrets_and_case_text():

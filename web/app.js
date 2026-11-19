@@ -28,6 +28,7 @@ let me = null;
 let projectsCache = null;
 let projectsPromise = null;
 let tplCache = null;
+let usersCache = null;      // 用户管理页当前列表（编辑弹窗用）
 let routeSeq = 0;
 let actCtx = null;          // 当前活动页上下文（文件操作 / 弹窗用）
 
@@ -120,7 +121,8 @@ function showApp() {
   $('loginCard').classList.add('hidden');
   $('appShell').classList.remove('hidden');
   $('me').textContent = `${me.username} · ${me.role}`;
-  $('me').title = `${me.username} · ${me.role} · ${(me.projects || []).join(' / ')}`;
+  const myProjects = Object.keys(me.projects || {});
+  $('me').title = `${me.username} · ${me.role} · ${myProjects.join(' / ')}`;
   els('[data-admin="1"]').forEach(x => x.classList.toggle('hidden', !isAdmin()));
 }
 
@@ -1851,68 +1853,103 @@ async function pageDoc(tok) {
 /* ============================================================
  * 8. 管理：用户 / 审计
  * ============================================================ */
+/* 项目权限下拉：每个项目一个「无 / 只读 / 读写」。
+ * 选项来自 /api/projects（不写死项目名），value 用目录名，后端会归一。 */
+function projectPermSelects(projects, selected, attr) {
+  const cur = selected || {};
+  const rows = (projects || []).map(p => {
+    const name = p.name;
+    const label = projectShort(p) || name;
+    const access = cur[name] || cur[label] || '';
+    return `<label class="muted" style="display:inline-flex;align-items:center;gap:6px;margin:4px 14px 4px 0">
+      <span>${esc(label)}</span>
+      <select ${attr}="${esc(name)}" style="width:auto">
+        <option value=""${access === '' ? ' selected' : ''}>无</option>
+        <option value="readonly"${access === 'readonly' ? ' selected' : ''}>只读</option>
+        <option value="write"${access === 'write' ? ' selected' : ''}>读写</option>
+      </select>
+    </label>`;
+  }).join('');
+  return rows || '<span class="muted">暂无项目</span>';
+}
+
+/* 从一组 data-* 下拉收集 {项目名: readonly|write}，选择「无」的不提交 */
+function readProjectPerms(dsKey) {
+  const out = {};
+  els(`[data-${dsKey}]`).forEach(sel => {
+    if (sel.value) out[sel.dataset[dsKey]] = sel.value;
+  });
+  return out;
+}
+
+function permText(projects) {
+  const parts = Object.entries(projects || {})
+    .map(([name, access]) => `${name}：${access === 'write' ? '读写' : '只读'}`);
+  return parts.join('；') || '—';
+}
+
 async function pageUsers() {
   setTitle('用户管理');
   if (!isAdmin()) { $('view').innerHTML = empty('需要 admin 权限'); return; }
   $('view').innerHTML = loading();
-  const d = await api('/admin/users');
+  const [d, projects] = await Promise.all([api('/admin/users'), ensureProjects(true)]);
   const users = d.items || [];
-  const projChecks = (me.projects || []).map(p =>
-    `<label style="display:inline-flex;align-items:center;gap:6px;margin-right:12px">
-      <input type="checkbox" value="${esc(p)}" data-newproj style="width:auto"> ${esc(p)}
-    </label>`).join('');
+  usersCache = users;
 
   const rows = users.map(u => `<tr>
-      <td class="num">${u.id}</td>
+      <td>${esc(u.real_name || '—')}</td>
       <td>${esc(u.username)}</td>
       <td><span class="badge ${u.role === 'admin' ? 'info' : u.role === 'editor' ? 'ok' : 'muted'}">${esc(u.role)}</span></td>
-      <td>${esc((u.projects || []).join('、') || '—')}</td>
       <td>${u.enabled ? '<span class="badge ok">启用</span>' : '<span class="badge err">禁用</span>'}</td>
+      <td class="muted" title="${esc(permText(u.projects))}">${esc(permText(u.projects))}</td>
       <td class="nowrap">
+        <button class="btn sm" data-act="user-edit" data-uid="${u.id}">编辑</button>
         <button class="btn sm" data-act="user-toggle" data-uid="${u.id}" data-enabled="${u.enabled ? '1' : '0'}">${u.enabled ? '禁用' : '启用'}</button>
         <button class="btn sm" data-act="user-pass" data-uid="${u.id}" data-name="${esc(u.username)}">重置密码</button>
         <button class="btn sm" data-act="user-kick" data-uid="${u.id}" data-name="${esc(u.username)}">踢下线</button>
+        ${u.id === me.id ? '' : `<button class="btn sm danger" data-act="user-del" data-uid="${u.id}" data-name="${esc(u.username)}">删除</button>`}
       </td>
     </tr>`).join('');
 
   $('view').innerHTML = `
-    ${pageHead('用户管理', '角色与项目授权')}
+    ${pageHead('用户管理', '真实姓名、角色与项目权限')}
     <div class="card">
       <div class="card-head"><h3>新建用户</h3></div>
       <div class="row">
-        <input id="nuName" placeholder="用户名" style="width:150px">
+        <input id="nuName" placeholder="用户名" style="width:140px">
+        <input id="nuReal" placeholder="真实姓名" style="width:140px">
         <input id="nuPass" type="password" placeholder="密码" style="width:150px">
         <select id="nuRole">
           <option value="viewer">viewer（只读）</option>
           <option value="editor">editor（读写）</option>
           <option value="admin">admin（全部）</option>
         </select>
-      </div>
-      <div class="row" style="margin-top:10px">
-        <span class="muted">项目：</span>${projChecks || '<span class="muted">无授权项目</span>'}
         <button class="btn primary" data-act="user-create">建号</button>
+      </div>
+      <div class="row" style="margin-top:10px;flex-wrap:wrap">
+        <span class="muted">项目权限：</span>${projectPermSelects(projects, {}, 'data-newproj')}
       </div>
       <div id="nuMsg" style="margin-top:8px"></div>
     </div>
     <div class="card pad0">
       <div class="card-head" style="padding:16px 16px 0"><h3>用户列表</h3><span class="muted">${users.length} 个</span></div>
       <div class="table-wrap"><table>
-        <thead><tr><th class="num">ID</th><th>用户名</th><th>角色</th><th>项目</th><th>状态</th><th>操作</th></tr></thead>
+        <thead><tr><th>真实姓名</th><th>用户名</th><th>角色</th><th>状态</th><th>项目权限</th><th>操作</th></tr></thead>
         <tbody>${rows || `<tr><td colspan="6">${empty('暂无用户')}</td></tr>`}</tbody>
       </table></div>
     </div>`;
 }
 
 async function createUser() {
-  const projects = els('[data-newproj]:checked').map(x => x.value);
   try {
     await api('/admin/users', {
       method: 'POST',
       body: {
         username: el('#nuName').value.trim(),
+        real_name: el('#nuReal').value.trim(),
         password: el('#nuPass').value,
         role: el('#nuRole').value,
-        projects,
+        projects: readProjectPerms('newproj'),
       },
     });
     el('#nuMsg').innerHTML = '<span class="ok">已创建</span>';
@@ -1923,6 +1960,52 @@ async function createUser() {
     toast('创建失败：' + e.message, 'err');
   }
 }
+
+async function openUserEdit(uid) {
+  const u = (usersCache || []).find(x => String(x.id) === String(uid));
+  if (!u) return;
+  const projects = await ensureProjects();
+  openModal('编辑用户', `
+    <div class="row" style="margin-bottom:12px">
+      <label class="muted">用户名 <input value="${esc(u.username)}" disabled style="width:140px"></label>
+      <label class="muted">真实姓名 <input id="euReal" value="${esc(u.real_name || '')}" style="width:140px"></label>
+    </div>
+    <div class="row" style="margin-bottom:12px">
+      <label class="muted">角色
+        <select id="euRole">
+          <option value="viewer"${u.role === 'viewer' ? ' selected' : ''}>viewer（只读）</option>
+          <option value="editor"${u.role === 'editor' ? ' selected' : ''}>editor（读写）</option>
+          <option value="admin"${u.role === 'admin' ? ' selected' : ''}>admin（全部）</option>
+        </select>
+      </label>
+      <label class="muted">状态
+        <select id="euEnabled">
+          <option value="1"${u.enabled ? ' selected' : ''}>启用</option>
+          <option value="0"${u.enabled ? '' : ' selected'}>禁用</option>
+        </select>
+      </label>
+    </div>
+    <div class="muted" style="margin-bottom:6px">项目权限</div>
+    <div style="display:flex;flex-wrap:wrap">${projectPermSelects(projects, u.projects, 'data-editproj')}</div>
+  `, `<button class="btn" data-close-modal>取消</button>
+      <button class="btn primary" data-act="user-save" data-uid="${u.id}">保存</button>`);
+}
+
+async function saveUser(uid) {
+  await api('/admin/users/' + uid, {
+    method: 'PATCH',
+    body: {
+      real_name: el('#euReal').value.trim(),
+      role: el('#euRole').value,
+      enabled: el('#euEnabled').value === '1',
+      projects: readProjectPerms('editproj'),
+    },
+  });
+  closeModal();
+  toast('用户已更新', 'ok');
+  await pageUsers();
+}
+
 
 async function pageAudit() {
   setTitle('审计');
@@ -2086,6 +2169,15 @@ document.addEventListener('click', async e => {
       return;
     }
     if (act === 'user-create') { await createUser(); return; }
+    if (act === 'user-edit') { await openUserEdit(node.dataset.uid); return; }
+    if (act === 'user-save') { await saveUser(node.dataset.uid); return; }
+    if (act === 'user-del') {
+      if (!confirm(`硬删除用户「${node.dataset.name}」？其 API Key 和会话会一并删除，不可恢复。`)) return;
+      await api('/admin/users/' + node.dataset.uid, { method: 'DELETE' });
+      toast('用户已删除', 'ok');
+      await pageUsers();
+      return;
+    }
     if (act === 'user-toggle') {
       const uid = node.dataset.uid;
       await api('/admin/users/' + uid, {

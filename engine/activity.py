@@ -171,11 +171,13 @@ def expand_plan_rows(data: dict, plan: dict,
 
 
 def build_data(project_name: str, activity_dir: str,
-               extra: dict | None = None, notes: list[str] | None = None) -> dict:
+               extra: dict | None = None, notes: list[str] | None = None,
+               user: dict | None = None) -> dict:
     """合成填充数据，返回的 key 即占位符名字（不带 {{}}）。
 
     来源优先级：extra > activity.yaml > 项目 yaml > 目录名推断 > None。
     extra 里的「环节」「预计困难」按 PLAN_ROW_SPECS 展开；截断说明追加到 notes。
+    user 传入时，用其 real_name 填「归档人」；脚本调用没有 user 就留空。
     """
     project = _load_project(project_name)
     act_dir = _resolve_activity_dir(project_name, activity_dir)
@@ -220,6 +222,8 @@ def build_data(project_name: str, activity_dir: str,
         # 日期：当天
         "年月日": today,
         "填表日期": today,
+        # 归档人：调用方传了登录用户就取真实姓名，脚本调用没有就留空
+        "归档人": _text((user or {}).get("real_name")),
     }
 
     # 契约兜底：即使上面漏写，也保证 REQUIRED_KEYS 里的 key 都存在

@@ -26,9 +26,9 @@ os.environ.setdefault(
 import app  # noqa: E402
 
 ADMIN = {"id": 1, "username": "admin", "role": "admin",
-         "projects": ["huimin", "huadu", "jili"]}
-EDITOR = {"id": 2, "username": "editor", "role": "editor", "projects": ["huimin"]}
-VIEWER = {"id": 3, "username": "viewer", "role": "viewer", "projects": ["huimin"]}
+         "projects": {"huimin": "write", "huadu": "write", "jili": "write"}}
+EDITOR = {"id": 2, "username": "editor", "role": "editor", "projects": {"huimin": "write"}}
+VIEWER = {"id": 3, "username": "viewer", "role": "viewer", "projects": {"huimin": "readonly"}}
 
 
 class _Req:

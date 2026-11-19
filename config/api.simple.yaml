@@ -64,8 +64,9 @@ db:
 # 必须与 config/config.yaml 的 datasets 键一致，否则文档归属与检索数据集会对不上。
 # 新增项目：这里加一项 + config/config.yaml 的 datasets 加一项 + 建 vault-<项目>/ 目录。
 projects:
-  - huadu
-  - huimin
+  - 惠民社区保障资金项目
+  - 花都社区保障资金项目
+  - 花都社区激励资金项目
 
 llm:
   # 三个必填参数：base_url / api_key / model_id。留空则依次回退：

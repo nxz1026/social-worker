@@ -24,8 +24,8 @@ os.environ.setdefault(
 import app  # noqa: E402
 
 ADMIN = {"id": 1, "username": "admin", "role": "admin",
-         "projects": ["huimin", "huadu"]}
-VIEWER = {"id": 3, "username": "viewer", "role": "viewer", "projects": ["huimin"]}
+         "projects": {"huimin": "write", "huadu": "write"}}
+VIEWER = {"id": 3, "username": "viewer", "role": "viewer", "projects": {"huimin": "readonly"}}
 
 ACT = "11-共治行动-第一期"
 
