@@ -23,9 +23,11 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "api"))
 
 os.environ.setdefault("SOCIAL_WORK_ROOT", "/srv/social-work")
-os.environ.setdefault(
-    "SOCIALWORK_DB_DSN",
-    "host=127.0.0.1 port=5432 dbname=socialwork user=admin password=tjfjyjr")
+# 本文件要连真实库：其他测试模块已用 setdefault 把 DSN 设成 user=test，
+# 这里必须强制覆盖，否则全量跑时会被前面的设置挡住、静默 skip。
+os.environ["SOCIALWORK_DB_DSN"] = (
+    os.environ.get("SOCIALWORK_AUTH_TEST_DSN")
+    or "host=127.0.0.1 port=5432 dbname=socialwork user=admin password=tjfjyjr")
 
 psycopg = pytest.importorskip("psycopg")
 
@@ -36,7 +38,8 @@ import apikey  # noqa: E402
 def _db():
     """连库；连不上就 skip（不用假的连接冒充真实行为）。"""
     try:
-        return psycopg.connect(app.PG_DSN)
+        # 不用 app.PG_DSN：它在 import 时已固化，可能被别的测试模块的 setdefault 影响
+        return psycopg.connect(os.environ["SOCIALWORK_DB_DSN"])
     except Exception as exc:                       # pragma: no cover
         pytest.skip(f"连不上数据库：{exc}")
 

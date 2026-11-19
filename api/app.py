@@ -2798,6 +2798,34 @@ def _sw_preview(path: Path, limit: int = 500) -> str:
         return ""
 
 
+def _sw_delivery(missing: list[str], task: str) -> dict:
+    """判断本次 task 的产物是否真的落进了模板。
+
+    missing 里混着两类占位符：
+      1. 本 task 负责的（如 brief 的 简报导语/诉求描述/达到目标）—— 没填上就是失败
+      2. 别的环节负责的（图注_N 归 caption、合计金额归人工）—— 没填上只是提示
+
+    task 的字段清单就是白名单：只有落在里面的才算本次的责任。
+    返回 {"complete": bool, "expected": [...], "unfilled": [...], "other_missing": [...]}
+    """
+    spec = (_llm.TASKS or {}).get(task) or {}
+    expected = [str(x) for x in (spec.get("fields") or ())]
+    if not expected:
+        # 未知 task（理论上到不了这里）：不做判断，避免误报
+        return {"complete": True, "expected": [], "unfilled": [],
+                "other_missing": list(missing or [])}
+
+    missing_set = {str(m).strip("{} ") for m in (missing or [])}
+    unfilled = [f for f in expected if f in missing_set]
+    others = [m for m in (missing or []) if str(m).strip("{} ") not in set(expected)]
+    return {
+        "complete": not unfilled,
+        "expected": expected,
+        "unfilled": unfilled,
+        "other_missing": others,
+    }
+
+
 def _sw_run_impl(body: dict, request: Request, conn, user) -> dict:
     """一步生成的核心实现，/run 与 /batch generate 共用。"""
     project = str(body.get("project") or "").strip()
@@ -2893,6 +2921,9 @@ def _sw_run_impl(body: dict, request: Request, conn, user) -> dict:
         out["self_check"] = self_check
         out["generated"] = {k: v for k, v in generated.items()
                             if not str(k).startswith("_")}
+        # 交付完整性：本 task 该填的字段有没有真的落进模板。
+        # self_check 只查文风用词与字数，查不出「生成了但没填进模板」这种丢内容问题。
+        out["delivery"] = _sw_delivery(result["missing"], task)
     return out
 
 
