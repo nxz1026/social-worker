@@ -272,6 +272,22 @@ def test_sw_keys_include_real_name():
     assert out["items"][0]["real_name"] == "聂聃"
     assert out["items"][0]["user"] == "admin"
     assert out["items"][0]["revoked"] is False
+    # 旧 Key 没有 secret_enc，不能假装能看到明文
+    assert out["items"][0]["secret"] is None
+
+
+def test_sw_keys_return_decrypted_secret(tmp_path, monkeypatch):
+    """新 Key 的 secret_enc 能解出完整明文。"""
+    monkeypatch.setattr(app, "ROOT", tmp_path)
+    plain = "sk-sw-pnPzabcdefghijklmnopqrstuvwxyz0123456789"
+    enc = app._keysafe.encrypt(plain, tmp_path)
+    now = datetime(2026, 11, 19, tzinfo=timezone.utc)
+    row = (6, 5, "editor", "李四", "web-签发", "sk-sw-pnPz",
+           None, None, now, now, None, enc)
+
+    out = app.api_list_keys(FakeConn(key_rows=[row]), ADMIN)
+
+    assert out["items"][0]["secret"] == plain
 
 
 # ---------------- 历史数据兼容（只读旧台账） ----------------

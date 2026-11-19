@@ -26,7 +26,7 @@ if not os.environ.get("SOCIAL_WORK_PROJECTS"):
     if _root:
         os.environ["SOCIAL_WORK_PROJECTS"] = str(Path(_root) / "projects")
 
-from engine import readme  # noqa: E402
+from engine import doc_mirror, readme  # noqa: E402
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -44,10 +44,25 @@ def main(argv: list[str] | None = None) -> int:
     print(f"{verb} {len(result['written'])} 个，跳过 {result['skipped']} 个")
     for rel in result["written"]:
         print(f"  {verb} {rel}")
-    for err in result["errors"]:
+
+    # 顺手补 docx/xlsx/pdf 的同名 md 骨架（Obsidian 图谱用），不另设定时器
+    try:
+        if project:
+            mirror = doc_mirror.mirror_project(project, dry_run=args.dry_run)
+        else:
+            mirror = doc_mirror.refresh_all(dry_run=args.dry_run)
+    except Exception as exc:                 # 骨架失败不能把 README 刷新整轮拖垮
+        mirror = {"written": [], "skipped": 0, "errors": [str(exc)]}
+    print(f"{verb} {len(mirror['written'])} 个文档骨架，"
+          f"跳过 {mirror['skipped']} 个")
+    for rel in mirror["written"]:
+        print(f"  {verb} {rel}")
+
+    errors = list(result["errors"]) + list(mirror["errors"])
+    for err in errors:
         print(f"  错误 {err}", file=sys.stderr)
 
-    return 1 if result["errors"] else 0
+    return 1 if errors else 0
 
 
 if __name__ == "__main__":

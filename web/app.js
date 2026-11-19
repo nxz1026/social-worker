@@ -29,6 +29,7 @@ let projectsCache = null;
 let projectsPromise = null;
 let tplCache = null;
 let usersCache = null;      // 用户管理页当前列表（编辑弹窗用）
+let keysCache = {};         // API Key 明文缓存：{keyId: secret}，只在当前页面内存里
 let routeSeq = 0;
 let actCtx = null;          // 当前活动页上下文（文件操作 / 弹窗用）
 
@@ -689,9 +690,13 @@ function renderFileRows(entries, sub, check) {
     const nameHtml = isDir
       ? `<a href="#" data-act="enter-dir" data-path="${esc(path)}">${esc(item.name)}/</a>`
       : `<a href="#" data-act="download" data-path="${esc(path)}">${esc(item.name)}</a>`;
+    // Obsidian 骨架只做提示：Web 上不跳转，文件仍走「下载」原件
+    const mirrorHtml = item.mirror
+      ? ` <span class="badge muted" title="Obsidian 骨架：${esc(item.mirror)}">↗ md</span>`
+      : '';
     return `<div class="file-row ${isDir ? 'dir' : ''}">
       <span class="ico">${isDir ? '▸' : '·'}</span>
-      <span class="nm">${nameHtml}</span>
+      <span class="nm">${nameHtml}${mirrorHtml}</span>
       <span class="sz">${isDir ? '目录' : esc(fmtBytes(item.size))}</span>
       <span class="tm">${esc(fmtTime(item.mtime))}</span>
       <span class="op">
@@ -1892,9 +1897,22 @@ async function pageUsers() {
   setTitle('用户管理');
   if (!isAdmin()) { $('view').innerHTML = empty('需要 admin 权限'); return; }
   $('view').innerHTML = loading();
-  const [d, projects] = await Promise.all([api('/admin/users'), ensureProjects(true)]);
+  const [d, projects, kd] = await Promise.all([
+    api('/admin/users'), ensureProjects(true),
+    // Key 列表失败不拖垮整个用户管理页
+    api('/sw/keys').catch(() => ({ items: [] })),
+  ]);
   const users = d.items || [];
   usersCache = users;
+
+  // 每个用户取最新一把有效 Key；keys 已按 id DESC，第一条即最新
+  const keys = (kd && kd.items) || [];
+  keysCache = {};
+  const latestKey = {};
+  for (const k of keys) {
+    if (k.secret) keysCache[k.id] = k.secret;
+    if (k.active && !latestKey[k.user_id]) latestKey[k.user_id] = k;
+  }
 
   const rows = users.map(u => `<tr>
       <td>${esc(u.real_name || '—')}</td>
@@ -1902,6 +1920,7 @@ async function pageUsers() {
       <td><span class="badge ${u.role === 'admin' ? 'info' : u.role === 'editor' ? 'ok' : 'muted'}">${esc(u.role)}</span></td>
       <td>${u.enabled ? '<span class="badge ok">启用</span>' : '<span class="badge err">禁用</span>'}</td>
       <td class="muted" title="${esc(permText(u.projects))}">${esc(permText(u.projects))}</td>
+      <td class="nowrap">${keyCell(u, latestKey[u.id])}</td>
       <td class="nowrap">
         <button class="btn sm" data-act="user-edit" data-uid="${u.id}">编辑</button>
         <button class="btn sm" data-act="user-toggle" data-uid="${u.id}" data-enabled="${u.enabled ? '1' : '0'}">${u.enabled ? '禁用' : '启用'}</button>
@@ -1913,6 +1932,7 @@ async function pageUsers() {
 
   $('view').innerHTML = `
     ${pageHead('用户管理', '真实姓名、角色与项目权限')}
+    <div class="muted" style="margin:-4px 0 12px">API Key 明文以加密形式存储，可随时查看。分享请走安全渠道。</div>
     <div class="card">
       <div class="card-head"><h3>新建用户</h3></div>
       <div class="row">
@@ -1934,10 +1954,58 @@ async function pageUsers() {
     <div class="card pad0">
       <div class="card-head" style="padding:16px 16px 0"><h3>用户列表</h3><span class="muted">${users.length} 个</span></div>
       <div class="table-wrap"><table>
-        <thead><tr><th>真实姓名</th><th>用户名</th><th>角色</th><th>状态</th><th>项目权限</th><th>操作</th></tr></thead>
-        <tbody>${rows || `<tr><td colspan="6">${empty('暂无用户')}</td></tr>`}</tbody>
+        <thead><tr><th>真实姓名</th><th>用户名</th><th>角色</th><th>状态</th><th>项目权限</th><th>API Key</th><th>操作</th></tr></thead>
+        <tbody>${rows || `<tr><td colspan="7">${empty('暂无用户')}</td></tr>`}</tbody>
       </table></div>
     </div>`;
+}
+
+function maskSecret(secret) {
+  return String(secret || '').slice(0, 12) + '••••••••';
+}
+
+function keyCell(u, k) {
+  if (!k) {
+    return `<button class="btn sm" data-act="user-key-issue" data-uid="${u.id}">签发</button>`;
+  }
+  if (!k.secret) {
+    return `<span class="muted">（旧 Key，无法查看明文，请重新签发）</span>
+      <button class="btn sm" data-act="user-key-issue" data-uid="${u.id}">重新签发</button>`;
+  }
+  return `<span class="mono key-secret" id="keysec-${k.id}">${esc(maskSecret(k.secret))}</span>
+    <button class="btn sm" data-act="key-show" data-keyid="${k.id}">显示</button>
+    <button class="btn sm" data-act="key-copy" data-keyid="${k.id}">复制</button>`;
+}
+
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch (e) {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand('copy');
+    ta.remove();
+  }
+  toast('已复制到剪贴板', 'ok');
+}
+
+async function issueUserKey(uid) {
+  const u = (usersCache || []).find(x => String(x.id) === String(uid));
+  if (!u) return;
+  const name = 'web-' + new Date().toISOString().slice(0, 10);
+  const r = await api('/sw/keys', { method: 'POST', body: { user: u.username, name } });
+  await pageUsers();
+  // 签发后直接把新 Key 明文展开，省一次点「显示」
+  keysCache[r.id] = r.key;
+  const span = $('keysec-' + r.id);
+  const btn = el(`[data-act="key-show"][data-keyid="${r.id}"]`);
+  if (span) span.textContent = r.key;
+  if (btn) { btn.dataset.shown = '1'; btn.textContent = '隐藏'; }
+  toast('已签发，可点「复制」发送', 'ok');
 }
 
 async function createUser() {
@@ -2168,6 +2236,22 @@ document.addEventListener('click', async e => {
       location.hash = '#/search?tab=docs';
       return;
     }
+    if (act === 'key-show') {
+      const secret = keysCache[node.dataset.keyid];
+      const span = $('keysec-' + node.dataset.keyid);
+      if (!secret || !span) return;
+      const shown = node.dataset.shown === '1';
+      span.textContent = shown ? maskSecret(secret) : secret;
+      node.dataset.shown = shown ? '0' : '1';
+      node.textContent = shown ? '显示' : '隐藏';
+      return;
+    }
+    if (act === 'key-copy') {
+      const secret = keysCache[node.dataset.keyid];
+      if (secret) await copyText(secret);
+      return;
+    }
+    if (act === 'user-key-issue') { await issueUserKey(node.dataset.uid); return; }
     if (act === 'user-create') { await createUser(); return; }
     if (act === 'user-edit') { await openUserEdit(node.dataset.uid); return; }
     if (act === 'user-save') { await saveUser(node.dataset.uid); return; }

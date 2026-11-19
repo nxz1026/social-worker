@@ -44,6 +44,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 
 import apikey as _apikey
+import keysafe as _keysafe
 from settings import SETTINGS
 import status as status_mod
 
@@ -81,6 +82,23 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.on_event("startup")
+def _ensure_api_key_secret_column() -> None:
+    """补 api_keys.secret_enc 列（幂等）。
+
+    新建数据库或旧库升级时自动加列，避免部署后第一次查看 Key 报 SQL 错误。
+    失败不阻断服务启动：认证只依赖 key_hash，明文展示可稍后修。
+    """
+    try:
+        with psycopg.connect(PG_DSN) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS secret_enc text")
+            conn.commit()
+    except Exception:
+        pass
 
 TEMPLATES_DIR = SETTINGS.templates_dir
 TYPE_MAP = {
@@ -1879,15 +1897,27 @@ def _count_files(directory: Path) -> int:
     return total
 
 
+_MIRROR_EXTS = {".docx", ".doc", ".xlsx", ".pdf"}
+
+
 def _file_item(path: Path) -> dict:
-    """文件/目录条目：name / size / mtime / is_dir。"""
+    """文件/目录条目：name / size / mtime / is_dir。
+
+    文档类文件若旁边已有同名 ``.md`` 骨架，额外给 ``mirror`` 字段（md 文件名），
+    前端据此显示「↗ md」提示，不参与下载或权限判断。
+    """
     st = path.stat()
-    return {
+    item = {
         "name": path.name,
         "size": 0 if path.is_dir() else st.st_size,
         "mtime": datetime.fromtimestamp(st.st_mtime, TZ).isoformat(),
         "is_dir": path.is_dir(),
     }
+    if not item["is_dir"] and path.suffix.lower() in _MIRROR_EXTS:
+        mirror = path.with_suffix(".md")
+        if mirror.is_file():
+            item["mirror"] = mirror.name
+    return item
 
 
 def _activity_mtime(act_dir: Path) -> float:
@@ -2964,7 +2994,11 @@ def api_sw_me(user=Depends(current_user)):
 @app.post("/api/sw/keys")
 def api_create_key(body: dict, request: Request, conn=Depends(db),
                    user=Depends(require_admin)):
-    """签发 API Key。明文只在本次响应里返回一次，不落库、不进审计。"""
+    """签发 API Key。
+
+    明文同时用对称加密存一份（``secret_enc``），供管理员在用户管理页随时查看；
+    审计仍只记前缀和名字，绝不把明文写进审计日志。
+    """
     username = str(body.get("user") or user["username"]).strip()
     name = str(body.get("name") or "").strip()
     if not name:
@@ -2991,18 +3025,24 @@ def api_create_key(body: dict, request: Request, conn=Depends(db),
     scopes = body.get("scopes")
     if scopes is not None and not isinstance(scopes, list):
         raise ApiError(400, "VALIDATION", "scopes 必须是数组或 null")
+    # 加密失败不阻断签发：认证仍可用 key_hash，只是后台看不到明文
+    try:
+        secret_enc = _keysafe.encrypt(plain, ROOT)
+    except Exception:
+        secret_enc = None
     with conn.cursor() as cur:
         cur.execute(
             """INSERT INTO api_keys(user_id, name, key_hash, key_prefix,
-                                    scopes, expires_at)
-               VALUES(%s,%s,%s,%s,%s,%s) RETURNING id""",
+                                    scopes, expires_at, secret_enc)
+               VALUES(%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
             (row[0], name, digest, prefix,
-             [str(x) for x in scopes] if scopes else None, expires_at),
+             [str(x) for x in scopes] if scopes else None, expires_at,
+             secret_enc),
         )
         key_id = cur.fetchone()[0]
     conn.commit()
 
-    # 审计只记前缀和名字，明文 Key 绝不落库
+    # 审计只记前缀和名字，明文 Key 绝不进审计
     audit(conn, user["id"], "create_api_key", target=f"api_key:{key_id}",
           detail={"user": username, "name": name, "prefix": prefix,
                   "expires_at": str(expires_at) if expires_at else None},
@@ -3019,20 +3059,24 @@ def api_create_key(body: dict, request: Request, conn=Depends(db),
 
 @app.get("/api/sw/keys")
 def api_list_keys(conn=Depends(db), user=Depends(current_user)):
-    """admin 看全部；普通账号只看自己的。永不返回明文或完整哈希。"""
+    """admin 看全部；普通账号只看自己的。
+
+    ``secret`` 是解密后的完整明文；旧 Key（secret_enc 为 NULL）或密钥文件丢失时为
+    null，前端提示「旧 Key，无法查看明文，请重新签发」。完整哈希永不返回。
+    """
     with conn.cursor() as cur:
         if user["role"] == "admin":
             cur.execute(
                 """SELECT k.id, k.user_id, u.username, u.real_name, k.name,
                           k.key_prefix, k.scopes, k.expires_at, k.created_at,
-                          k.last_used_at, k.revoked_at
+                          k.last_used_at, k.revoked_at, k.secret_enc
                    FROM api_keys k JOIN users u ON u.id = k.user_id
                    ORDER BY k.id DESC""")
         else:
             cur.execute(
                 """SELECT k.id, k.user_id, u.username, u.real_name, k.name,
                           k.key_prefix, k.scopes, k.expires_at, k.created_at,
-                          k.last_used_at, k.revoked_at
+                          k.last_used_at, k.revoked_at, k.secret_enc
                    FROM api_keys k JOIN users u ON u.id = k.user_id
                    WHERE k.user_id = %s ORDER BY k.id DESC""", (user["id"],))
         rows = cur.fetchall()
@@ -3041,6 +3085,13 @@ def api_list_keys(conn=Depends(db), user=Depends(current_user)):
     for r in rows:
         exp = r[7]
         expired = bool(exp and (exp if exp.tzinfo else exp.replace(tzinfo=timezone.utc)) <= now)
+        secret = None
+        # 兼容单测里的旧 11 列假行；真实查询固定有第 12 列 secret_enc
+        if len(r) > 11 and r[11]:
+            try:
+                secret = _keysafe.decrypt(r[11], ROOT)
+            except Exception:
+                secret = None
         items.append({
             "id": r[0], "user_id": r[1], "user": r[2],
             "real_name": r[3] or "", "name": r[4],
@@ -3051,6 +3102,7 @@ def api_list_keys(conn=Depends(db), user=Depends(current_user)):
             "revoked_at": str(r[10]) if r[10] else None,
             "revoked": r[10] is not None,
             "active": r[10] is None and not expired,
+            "secret": secret,
         })
     return {"total": len(items), "items": items}
 

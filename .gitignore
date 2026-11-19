@@ -3,6 +3,7 @@
 .cognee-key
 .cognee-token
 .syncthing-key
+.apikey-secret
 *.pem
 *.key
 
