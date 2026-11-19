@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import base64
 import contextlib
 import fcntl
 import hashlib
@@ -28,6 +29,7 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -53,8 +55,10 @@ if str(REPO_ROOT) not in sys.path:
 import name_parse as _np  # noqa: E402
 from engine import activities as _activities  # noqa: E402
 from engine import activity as _activity  # noqa: E402
+from engine import caption as _caption  # noqa: E402
 from engine import checks as _checks  # noqa: E402
 from engine import coding as _coding  # noqa: E402
+from engine import invoice as _invoice  # noqa: E402
 from engine import project_checks as _project_checks  # noqa: E402
 from engine import cognee_index as _cognee_index  # noqa: E402
 from engine import fill as _fill  # noqa: E402
@@ -1472,6 +1476,18 @@ def _run_cognee_index(project: str) -> dict:
     return _load_script("index_cognee").run(ROOT, project)
 
 
+_SCRIPT_CACHE: dict[str, object] = {}
+
+
+def _script(name: str):
+    """加载并缓存 scripts/<name>.py，同一进程内只 exec 一次。"""
+    module = _SCRIPT_CACHE.get(name)
+    if module is None:
+        module = _load_script(name)
+        _SCRIPT_CACHE[name] = module
+    return module
+
+
 def _template_library() -> Path:
     """模板库目录：<ROOT>/templates/library（唯一模板来源）。"""
     return ROOT / "templates" / "library"
@@ -2032,6 +2048,256 @@ def api_activity_llm_fill(name: str, dirname: str, body: dict, request: Request,
           ip=request.client.host)
     return {"path": rel, "filled": result["filled"],
             "missing": result["missing"], "generated": generated}
+
+
+# ---------- B2：报销校验 / 图注 / 满意度 ----------
+# 缩略图缓存目录：放 ROOT/state 下，不落进项目目录（避免 Syncthing 同步缓存）
+_THUMB_DIR = "thumbs"
+_THUMB_WIDTH = 320
+
+
+def _photo_thumb(path: Path) -> str:
+    """生成/复用缩略图，返回 data URI；PIL 缺失或解码失败返回空串。
+
+    照片原件动辄 4~5 MB，25 张就是 200 MB，不能直接塞进浏览器；
+    这里按「路径 + mtime」做键缓存 320px 宽 JPEG，前端拿 data URI 直接显示。
+    """
+    try:
+        from PIL import Image
+    except ImportError:
+        return ""
+
+    try:
+        stat = path.stat()
+        key = hashlib.sha1(f"{path.resolve()}|{stat.st_mtime_ns}".encode()).hexdigest()
+        target = ROOT / "state" / _THUMB_DIR / f"{key}.jpg"
+        if not target.is_file():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with Image.open(path) as img:
+                img.thumbnail((_THUMB_WIDTH, _THUMB_WIDTH * 4))
+                if img.mode != "RGB":
+                    img = img.convert("RGB")
+                tmp = target.with_suffix(".tmp")
+                img.save(tmp, "JPEG", quality=72)
+                tmp.replace(target)
+        return "data:image/jpeg;base64," + base64.b64encode(
+            target.read_bytes()).decode()
+    except Exception:
+        return ""            # 损坏图片 / 只读挂载都不该让整个列表 500
+
+
+@app.post("/api/projects/{name}/activities/{dirname}/invoice/scan")
+def api_invoice_scan(name: str, dirname: str, user=Depends(require_write)):
+    """扫发票 + 三表校验，返回 engine.invoice.cross_check() 的结果。"""
+    require_write(user)
+    act_dir, _meta = _activity_meta_or_404(name, dirname, user, write=True)
+    return _invoice.cross_check(act_dir)
+
+
+@app.post("/api/projects/{name}/activities/{dirname}/invoice/report")
+def api_invoice_report(name: str, dirname: str, body: dict,
+                       user=Depends(require_write)):
+    """生成发票明细表，返回 {path, count, total}。"""
+    require_write(user)
+    act_dir, _meta = _activity_meta_or_404(name, dirname, user, write=True)
+
+    items = _invoice.scan_invoices(act_dir)
+    report = _script("invoice_report")
+    out_rel = str(body.get("output")
+                  or f"{_invoice.INVOICE_SUBDIR}/{report.DETAIL_NAME}").strip()
+    dst = _safe_rel_path(act_dir, out_rel)
+    if not dst.suffix:
+        dst = dst.with_name(dst.name + ".xlsx")
+
+    template = _template_library() / "发票明细表.xlsx"
+    if not template.is_file():
+        raise HTTPException(400, f"发票明细表模板不存在：{template}")
+    report.DETAIL_TEMPLATE = template
+    try:
+        report.render_detail(items, dst)
+    except FileNotFoundError as exc:
+        raise HTTPException(400, str(exc))
+
+    total = round(sum(item["amount"] for item in items
+                      if item.get("amount") is not None), 2)
+    return {"path": dst.relative_to(act_dir.resolve()).as_posix(),
+            "count": len(items), "total": total}
+
+
+@app.get("/api/projects/{name}/activities/{dirname}/photos")
+def api_activity_photos(name: str, dirname: str, sub: str = _caption.PHOTO_SUBDIR,
+                        user=Depends(current_user)):
+    """列照片：文件名 / 大小 / mtime / 缩略图 / 是否程序默认选中。
+
+    缩略图是 data URI（认证只走 x-token header，`<img src>` 带不了 header）。
+    """
+    act_dir, _meta = _activity_meta_or_404(name, dirname, user)
+    folder = _safe_rel_path(act_dir, sub)
+    if not folder.is_dir():
+        return []
+
+    default = {path.relative_to(folder).as_posix()
+               for path in _caption.pick_photos(act_dir, sub)}
+    files = [path for path in sorted(folder.rglob("*"))
+             if path.is_file() and not path.name.startswith(".")
+             and path.suffix.lower() in _caption.IMAGE_EXTS]
+    # 单张 4~5 MB，逐张解码要 6 秒；4 线程压到 2 秒左右（PIL 解码会放 GIL）
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        thumbs = list(pool.map(_photo_thumb, files))
+
+    out: list[dict] = []
+    for path, thumb in zip(files, thumbs):
+        rel = path.relative_to(folder).as_posix()
+        stat = path.stat()
+        out.append({
+            "name": rel,
+            "size": stat.st_size,
+            "mtime": datetime.fromtimestamp(stat.st_mtime, TZ).isoformat(),
+            "picked": rel in default,
+            "thumb": thumb,
+        })
+    return out
+
+
+@app.post("/api/projects/{name}/activities/{dirname}/captions")
+def api_activity_captions(name: str, dirname: str, body: dict,
+                          user=Depends(require_write)):
+    """生成图注：picked 为空时由程序按文件名挑图。"""
+    require_write(user)
+    act_dir, _meta = _activity_meta_or_404(name, dirname, user, write=True)
+
+    sub = str(body.get("sub") or _caption.PHOTO_SUBDIR).strip()
+    style = str(body.get("style") or "")
+    picked = body.get("picked") or []
+    if not isinstance(picked, list):
+        raise HTTPException(400, "picked 必须是文件名数组")
+
+    folder = _safe_rel_path(act_dir, sub)
+    if picked:
+        photos: list[Path] = []
+        for raw in picked:
+            target = _safe_rel_path(folder, str(raw).strip())
+            if target.is_file() and target.suffix.lower() in _caption.IMAGE_EXTS:
+                photos.append(target)
+        if not photos:
+            raise HTTPException(400, "勾选的照片都不存在")
+    else:
+        photos = _caption.pick_photos(act_dir, sub)
+    if not photos:
+        raise HTTPException(404, f"没有可用的照片：{sub}")
+
+    facts = _activity.build_data(name, dirname)
+    try:
+        return _caption.write_captions(photos, facts, style=style)
+    except _llm.LLMError as exc:
+        raise HTTPException(502, f"图注生成失败：{exc}")
+
+
+@app.post("/api/projects/{name}/activities/{dirname}/captions/fill")
+def api_captions_fill(name: str, dirname: str, body: dict,
+                      user=Depends(require_write)):
+    """把图注填进模板的 {{图注_N}}，返回 {path, filled, missing}。"""
+    require_write(user)
+    act_dir, _meta = _activity_meta_or_404(name, dirname, user, write=True)
+
+    raw = body.get("captions")
+    if not isinstance(raw, list) or not raw:
+        raise HTTPException(400, "captions 不能为空")
+    captions = [{"file": str(item.get("file") or ""),
+                 "caption": str(item.get("caption") or "").strip()}
+                for item in raw if isinstance(item, dict)]
+    captions = [item for item in captions if item["caption"]]
+    if not captions:
+        raise HTTPException(400, "captions 里没有有效图注")
+
+    tpl = _find_template(body.get("template"))
+    dst = _fill_output(act_dir, body, tpl)
+    try:
+        result = _fill.render(tpl, dst, _caption.as_fill_data(captions))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+
+    return {"path": dst.relative_to(act_dir.resolve()).as_posix(),
+            "filled": result["filled"], "missing": result["missing"]}
+
+
+@app.post("/api/projects/{name}/activities/{dirname}/satisfaction/list")
+def api_sat_list(name: str, dirname: str, user=Depends(require_write)):
+    """扫问卷照片，生成/更新 scores.json（保留已录分数）。"""
+    require_write(user)
+    act_dir, _meta = _activity_meta_or_404(name, dirname, user, write=True)
+    entries, _path = _script("satisfaction").write_scores(act_dir)
+    return entries
+
+
+@app.get("/api/projects/{name}/activities/{dirname}/satisfaction")
+def api_sat_get(name: str, dirname: str, user=Depends(current_user)):
+    """读 scores.json；没有文件返回空列表。"""
+    act_dir, _meta = _activity_meta_or_404(name, dirname, user)
+    return _script("satisfaction").load_scores(act_dir)
+
+
+@app.put("/api/projects/{name}/activities/{dirname}/satisfaction")
+def api_sat_put(name: str, dirname: str, body: dict,
+                user=Depends(require_write)):
+    """写回 scores.json：body.scores = [{file, score, satisfied}]。"""
+    require_write(user)
+    act_dir, _meta = _activity_meta_or_404(name, dirname, user, write=True)
+
+    scores = body.get("scores")
+    if not isinstance(scores, list):
+        raise HTTPException(400, "scores 必须是数组")
+    entries: list[dict] = []
+    for item in scores:
+        if not isinstance(item, dict):
+            raise HTTPException(400, "scores 的每一项必须是对象")
+        file = str(item.get("file") or "").strip()
+        if not file:
+            raise HTTPException(400, "每条分数都要有 file")
+        score = item.get("score")
+        if score is not None and (isinstance(score, bool)
+                                  or not isinstance(score, (int, float))):
+            raise HTTPException(400, f"分数必须是数字：{file}")
+        flag = item.get("satisfied")
+        entries.append({"file": file, "score": score,
+                        "satisfied": flag if isinstance(flag, bool) else None})
+
+    path = _script("satisfaction").scores_path(act_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(entries, ensure_ascii=False, indent=2) + "\n",
+                    encoding="utf-8")
+    return {"ok": True, "count": len(entries),
+            "path": path.relative_to(act_dir.resolve()).as_posix()}
+
+
+@app.post("/api/projects/{name}/activities/{dirname}/satisfaction/fill")
+def api_sat_fill(name: str, dirname: str, user=Depends(require_write)):
+    """统计并填 05-满意度测评汇总表，返回统计结果 + 落盘路径。"""
+    require_write(user)
+    act_dir, _meta = _activity_meta_or_404(name, dirname, user, write=True)
+
+    sat = _script("satisfaction")
+    entries = sat.load_scores(act_dir)
+    if not entries:
+        raise HTTPException(400, "没有 scores.json，先点「扫描问卷」生成清单")
+    stats = sat.summarize(entries)
+    if not stats["份数"]:
+        raise HTTPException(400, "一份分数都没录，无法统计")
+
+    template = _template_library() / "满意度测评汇总表.docx"
+    if not template.is_file():
+        raise HTTPException(400, f"满意度汇总表模板不存在：{template}")
+    sat.SUMMARY_TEMPLATE = template
+
+    dst = act_dir / sat.SUMMARY_NAME
+    try:
+        result = sat.render_summary(stats, sat._facts(act_dir), dst)
+    except FileNotFoundError as exc:
+        raise HTTPException(400, str(exc))
+
+    return {**stats,
+            "path": dst.relative_to(act_dir.resolve()).as_posix(),
+            "filled": result["filled"], "missing": result["missing"]}
 
 
 def _sync_targets(project: str) -> list[str]:

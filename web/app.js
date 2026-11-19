@@ -55,6 +55,8 @@ const fmtTime = iso => {
   return s.slice(0, 16).replace('T', ' ');
 };
 
+const fmtMoney = n => (n == null || isNaN(n) ? '—' : Number(n).toFixed(2));
+
 const todayCn = () => {
   const d = new Date();
   return `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日`;
@@ -605,6 +607,9 @@ async function pageActivity(name, dirname, params) {
         </div>
       </div>
       <div class="actions">
+        <button class="btn" data-act="open-invoice" ${canWrite() ? '' : 'disabled title="需 editor/admin"'}>报销校验</button>
+        <button class="btn" data-act="open-caption" ${canWrite() ? '' : 'disabled title="需 editor/admin"'}>生成图注</button>
+        <button class="btn" data-act="open-sat" ${canWrite() ? '' : 'disabled title="需 editor/admin"'}>满意度统计</button>
         <button class="btn primary" data-act="open-fill" ${canWrite() ? '' : 'disabled title="需 editor/admin"'}>生成材料</button>
         <button class="btn" data-act="act-upload" ${canWrite() ? '' : 'disabled title="需 editor/admin"'}>上传文件</button>
         <button class="btn" data-act="open-llm" ${canWrite() ? '' : 'disabled title="需 editor/admin"'}>LLM 生成</button>
@@ -1075,6 +1080,339 @@ async function applyLlm() {
   } catch (e) {
     el('#llmMsg').textContent = '落盘失败：' + e.message;
     toast('落盘失败：' + e.message, 'err');
+  }
+}
+
+/* ============================================================
+ * 4b. 报销校验 / 图注 / 满意度
+ * ============================================================ */
+function actBase() {
+  return `/projects/${enc(actCtx.projectName)}/activities/${enc(actCtx.dirname)}`;
+}
+
+/* ---------------- 报销校验 ---------------- */
+function invoiceCard(label, value, source, count) {
+  return `<div class="money-card">
+    <div class="label">${esc(label)}</div>
+    <div class="value">${fmtMoney(value)}<span class="unit">元</span></div>
+    <div class="muted">${esc(source || '')}${count != null ? ` · ${count} 张` : ''}</div>
+  </div>`;
+}
+
+function renderInvoiceResult(r) {
+  const inv = r['发票'] || {};
+  const items = inv.items || [];
+  const rows = items.map((it, i) => `<tr>
+      <td class="num">${i + 1}</td>
+      <td class="nowrap">${esc(it.date || '—')}</td>
+      <td class="mono">${esc(it.invoice_no || '—')}</td>
+      <td>${esc(it.merchant || '—')}</td>
+      <td>${esc(it.item || '—')}</td>
+      <td class="num">${fmtMoney(it.amount)}</td>
+      <td>${it.parse_error ? `<span class="badge warn" title="${esc(it.parse_error)}">待核对</span>` : ''}</td>
+    </tr>`).join('');
+  const diffs = Object.entries(r.diff || {})
+    .filter(([, v]) => v != null)
+    .map(([k, v]) => `${k} ${v > 0 ? '+' : ''}${fmtMoney(v)}`)
+    .join(' · ') || '—';
+  const issues = (r.issues || []).map(x => `<li>${esc(x)}</li>`).join('');
+
+  $('modalBody').innerHTML = `
+    <div class="money-grid">
+      ${invoiceCard('决算', (r['决算'] || {}).value, (r['决算'] || {}).source)}
+      ${invoiceCard('报销', (r['报销'] || {}).value, (r['报销'] || {}).source)}
+      ${invoiceCard('发票', (r['发票'] || {}).value, '', inv.count)}
+    </div>
+    <div class="row" style="margin:12px 0">
+      ${r.consistent ? '<span class="badge ok">三表一致</span>' : '<span class="badge err">不一致</span>'}
+      <span class="muted">差异：${esc(diffs)}</span>
+    </div>
+    ${issues ? `<div class="notice"><b>问题</b><ul class="plain-list">${issues}</ul></div>` : ''}
+    <div class="section-title">发票明细（${items.length} 张）</div>
+    ${items.length ? `<div class="table-wrap"><table>
+      <thead><tr><th>#</th><th>日期</th><th>号码</th><th>商户</th><th>内容</th>
+        <th class="num">金额</th><th></th></tr></thead>
+      <tbody>${rows}</tbody></table></div>` : empty('12-发票/ 下没有票据')}
+    <div id="invMsg" style="margin-top:12px"></div>`;
+  $('modalFoot').innerHTML = `<button class="btn" data-close-modal>关闭</button>
+    <button class="btn primary" data-act="invoice-report">生成发票明细表</button>`;
+}
+
+async function openInvoiceModal() {
+  if (!actCtx) return;
+  if (!canWrite()) { toast('需 editor/admin 权限', 'warn'); return; }
+  openModal('报销校验', '<div class="loading">扫描发票并比对三表…</div>',
+    '<button class="btn" data-close-modal>关闭</button>', true);
+  try {
+    const r = await api(actBase() + '/invoice/scan', { method: 'POST' });
+    actCtx.invoice = r;
+    renderInvoiceResult(r);
+  } catch (e) {
+    $('modalBody').innerHTML = `<div class="notice">扫描失败：${esc(e.message)}</div>`;
+    toast('扫描失败：' + e.message, 'err');
+  }
+}
+
+async function submitInvoiceReport() {
+  if (!actCtx) return;
+  el('#invMsg').innerHTML = '<span class="muted">生成中…</span>';
+  try {
+    const r = await api(actBase() + '/invoice/report', { method: 'POST', body: {} });
+    el('#invMsg').innerHTML = `<div class="notice green">已生成 <b>${esc(r.path)}</b>
+      （${r.count} 张，合计 ${fmtMoney(r.total)} 元）</div>`;
+    toast('发票明细表已生成：' + r.path, 'ok');
+  } catch (e) {
+    el('#invMsg').innerHTML = `<div class="notice">生成失败：${esc(e.message)}</div>`;
+    toast('生成失败：' + e.message, 'err');
+  }
+}
+
+/* ---------------- 图注 ---------------- */
+const CAPTION_SUB = '11-活动照片资料';
+
+function renderCaptionGrid() {
+  const cap = actCtx.cap;
+  const texts = new Map((cap.captions || []).map(c => [c.file, c.caption]));
+  const tiles = cap.photos.map(p => {
+    // 后端 write_captions 返回的是文件名；子目录里的照片用相对路径，兜底按 basename 匹配
+    const text = texts.has(p.name) ? texts.get(p.name)
+      : texts.get(p.name.split('/').pop());
+    return `<div class="photo-tile${text != null ? ' has-cap' : ''}">
+      <label class="photo-pick">
+        <input type="checkbox" data-photo="${esc(p.name)}" ${p.picked ? 'checked' : ''}>
+        <span class="ph-name" title="${esc(p.name)}">${esc(p.name)}</span>
+      </label>
+      ${p.thumb ? `<img src="${p.thumb}" alt="${esc(p.name)}" loading="lazy">`
+                : '<div class="ph-noimg">无预览</div>'}
+      ${text != null ? `<input class="cap-input" data-cap-file="${esc(p.name)}"
+        value="${esc(text)}" title="${esc(text)}">` : ''}
+    </div>`;
+  }).join('');
+
+  const tplOptions = (cap.tpls || []).map(t =>
+    `<option value="${esc(t.name)}" ${t.name === cap.tpl ? 'selected' : ''}>${esc(t.name)}</option>`
+  ).join('') || '<option value="">（模板库为空）</option>';
+
+  $('modalBody').innerHTML = `
+    <div class="form-grid">
+      <label class="field"><span>文风</span>
+        <select id="capStyle">${STYLES.map(s =>
+          `<option value="${esc(s)}" ${s === cap.style ? 'selected' : ''}>${esc(s)}</option>`).join('')}</select>
+      </label>
+      <label class="field"><span>落盘模板</span><select id="capTpl">${tplOptions}</select></label>
+    </div>
+    <div class="notice blue">勾选要配图注的照片（默认程序按文件名挑好的）；生成后可逐条修改。</div>
+    <div class="section-title">照片（${cap.photos.length} 张，已选 <span id="capCount">0</span> 张）</div>
+    <div class="photo-grid" id="capGrid">${tiles || empty('照片目录为空')}</div>
+    <div id="capMsg" style="margin-top:12px"></div>`;
+  $('modalFoot').innerHTML = `<button class="btn" data-close-modal>关闭</button>
+    <button class="btn" data-act="cap-generate">生成图注</button>
+    <button class="btn primary" data-act="cap-apply">应用到模板</button>`;
+  syncCapCount();
+}
+
+function syncCapCount() {
+  const box = el('#capCount');
+  if (!box) return;
+  box.textContent = els('[data-photo]').filter(x => x.checked).length;
+}
+
+async function openCaptionModal() {
+  if (!actCtx) return;
+  if (!canWrite()) { toast('需 editor/admin 权限', 'warn'); return; }
+  openModal('生成图注', '<div class="loading">读取照片…</div>',
+    '<button class="btn" data-close-modal>关闭</button>', true);
+  try {
+    const [photos, tpls] = await Promise.all([
+      api(`${actBase()}/photos?sub=${enc(CAPTION_SUB)}`),
+      ensureTemplates().catch(() => []),
+    ]);
+    const docx = (tpls || []).filter(t => t.kind === 'docx');
+    const preferred = docx.find(t => t.name.includes('简报')) || docx[0];
+    actCtx.cap = {
+      sub: CAPTION_SUB,
+      photos: photos || [], captions: [], style: STYLES[0],
+      tpls: docx, tpl: preferred ? preferred.name : '',
+    };
+    renderCaptionGrid();
+  } catch (e) {
+    $('modalBody').innerHTML = `<div class="notice">读取照片失败：${esc(e.message)}</div>`;
+    toast('读取照片失败：' + e.message, 'err');
+  }
+}
+
+async function generateCaptions() {
+  if (!actCtx || !actCtx.cap) return;
+  const cap = actCtx.cap;
+  cap.style = el('#capStyle') ? el('#capStyle').value : cap.style;
+  cap.tpl = el('#capTpl') ? el('#capTpl').value : cap.tpl;
+  const picked = els('[data-photo]').filter(x => x.checked).map(x => x.dataset.photo);
+  if (!picked.length) { toast('至少勾选一张照片', 'warn'); return; }
+  el('#capMsg').innerHTML = '<span class="muted">生成中，可能要 1–3 分钟…</span>';
+  try {
+    const r = await api(actBase() + '/captions', {
+      method: 'POST', body: { sub: cap.sub || CAPTION_SUB, style: cap.style, picked },
+    });
+    cap.captions = r || [];
+    const chosen = new Set(picked);
+    cap.photos.forEach(p => { p.picked = chosen.has(p.name); });
+    renderCaptionGrid();
+    toast(`已生成 ${cap.captions.length} 条图注`, 'ok');
+  } catch (e) {
+    el('#capMsg').innerHTML = `<div class="notice">生成失败：${esc(e.message)}</div>`;
+    toast('图注生成失败：' + e.message, 'err');
+  }
+}
+
+async function applyCaptions() {
+  if (!actCtx || !actCtx.cap) return;
+  const captions = els('[data-cap-file]').map(inp => ({
+    file: inp.dataset.capFile, caption: inp.value.trim(),
+  })).filter(c => c.caption);
+  if (!captions.length) { toast('还没有图注，先点「生成图注」', 'warn'); return; }
+  const tpl = el('#capTpl') ? el('#capTpl').value : '';
+  if (!tpl) { toast('请选择落盘模板', 'warn'); return; }
+  el('#capMsg').innerHTML = '<span class="muted">落盘中…</span>';
+  try {
+    const r = await api(actBase() + '/captions/fill', {
+      method: 'POST', body: { captions, template: tpl },
+    });
+    const missing = r.missing || [];
+    el('#capMsg').innerHTML = `<div class="notice green">已落盘 <b>${esc(r.path)}</b>，
+      填充 ${r.filled} 处${missing.length ? `；缺 ${missing.length} 个占位符：${esc(missing.join('、'))}` : ''}</div>`;
+    toast('图注已应用：' + r.path, 'ok');
+  } catch (e) {
+    el('#capMsg').innerHTML = `<div class="notice">落盘失败：${esc(e.message)}</div>`;
+    toast('落盘失败：' + e.message, 'err');
+  }
+}
+
+/* ---------------- 满意度 ---------------- */
+const SAT_GRADE = avg => {
+  if (avg == null || isNaN(avg)) return '';
+  if (avg >= 90) return '优秀';
+  if (avg >= 80) return '良好';
+  if (avg >= 70) return '一般';
+  if (avg >= 60) return '合格';
+  return '不合格';
+};
+
+function satRow(entry, index) {
+  const score = entry.score == null ? '' : entry.score;
+  const checked = entry.satisfied === true
+    || (entry.satisfied == null && score !== '' && Number(score) >= 80);
+  return `<tr data-sat-row data-file="${esc(entry.file)}">
+    <td class="num">${index + 1}</td>
+    <td class="mono">${esc(entry.file)}</td>
+    <td><input type="number" min="0" max="100" step="1" class="sat-score"
+      data-sat-score value="${esc(score)}" placeholder="0-100"></td>
+    <td><input type="checkbox" data-sat-ok ${checked ? 'checked' : ''}></td>
+    <td><button class="btn sm danger" data-act="sat-del">删除</button></td>
+  </tr>`;
+}
+
+function renderSatTable() {
+  const rows = actCtx.sat || [];
+  $('modalBody').innerHTML = `
+    <div class="sat-stats" id="satStats"></div>
+    <div class="notice blue">按问卷照片逐张录分；分数 ≥80 时「三题满意」自动勾上，可手动改。</div>
+    ${rows.length ? `<div class="table-wrap"><table>
+      <thead><tr><th>#</th><th>文件名</th><th class="num">分数</th><th>三题满意</th><th></th></tr></thead>
+      <tbody>${rows.map(satRow).join('')}</tbody></table></div>`
+    : empty('04-满意度调查表资料/ 下没有问卷照片')}
+    <div id="satMsg" style="margin-top:12px"></div>`;
+  $('modalFoot').innerHTML = `<button class="btn" data-close-modal>关闭</button>
+    <button class="btn" data-act="sat-save">保存分数</button>
+    <button class="btn primary" data-act="sat-fill">生成汇总表</button>`;
+  refreshSatStats();
+}
+
+function refreshSatStats() {
+  const box = el('#satStats');
+  if (!box) return;
+  let count = 0, total = 0, hit = 0;
+  for (const tr of els('[data-sat-row]')) {
+    const raw = tr.querySelector('[data-sat-score]').value.trim();
+    const score = Number(raw);
+    if (raw === '' || isNaN(score)) continue;
+    count += 1;
+    total += score;
+    if (tr.querySelector('[data-sat-ok]').checked) hit += 1;
+  }
+  const avg = count ? total / count : null;
+  const rate = count ? `${Math.round(hit / count * 100)}%（${hit}/${count}）` : '—';
+  box.innerHTML = `
+    <span>份数 <b>${count}</b></span>
+    <span>总得分 <b>${count ? fmtMoney(total).replace(/\.00$/, '') : '—'}</b></span>
+    <span>平均分 <b>${avg == null ? '—' : avg.toFixed(2)}</b></span>
+    <span>满意率 <b>${rate}</b></span>
+    <span>等级 <b>${SAT_GRADE(avg) || '—'}</b></span>`;
+}
+
+function satPayload() {
+  return els('[data-sat-row]').map(tr => {
+    const raw = tr.querySelector('[data-sat-score]').value.trim();
+    return {
+      file: tr.dataset.file,
+      score: raw === '' ? null : Number(raw),
+      satisfied: tr.querySelector('[data-sat-ok]').checked,
+    };
+  });
+}
+
+async function openSatModal() {
+  if (!actCtx) return;
+  if (!canWrite()) { toast('需 editor/admin 权限', 'warn'); return; }
+  openModal('满意度统计', '<div class="loading">读取问卷清单…</div>',
+    '<button class="btn" data-close-modal>关闭</button>', true);
+  try {
+    let rows = await api(actBase() + '/satisfaction');
+    if (!rows || !rows.length) {
+      rows = await api(actBase() + '/satisfaction/list', { method: 'POST' });
+    }
+    actCtx.sat = rows || [];
+    renderSatTable();
+  } catch (e) {
+    $('modalBody').innerHTML = `<div class="notice">读取失败：${esc(e.message)}</div>`;
+    toast('读取失败：' + e.message, 'err');
+  }
+}
+
+async function saveScores(quiet = false) {
+  try {
+    const r = await api(actBase() + '/satisfaction', {
+      method: 'PUT', body: { scores: satPayload() },
+    });
+    if (!quiet) {
+      el('#satMsg').innerHTML = `<div class="notice green">已保存 ${r.count} 条分数到
+        <b>${esc(r.path)}</b></div>`;
+      toast('分数已保存', 'ok');
+    }
+    return r;
+  } catch (e) {
+    el('#satMsg').innerHTML = `<div class="notice">保存失败：${esc(e.message)}</div>`;
+    toast('保存失败：' + e.message, 'err');
+    throw e;
+  }
+}
+
+async function fillSatSummary() {
+  if (!actCtx) return;
+  el('#satMsg').innerHTML = '<span class="muted">保存并生成中…</span>';
+  try {
+    await saveScores(true);
+  } catch {
+    return;
+  }
+  try {
+    const r = await api(actBase() + '/satisfaction/fill', { method: 'POST' });
+    el('#satMsg').innerHTML = `<div class="notice green">
+      已生成 <b>${esc(r.path)}</b>：${r.份数} 份 · 总得分 ${r.总得分} · 平均
+      ${r.平均分} · 满意率 ${esc(r.满意率)} · ${esc(r.评定等级)}</div>`;
+    toast('汇总表已生成：' + r.path, 'ok');
+  } catch (e) {
+    el('#satMsg').innerHTML = `<div class="notice">生成失败：${esc(e.message)}</div>`;
+    toast('生成失败：' + e.message, 'err');
   }
 }
 
@@ -1682,6 +2020,20 @@ document.addEventListener('click', async e => {
     if (act === 'open-llm') { await openLlmModal(); return; }
     if (act === 'llm-run') { await runLlm(); return; }
     if (act === 'llm-apply') { await applyLlm(); return; }
+    if (act === 'open-invoice') { await openInvoiceModal(); return; }
+    if (act === 'invoice-report') { await submitInvoiceReport(); return; }
+    if (act === 'open-caption') { await openCaptionModal(); return; }
+    if (act === 'cap-generate') { await generateCaptions(); return; }
+    if (act === 'cap-apply') { await applyCaptions(); return; }
+    if (act === 'open-sat') { await openSatModal(); return; }
+    if (act === 'sat-save') { await saveScores(); return; }
+    if (act === 'sat-fill') { await fillSatSummary(); return; }
+    if (act === 'sat-del') {
+      const tr = node.closest('[data-sat-row]');
+      if (tr) tr.remove();
+      refreshSatStats();
+      return;
+    }
     if (act === 'tpl-tab') {
       location.hash = node.dataset.tab === 'generate' ? '#/templates?tab=generate' : '#/templates';
       return;
@@ -1759,6 +2111,28 @@ document.addEventListener('click', async e => {
   } catch (err) {
     toast(err.message || '操作失败', 'err');
   }
+});
+
+/* 图注勾选计数 / 满意度分数与满意勾选联动 */
+document.addEventListener('change', e => {
+  if (e.target.closest('[data-photo]')) { syncCapCount(); return; }
+  const ok = e.target.closest('[data-sat-ok]');
+  if (ok) {
+    ok.dataset.touched = '1';
+    refreshSatStats();
+  }
+});
+document.addEventListener('input', e => {
+  const score = e.target.closest('[data-sat-score]');
+  if (!score) return;
+  const tr = score.closest('[data-sat-row]');
+  const ok = tr && tr.querySelector('[data-sat-ok]');
+  // 用户没手动勾过「三题满意」时，按分数 ≥80 自动带出，与后端默认口径一致
+  if (ok && ok.dataset.touched !== '1') {
+    const raw = score.value.trim();
+    ok.checked = raw !== '' && Number(raw) >= 80;
+  }
+  refreshSatStats();
 });
 
 async function downloadDocSource() {
