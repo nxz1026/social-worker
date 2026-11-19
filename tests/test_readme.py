@@ -78,7 +78,7 @@ def test_render_project_readme_lists_activities(fake_root):
     assert "## 项目材料" in text
     assert "| 1 | 项目协议 |" in text
     assert "## 活动" in text
-    assert "[[01-走访调研-第一期/README|走访调研（第一期）]]" in text
+    assert "[[01-走访调研-第一期/_01-走访调研-第一期-资料索引|走访调研（第一期）]]" in text
 
 
 def test_write_activity_readme_idempotent(fake_root):
@@ -87,7 +87,7 @@ def test_write_activity_readme_idempotent(fake_root):
     _write(act / "01-计划书.docx")
 
     assert readme.write_activity_readme("测试项目", "01-走访调研-第一期") is True
-    assert (act / "README.md").is_file()
+    assert (act / "_01-走访调研-第一期-资料索引.md").is_file()
     assert readme.write_activity_readme("测试项目", "01-走访调研-第一期") is False
 
 
@@ -99,15 +99,15 @@ def test_refresh_all_in_tmp(fake_root):
     dry = readme.refresh_all(dry_run=True)
     assert dry["errors"] == []
     assert len(dry["written"]) == 4          # 2 个活动 + 2 个项目
-    assert not list(fake_root.rglob("README.md"))
+    assert not list(fake_root.rglob("*资料索引.md"))
 
     first = readme.refresh_all()
     assert first["errors"] == []
     assert len(first["written"]) == 4
     assert first["skipped"] == 0
-    assert (fake_root / "甲项目" / "README.md").is_file()
+    assert (fake_root / "甲项目" / "_甲项目-项目资料索引.md").is_file()
     assert (fake_root / "甲项目" / "活动" / "01-走访调研-第一期"
-            / "README.md").is_file()
+            / "_01-走访调研-第一期-资料索引.md").is_file()
 
     second = readme.refresh_all()
     assert second["written"] == []

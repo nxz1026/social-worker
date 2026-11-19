@@ -22,10 +22,30 @@ STATUS_ICON = {"ok": "✅", "partial": "⚠️", "missing": "❌", "na": "—"}
 # 表格里需要额外文字的状态（ok / missing / na 只显示图标）
 STATUS_LABEL = {"partial": "待补"}
 
-README_NAME = "README.md"
+README_NAME = "README.md"   # 单文件模式（兼容旧调用）
+
+
+def readme_filename(dirname: str = "", project_name: str = "") -> str:
+    """README 文件名。
+
+    Obsidian 图谱按「文件名」建节点，所有活动都叫 README 会变成一堆同名节点。
+    活动级用「活动名-资料索引.md」，项目级用「项目名-项目资料索引.md」，
+    保证图谱里每个节点唯一、可读。
+    """
+    # 前缀下划线：避开核对规则里的「NN-」前缀，否则会被误判成对应材料
+    if project_name:
+        return f"_{project_name}-项目资料索引.md"
+    if dirname:
+        return f"_{dirname}-资料索引.md"
+    return README_NAME
 
 # 活动目录里属于程序内部、不该出现在文件列表里的文件
 _INTERNAL_FILES = {"activity.yaml", README_NAME}
+
+
+def _is_readme_file(name: str) -> bool:
+    """是不是本模块生成的索引文件（含新的带前缀命名）。"""
+    return name in _INTERNAL_FILES or (name.startswith("_") and name.endswith("资料索引.md"))
 
 
 def _cell(text) -> str:
@@ -120,7 +140,7 @@ def _entry_lines(act_dir: Path) -> list[str]:
     """
     lines: list[str] = []
     for path in checks._entries(act_dir):
-        if path.name in _INTERNAL_FILES:
+        if _is_readme_file(path.name):
             continue
         if path.is_dir():
             count = _visible_count(path)
@@ -218,8 +238,8 @@ def render_project_readme(project_name: str) -> str:
                 summary = "核对失败"
             name = _activity_name(dirname, act)
             code = _activity_code(act) or "（未编号）"
-            # 链接到活动自己的 README；活动名做显示文本
-            link = f"[[{dirname}/{Path(README_NAME).stem}|{name}]]"
+            # 链接到活动自己的索引；活动名做显示文本
+            link = f"[[{dirname}/{Path(readme_filename(dirname=dirname)).stem}|{name}]]"
             lines.append(f"| {link} | {_cell(code)} | {summary} |")
     return "\n".join(lines) + "\n"
 
@@ -242,17 +262,37 @@ def _write_if_changed(path: Path, text: str, dry_run: bool = False) -> bool:
 
 
 def write_activity_readme(project_name: str, dirname: str) -> bool:
-    """写活动 README.md；内容与现有文件相同则不写。返回是否真的写了。"""
+    """写活动索引 md（文件名 = 活动目录名-资料索引.md）。
+
+    内容与现有文件相同则不写，返回是否真的写了。
+    同时删掉旧的 README.md（避免图谱里留一个同名节点）。
+    """
     act_dir = projects.activity_dir(project_name, dirname)
     text = render_activity_readme(project_name, dirname)
-    return _write_if_changed(act_dir / README_NAME, text)
+    target = act_dir / readme_filename(dirname=dirname)
+    wrote = _write_if_changed(target, text)
+    legacy = act_dir / README_NAME
+    if legacy.is_file():
+        try:
+            legacy.unlink()
+        except OSError:
+            pass
+    return wrote
 
 
 def write_project_readme(project_name: str) -> bool:
-    """写项目 README.md；内容与现有文件相同则不写。返回是否真的写了。"""
+    """写项目索引 md（文件名 = 项目名-项目资料索引.md），并清掉旧 README.md。"""
     project_dir = projects._project_dir(project_name)
     text = render_project_readme(project_name)
-    return _write_if_changed(project_dir / README_NAME, text)
+    target = project_dir / readme_filename(project_name=project_name)
+    wrote = _write_if_changed(target, text)
+    legacy = project_dir / README_NAME
+    if legacy.is_file():
+        try:
+            legacy.unlink()
+        except OSError:
+            pass
+    return wrote
 
 
 def refresh_all(*, dry_run: bool = False,
@@ -287,28 +327,43 @@ def refresh_all(*, dry_run: bool = False,
             continue
 
         for dirname in activities.activity_dirs(project_dir):
-            rel = f"{name}/活动/{dirname}/{README_NAME}"
+            fname = readme_filename(dirname=dirname)
+            rel = f"{name}/活动/{dirname}/{fname}"
+            act_dir = project_dir / "活动" / dirname
             try:
                 text = render_activity_readme(name, dirname)
-                changed = _write_if_changed(
-                    project_dir / "活动" / dirname / README_NAME, text, dry_run)
+                changed = _write_if_changed(act_dir / fname, text, dry_run)
             except Exception as exc:            # 单个活动失败不中断整轮
                 out["errors"].append(f"{rel}：{exc}")
                 continue
             if changed:
                 out["written"].append(rel)
+                # 清掉旧的同名 README.md，免得图谱里留同名节点
+                legacy = act_dir / README_NAME
+                if not dry_run and legacy.is_file():
+                    try:
+                        legacy.unlink()
+                    except OSError:
+                        pass
             else:
                 out["skipped"] += 1
 
-        rel = f"{name}/{README_NAME}"
+        fname = readme_filename(project_name=name)
+        rel = f"{name}/{fname}"
         try:
             text = render_project_readme(name)
-            changed = _write_if_changed(project_dir / README_NAME, text, dry_run)
+            changed = _write_if_changed(project_dir / fname, text, dry_run)
         except Exception as exc:
             out["errors"].append(f"{rel}：{exc}")
             continue
         if changed:
             out["written"].append(rel)
+            legacy = project_dir / README_NAME
+            if not dry_run and legacy.is_file():
+                try:
+                    legacy.unlink()
+                except OSError:
+                    pass
         else:
             out["skipped"] += 1
 

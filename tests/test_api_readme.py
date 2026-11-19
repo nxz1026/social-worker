@@ -39,8 +39,8 @@ def root(tmp_path, monkeypatch):
 def test_regen_readme_endpoint(root):
     """单活动重生成：首次 written=True，再调 written=False。"""
     first = app.api_regen_readme("测试项目", ACT, ADMIN)
-    assert first == {"ok": True, "written": True, "path": "README.md"}
-    assert (root / "测试项目" / "活动" / ACT / "README.md").is_file()
+    assert first == {"ok": True, "written": True, "path": "_01-走访调研-第一期-资料索引.md"}
+    assert (root / "测试项目" / "活动" / ACT / "_01-走访调研-第一期-资料索引.md").is_file()
 
     second = app.api_regen_readme("测试项目", ACT, ADMIN)
     assert second["written"] is False

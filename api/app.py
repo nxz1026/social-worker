@@ -1696,7 +1696,8 @@ def api_regen_readme(name: str, dirname: str, user=Depends(require_write)):
         raise HTTPException(404, f"活动目录不存在：{dirname}")
     except ValueError as exc:
         raise HTTPException(400, str(exc))
-    return {"ok": True, "written": written, "path": _readme.README_NAME}
+    return {"ok": True, "written": written,
+            "path": _readme.readme_filename(dirname=dirname)}
 
 
 @app.post("/api/readme/refresh")
