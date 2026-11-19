@@ -123,7 +123,6 @@ def env(tmp_path, monkeypatch):
     brief = Document()
     brief.add_paragraph("简报：{{自定义}}")
     brief.save(str(lib / "简报.docx"))
-    monkeypatch.setattr(app, "_projects", app._projects)
     monkeypatch.setattr(app._projects, "PROJECTS_ROOT", root)
     monkeypatch.setattr(app, "ROOT", tmp_path)
     return root
@@ -181,7 +180,10 @@ def test_key_generate_and_hash_roundtrip():
     assert len(plain) == len("sk-sw-") + 43
     assert prefix == plain[:12]
     assert digest == apikey.hash_key(plain)
-    assert apikey.hash_key(plain) == apikey.hash_key(plain)
+    # 与标准 sha256 对齐，并验证不同输入产生不同哈希
+    import hashlib
+    assert apikey.hash_key(plain) == hashlib.sha256(plain.encode()).hexdigest()
+    assert apikey.hash_key(plain) != apikey.hash_key(plain + "x")
 
 
 # ---------------- 能力 / 权限 ----------------

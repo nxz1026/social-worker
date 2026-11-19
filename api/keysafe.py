@@ -66,6 +66,15 @@ def _load_or_create_key(root) -> bytes:
         raise RuntimeError(
             f"API Key 密钥文件损坏（应为 32 字节）：{path}；"
             "请从备份恢复，否则旧 Key 的明文无法解密")
+    # 读已有文件时也校验权限：0600 之外的权限意味着本机其他用户可解密全部明文
+    try:
+        mode = path.stat().st_mode & 0o777
+        if mode != 0o600:
+            import logging
+            logging.getLogger(__name__).warning(
+                "API Key 密钥文件权限为 %o，应为 600：%s", mode, path)
+    except OSError:
+        pass
     return data
 
 

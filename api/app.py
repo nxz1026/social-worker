@@ -1158,7 +1158,12 @@ def _pending_bases() -> list[Path]:
             ROOT / "vault-huimin" / "md" / "_待确认"]
 
 def _safe_pending_path(rel: str) -> Path:
-    """把请求里的相对路径限制在 `_待确认` 目录内（防路径越界）。"""
+    """把请求里的相对路径限制在 `_待确认` 目录内（防路径越界）。
+
+    审计 #3：当前没有任何端点调用本函数（`_待确认` 相关端点已随旧流程删除）。
+    保留原因：若将来恢复 `_待确认` 处理，路径防护必须走这里，不能裸拼 ROOT。
+    恢复调用时务必补「路径越界返回 400」的测试。
+    """
     raw = (rel or "").strip()
     if not raw:
         raise HTTPException(400, "缺 path")

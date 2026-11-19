@@ -113,7 +113,7 @@ def verify(conn, plain: str) -> dict | None:
         row = cur.fetchone()
     if not row:
         return None
-    # 理论上唯一；再做一次常量时间比对，防止未来索引/查询被改坏
+    # key_hash 上有 UNIQUE 索引，SQL 等值查询已保证唯一；此处只校验状态
     if _row_invalid(row):
         return None
 
