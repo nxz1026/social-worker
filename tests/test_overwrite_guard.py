@@ -95,3 +95,47 @@ def test_force_accepts_string_true(tmp_path):
     (act / "已有.docx").write_bytes(b"x")
     dst = app._fill_output(act, {"output": "已有.docx", "force": "true"}, _tpl(tmp_path))
     assert dst.name == "已有.docx"
+
+
+# ---------------- force 参数解析（审计发现） ----------------
+
+def test_force_flag_accepts_valid_values():
+    """标准布尔表示都能认。"""
+    for v in [True, "true", "TRUE", "1", "yes", "on"]:
+        assert app._force_flag(v) is True, f"{v!r} 应为 True"
+    for v in [False, "false", "0", "no", "off", 0]:
+        assert app._force_flag(v) is False, f"{v!r} 应为 False"
+
+
+def test_force_flag_empty_means_false():
+    """表单没填 force 时给空串，不该报错。"""
+    assert app._force_flag("") is False
+    assert app._force_flag(None) is False
+
+
+def test_force_flag_invalid_gives_force_message():
+    """非法值报错文案要说 force，不能说 enabled（原实现复用了 _as_bool）。"""
+    with pytest.raises(app.ApiError) as exc:
+        app._force_flag("abc")
+    assert exc.value.status_code == 400
+    assert "force" in exc.value.message
+    assert "enabled" not in exc.value.message
+
+
+def test_corrupt_activity_yaml_still_blocked(tmp_path):
+    """activity.yaml 损坏时必须仍要确认，不能因为读不出 status 就放行。
+
+    审计发现的绕过路径：把 yaml 写坏等于关掉覆盖保护。
+    """
+    act = _act_dir(tmp_path, None)
+    (act / "activity.yaml").write_text("这不是合法 yaml: [unclosed", encoding="utf-8")
+    (act / "已有.docx").write_bytes(b"x")
+    with pytest.raises(app.ApiError) as exc:
+        app._fill_output(act, {"output": "已有.docx"}, _tpl(tmp_path))
+    assert exc.value.status_code == 409
+    assert exc.value.code == "NEED_FORCE"
+    assert "无法解析" in exc.value.message
+
+    # 带 force 仍可覆盖
+    dst = app._fill_output(act, {"output": "已有.docx", "force": True}, _tpl(tmp_path))
+    assert dst.name == "已有.docx"

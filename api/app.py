@@ -2320,6 +2320,26 @@ def _activity_require_code(act_dir: Path) -> None:
         raise HTTPException(400, "activity.yaml 缺 code，无法生成材料")
 
 
+def _force_flag(value) -> bool:
+    """解析 force 参数。非法值给 force 专属的报错文案，不复用 enabled 的。
+
+    空串 / None 按 False 处理：表单没填这一项时不该报错。
+    """
+    if value is None:
+        return False
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text == "":
+        return False
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    raise ApiError(400, "VALIDATION", f"force 必须是布尔值，收到 {value!r}",
+                   "传 true 或 false，或不传")
+
+
 # 生成件被覆盖的保护：这些状态下目标文件视为「用户可能改过」，
 # 不加 force=true 不允许覆盖（覆盖不可撤销，手改内容会直接消失）。
 _OVERWRITE_GUARD_STATUS = {"generated", "imported", "signed", "edited", "reviewed"}
@@ -2335,7 +2355,14 @@ def _overwrite_block_reason(act_dir: Path, dst: Path) -> str:
     """
     if not dst.exists():
         return ""
-    meta = _activity_yaml_data(act_dir)
+    # activity.yaml 读不出来（损坏/解析失败）时按「状态不明」处理，要求确认。
+    # 否则把 yaml 写坏就等于关掉了保护 —— 审计发现的绕过路径。
+    raw_meta = _ingest.read_activity_yaml  # 便于测试 monkeypatch
+    try:
+        meta = raw_meta(act_dir)
+    except ValueError:
+        return ("activity.yaml 无法解析，无法判断是否有人工修改；"
+                "确认覆盖请传 force=true（建议先修好 activity.yaml）")
     status = str(meta.get("status") or "").strip().lower()
     if status in _OVERWRITE_GUARD_STATUS - {"generated"}:
         return (f"目标文件已存在且活动状态为 {status}，"
@@ -2355,7 +2382,7 @@ def _fill_output(act_dir: Path, body: dict, tpl: Path,
     dst = _safe_rel_path(act_dir, out_rel)
     if not dst.suffix:
         dst = dst.with_name(dst.name + tpl.suffix)
-    if check_overwrite and not _as_bool(body.get("force", False)):
+    if check_overwrite and not _force_flag(body.get("force", False)):
         reason = _overwrite_block_reason(act_dir, dst)
         if reason:
             raise ApiError(409, "NEED_FORCE", reason,
