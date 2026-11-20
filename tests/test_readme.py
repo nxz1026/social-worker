@@ -60,7 +60,8 @@ def test_render_activity_table_and_icons(fake_root):
     assert "## 材料清单" in text
     assert "| 序号 | 材料 | 状态 | 文件 |" in text
     assert "| 1 | 活动计划 | ✅ | [[01-计划书.docx]] |" in text
-    assert "| 3 | 签到表 | ⚠️ 待补 | （无） |" in text
+    # 待补项要写清缺什么，不能只写（无）
+    assert "| 3 | 签到表 | ⚠️ 待补 | ⚠️ 有 03-签到表.docx，缺签字扫描件 |" in text
     assert "| 5 | 总结报告 | ❌ | （无） |" in text
     assert "| 15 | 其他 | — | （无） |" in text
     # 文件列表：目录显示文件数，内部文件不进清单

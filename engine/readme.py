@@ -115,17 +115,29 @@ def _matched_paths(act_dir: Path) -> dict[int, Path | None]:
     return out
 
 
-def _file_cell(path: Path | None, act_dir: Path) -> str:
-    """材料表格「文件」列：文件给 wikilink，目录给目录名，没找到写（无）。"""
+def _file_cell(path: Path | None, act_dir: Path,
+               status: str = "", detail: str = "") -> str:
+    """材料表格「文件」列：文件给 wikilink，目录给目录名，没找到写（无）。
+
+    「待补」要写清缺什么：光写（无）看不出是压根没做，还是做了但缺签字扫描件。
+    """
     if path is None:
+        # 待补但一个文件都没匹配到：说明缺的是整份材料
+        if status == "partial" and detail:
+            return f"⚠️ {_cell(detail)}"
         return "（无）"
     if path.is_dir():
-        return f"{_cell(path.name)}/"
-    try:
-        rel = path.relative_to(act_dir).as_posix()
-    except ValueError:
-        rel = path.name
-    return _wikilink(rel)
+        base = f"{_cell(path.name)}/"
+    else:
+        try:
+            rel = path.relative_to(act_dir).as_posix()
+        except ValueError:
+            rel = path.name
+        base = _wikilink(rel)
+    # 找到了文件但仍待补（例如只有未签字 docx）：把缺什么挂在后面
+    if status == "partial" and detail:
+        return f"{base}<br>⚠️ {_cell(detail)}"
+    return base
 
 
 def _visible_count(directory: Path) -> int:
@@ -186,7 +198,8 @@ def render_activity_readme(project_name: str, dirname: str) -> str:
             item["no"],
             _cell(item["name"]),
             _status_cell(item["status"]),
-            _file_cell(paths.get(item["no"]), act_dir),
+            _file_cell(paths.get(item["no"]), act_dir,
+                       status=item["status"], detail=item.get("detail", "")),
         ))
 
     lines += ["", "## 文件", ""]
