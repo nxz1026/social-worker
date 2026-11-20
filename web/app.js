@@ -614,6 +614,7 @@ async function pageActivity(name, dirname, params) {
         <button class="btn" data-act="open-caption" ${canWrite() ? '' : 'disabled title="需 editor/admin"'}>生成图注</button>
         <button class="btn" data-act="open-sat" ${canWrite() ? '' : 'disabled title="需 editor/admin"'}>满意度统计</button>
         <button class="btn primary" data-act="open-fill" ${canWrite() ? '' : 'disabled title="需 editor/admin"'}>生成材料</button>
+        <button class="btn" data-act="open-photo-upload" ${canWrite() ? '' : 'disabled title="需 editor/admin"'}>上传照片</button>
         <button class="btn" data-act="act-upload" ${canWrite() ? '' : 'disabled title="需 editor/admin"'}>上传文件</button>
         <button class="btn" data-act="open-llm" ${canWrite() ? '' : 'disabled title="需 editor/admin"'}>LLM 生成</button>
         <button class="btn" data-act="do-check">核对</button>
@@ -852,6 +853,226 @@ async function uploadActivityFile() {
     el('#actUpMsg').innerHTML = `<div class="notice">上传失败：${esc(e.message)}</div>`;
     toast('上传失败：' + e.message, 'err');   // 409/400/413 显示后端 detail
   }
+}
+
+/* ---------------- 活动照片批量上传 ---------------- */
+// 本地日期（toISOString 是 UTC，跨时区会差一天）
+const todayIso = () => {
+  const d = new Date();
+  const p = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+};
+
+async function openPhotoUploadModal() {
+  if (!actCtx) return;
+  if (!canWrite()) { toast('需 editor/admin 权限', 'warn'); return; }
+  const { projectName, dirname } = actCtx;
+  actCtx.photo = {
+    files: [], hashes: [], precheck: null, busy: false,
+    project: projectName, activity: dirname,
+  };
+  openModal('上传活动照片', `
+    <div class="form-grid">
+      <label class="field"><span>项目 *</span><select id="photoProject"></select></label>
+      <label class="field"><span>活动 *</span><select id="photoActivity"></select></label>
+      <label class="field"><span>拍摄日期 *</span>
+        <input type="date" id="photoDate" max="${todayIso()}" value="${todayIso()}"></label>
+      <label class="field"><span>场景（可选）</span>
+        <input type="text" id="photoScene" placeholder="主会场 / 分组走访"></label>
+      <label class="field full"><span>照片（最多 200 张，单张 ≤50MB）</span>
+        <div id="photoDrop" class="photo-drop">
+          <input type="file" id="photoFiles" accept="image/*" multiple hidden>
+          <div>拖拽照片到这里，或 <a href="#" data-act="photo-pick">选择文件</a></div>
+          <div id="photoSelInfo" class="hint">已选 0 张 / 0 MB</div>
+        </div>
+      </label>
+    </div>
+    <label class="row" style="margin-top:10px;gap:6px">
+      <input type="checkbox" id="photoAllowDup">
+      <span class="hint">允许重复上传（跳过 24 小时同日期同场景批次检查）</span>
+    </label>
+    <div id="photoMsg" class="hint" style="margin-top:8px"></div>
+    <div id="photoResult"></div>
+  `, `<button class="btn" data-close-modal>取消</button>
+      <button class="btn" data-act="photo-precheck">重新预检</button>
+      <button class="btn primary" data-act="photo-upload" id="photoUploadBtn" disabled>上传</button>`);
+
+  const selP = el('#photoProject');
+  const projects = await ensureProjects().catch(() => []);
+  selP.innerHTML = (projects || [])
+    .map(p => `<option value="${esc(p.name)}">${esc(p.name)}</option>`).join('');
+  selP.value = projectName;
+  selP.addEventListener('change', () => loadPhotoActivities(selP.value, ''));
+
+  const drop = el('#photoDrop');
+  drop.addEventListener('dragover', e => { e.preventDefault(); drop.classList.add('over'); });
+  drop.addEventListener('dragleave', () => drop.classList.remove('over'));
+  drop.addEventListener('drop', e => {
+    e.preventDefault();
+    drop.classList.remove('over');
+    setPhotoFiles(Array.from(e.dataTransfer.files || []));
+  });
+  el('#photoFiles').addEventListener('change', e => setPhotoFiles(Array.from(e.target.files || [])));
+
+  await loadPhotoActivities(projectName, dirname);
+}
+
+async function loadPhotoActivities(project, preferred) {
+  const sel = el('#photoActivity');
+  if (!sel) return;
+  sel.innerHTML = '<option value="">加载中…</option>';
+  try {
+    const d = await api('/projects/' + enc(project) + '/activities');
+    const names = d.existing || [];
+    sel.innerHTML = names.length
+      ? names.map(n => `<option value="${esc(n)}">${esc(n)}</option>`).join('')
+      : '<option value="">（该项目还没有活动目录）</option>';
+    if (preferred && names.includes(preferred)) sel.value = preferred;
+  } catch (e) {
+    sel.innerHTML = '<option value="">加载失败</option>';
+    toast('活动列表加载失败：' + e.message, 'warn');
+  }
+}
+
+function setPhotoFiles(files) {
+  const st = actCtx && actCtx.photo;
+  if (!st) return;
+  const images = files.filter(f => /\.(jpe?g|png|gif|bmp|webp)$/i.test(f.name));
+  const ignored = files.length - images.length;
+  st.files = images.slice(0, 200);
+  st.hashes = [];
+  st.precheck = null;
+  const bytes = st.files.reduce((n, f) => n + f.size, 0);
+  el('#photoSelInfo').textContent = `已选 ${st.files.length} 张 / ${fmtBytes(bytes)}`
+    + (images.length > 200 ? '（超出 200 张，已截断）' : '')
+    + (ignored ? `（忽略 ${ignored} 个非图片文件）` : '');
+  el('#photoResult').innerHTML = '';
+  el('#photoMsg').textContent = '';
+  const btn = el('#photoUploadBtn');
+  if (btn) btn.disabled = !st.files.length;
+  if (st.files.length) runPhotoPrecheck();
+}
+
+// 浏览器端 SHA-256：Web Crypto 只收 ArrayBuffer，逐张算避免大文件卡死
+async function fileSha256(file) {
+  const buf = await file.arrayBuffer();
+  const digest = await crypto.subtle.digest('SHA-256', buf);
+  return Array.from(new Uint8Array(digest))
+    .map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+async function runPhotoPrecheck() {
+  const st = actCtx && actCtx.photo;
+  if (!st || !st.files.length) { toast('先选择照片', 'warn'); return; }
+  const project = el('#photoProject').value;
+  const activity = el('#photoActivity').value;
+  const date = el('#photoDate').value;
+  const scene = el('#photoScene').value.trim();
+  if (!project || !activity) { toast('项目和活动必填', 'warn'); return; }
+  if (!date) { toast('拍摄日期必填', 'warn'); return; }
+  if (date > todayIso()) { toast('拍摄日期不能晚于今天', 'warn'); return; }
+
+  st.project = project;
+  st.activity = activity;
+  const msg = el('#photoMsg');
+  const btn = el('#photoUploadBtn');
+  st.busy = true;
+  if (btn) btn.disabled = true;
+
+  try {
+    if (!(window.crypto && crypto.subtle)) {
+      st.precheck = { new: st.files.length, duplicated: [], duplicate_batch: null };
+      msg.textContent = '当前环境不支持浏览器哈希，跳过预检；上传时由服务端按 sha256 去重。';
+      if (btn) btn.disabled = false;
+      return;
+    }
+    st.hashes = [];
+    for (let i = 0; i < st.files.length; i++) {
+      st.hashes.push(await fileSha256(st.files[i]));
+      // 每 3 张让出一次主线程，进度条才动得起来
+      if (i % 3 === 0 || i === st.files.length - 1) {
+        msg.textContent = `计算哈希 ${i + 1}/${st.files.length}…`;
+        await new Promise(r => setTimeout(r, 0));
+      }
+    }
+    msg.textContent = '预检中…';
+    const r = await api('/sw/photos/precheck', { method: 'POST', body: {
+      project, activity, hashes: st.hashes, shot_date: date, scene,
+    } });
+    st.precheck = r;
+    const dup = new Set(r.duplicated || []);
+    const dupNames = st.files.filter((f, i) => dup.has(st.hashes[i])).map(f => f.name);
+    let text = `新增 ${r.new} 张 / 重复 ${(r.duplicated || []).length} 张`;
+    if (dupNames.length) {
+      text += `（${dupNames.slice(0, 3).join('、')}${dupNames.length > 3 ? ' 等' : ''}）`;
+    }
+    if (r.duplicate_batch) {
+      text += `；24 小时内已传过同日期同场景批次 ${r.duplicate_batch}，需勾选「允许重复上传」`;
+    }
+    msg.textContent = text;
+    if (btn) btn.disabled = false;
+  } catch (e) {
+    msg.innerHTML = `<span class="err">预检失败：${esc(e.message)}</span>`;
+    toast('预检失败：' + e.message, 'err');
+    if (btn) btn.disabled = !st.files.length;
+  } finally {
+    st.busy = false;
+  }
+}
+
+async function uploadPhotos() {
+  const st = actCtx && actCtx.photo;
+  if (!st || !st.files.length) { toast('先选择照片', 'warn'); return; }
+  if (st.busy) { toast('正在预检，请稍候', 'warn'); return; }
+  const project = el('#photoProject').value;
+  const activity = el('#photoActivity').value;
+  const date = el('#photoDate').value;
+  const scene = el('#photoScene').value.trim();
+  const allowDup = el('#photoAllowDup').checked;
+  if (!date) { toast('拍摄日期必填', 'warn'); return; }
+  if (date > todayIso()) { toast('拍摄日期不能晚于今天', 'warn'); return; }
+  if (st.precheck && st.precheck.duplicate_batch && !allowDup) {
+    toast('该批次 24 小时内已上传过；确认重复请勾选「允许重复上传」', 'warn');
+    return;
+  }
+
+  const fd = new FormData();
+  fd.append('project', project);
+  fd.append('activity', activity);
+  fd.append('shot_date', date);
+  fd.append('scene', scene);
+  fd.append('note', '');
+  fd.append('allow_duplicate', allowDup ? 'true' : 'false');
+  fd.append('compress', 'true');
+  st.files.forEach(f => fd.append('files', f, f.name));
+
+  el('#photoMsg').textContent = `上传中（${st.files.length} 张）…`;
+  el('#photoUploadBtn').disabled = true;
+  try {
+    const r = await api('/sw/photos/upload', { method: 'POST', body: fd });
+    renderPhotoReceipt(r);
+    toast(`已上传 ${r.saved} 张，跳过 ${(r.skipped || []).length} 张`,
+      r.saved ? 'ok' : 'warn');
+  } catch (e) {
+    el('#photoMsg').innerHTML = `<span class="err">上传失败：${esc(e.message)}</span>`;
+    toast('上传失败：' + e.message, 'err');
+    el('#photoUploadBtn').disabled = false;
+  }
+}
+
+function renderPhotoReceipt(r) {
+  const reasons = { duplicate: '内容重复', exists: '同名已存在', invalid: '无法识别' };
+  const skipped = (r.skipped || []).map(s =>
+    `<li>${esc(s.original)} — ${esc(reasons[s.reason] || s.reason)}`
+    + `${s.existing ? `（已有 ${esc(s.existing)}）` : ''}</li>`).join('');
+  el('#photoResult').innerHTML = `
+    <div class="notice green" style="margin-top:10px">
+      批次 ${esc(r.batch_id)}：新增 ${r.saved} 张，跳过 ${(r.skipped || []).length} 张
+      ${r.total_bytes ? `，共 ${fmtBytes(r.total_bytes)}` : ''}
+    </div>
+    ${skipped ? `<div class="section-title">跳过明细</div><ul class="hint">${skipped}</ul>` : ''}`;
+  el('#photoMsg').textContent = '上传完成，点「完成」关闭并刷新。';
+  $('modalFoot').innerHTML = '<button class="btn primary" data-act="photo-done">完成</button>';
 }
 
 /* ---------------- 生成材料弹窗 ---------------- */
@@ -2166,6 +2387,11 @@ document.addEventListener('click', async e => {
     if (act === 'open-fill') { await openFillModal(); return; }
     if (act === 'act-upload') { await openActivityUploadModal(); return; }
     if (act === 'act-upload-run') { await uploadActivityFile(); return; }
+    if (act === 'open-photo-upload') { await openPhotoUploadModal(); return; }
+    if (act === 'photo-pick') { e.preventDefault(); el('#photoFiles').click(); return; }
+    if (act === 'photo-precheck') { await runPhotoPrecheck(); return; }
+    if (act === 'photo-upload') { await uploadPhotos(); return; }
+    if (act === 'photo-done') { closeModal(); await refreshActivity(); return; }
     if (act === 'fill-submit') { await submitFill(); return; }
     if (act === 'close-refresh') { closeModal(); await refreshActivity(); return; }
     if (act === 'open-llm') { await openLlmModal(); return; }

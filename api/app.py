@@ -14,6 +14,7 @@ import contextlib
 import fcntl
 import hashlib
 import importlib.util
+import io
 import json
 import mimetypes
 import os
@@ -30,6 +31,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -70,6 +72,7 @@ from engine import cognee_index as _cognee_index  # noqa: E402
 from engine import fill as _fill  # noqa: E402
 from engine import ingest as _ingest  # noqa: E402
 from engine import llm as _llm  # noqa: E402
+from engine import photos as _photos  # noqa: E402
 from engine import projects as _projects  # noqa: E402
 PG_DSN = SETTINGS.db_dsn
 TZ = timezone(timedelta(hours=SETTINGS.timezone_offset_hours))
@@ -3375,6 +3378,242 @@ def api_sw_search(q: str, project: str = "", limit: int = 10,
 
     results.sort(key=lambda item: item.get("score") or 0, reverse=True)
     return {"query": query, "results": results[:limit]}
+
+
+# ---------- 活动照片批量上传（docs/照片上传协议.md） ----------
+_PHOTO_MAX_FILES = 200
+_PHOTO_MAX_BYTES = 50 * 1024 * 1024
+_PHOTO_MAX_TOTAL = 500 * 1024 * 1024
+# 与 engine.photos.IMAGE_SUFFIXES 保持一致；这里单独写一份便于错误提示
+_PHOTO_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp"}
+
+
+def _photo_shot_date(raw: str, *, required: bool = True) -> str:
+    """校验拍摄日期：必填、YYYY-MM-DD、不晚于今天。返回原字符串。"""
+    text = str(raw or "").strip()
+    if not text:
+        if required:
+            raise ApiError(400, "VALIDATION", "拍摄日期必填",
+                           "格式 YYYY-MM-DD，例如 2026-11-10")
+        return datetime.now(TZ).strftime("%Y-%m-%d")
+    try:
+        day = datetime.strptime(text, "%Y-%m-%d").date()
+    except ValueError:
+        raise ApiError(400, "VALIDATION", f"拍摄日期格式应为 YYYY-MM-DD：{text}")
+    if day > datetime.now(TZ).date():
+        raise ApiError(400, "VALIDATION", f"拍摄日期不能晚于今天：{text}")
+    return text
+
+
+def _photo_payloads(files: list[UploadFile]) -> list[tuple[str, bytes]]:
+    """把上传文件读成 [(原文件名, 字节)]，顺带做张数/扩展名/单张大小校验。"""
+    if not files:
+        raise ApiError(400, "VALIDATION", "没有收到照片文件")
+    if len(files) > _PHOTO_MAX_FILES:
+        raise ApiError(400, "TOO_MANY_FILES",
+                       f"单次最多 {_PHOTO_MAX_FILES} 张，本次 {len(files)} 张",
+                       "分批上传，或打 zip 走 /api/sw/photos/upload-archive")
+    out: list[tuple[str, bytes]] = []
+    total = 0
+    for item in files:
+        name = str(item.filename or "")
+        suffix = Path(name).suffix.lower()
+        if suffix not in _PHOTO_EXTS:
+            raise ApiError(400, "NOT_AN_IMAGE",
+                           f"不是图片：{name or '（无文件名）'}",
+                           "只收 jpg/jpeg/png/gif/bmp/webp")
+        data = item.file.read()
+        if len(data) > _PHOTO_MAX_BYTES:
+            raise ApiError(413, "FILE_TOO_LARGE",
+                           f"单张超过 50 MB：{name}（{len(data) // 1024 // 1024} MB）")
+        total += len(data)
+        if total > _PHOTO_MAX_TOTAL:
+            raise ApiError(413, "FILE_TOO_LARGE",
+                           "单次上传总量超过 500 MB",
+                           "分批上传，或打 zip 走 /api/sw/photos/upload-archive")
+        out.append((name, data))
+    return out
+
+
+def _match_activity_dir(dirname: str, names: list[str]) -> str | None:
+    """压缩包一级目录名 → 活动目录名：先精确匹配，再按前缀匹配。"""
+    raw = str(dirname or "").strip().strip("/")
+    if not raw:
+        return None
+    if raw in names:
+        return raw
+    hits = [n for n in names if n.startswith(raw)]
+    return hits[0] if hits else None
+
+
+@app.post("/api/sw/photos/precheck")
+def api_sw_photos_precheck(body: dict, user=Depends(current_user)):
+    """body: {project, activity, hashes: [sha256...]}
+
+    只比对不落盘。返回 {new: int, duplicated: [hash...], duplicate_batch: str|None}
+    """
+    data = body if isinstance(body, dict) else {}
+    project = str(data.get("project") or "").strip()
+    activity = str(data.get("activity") or "").strip()
+    if not project or not activity:
+        raise ApiError(400, "VALIDATION", "project 与 activity 都必填")
+    act_dir, _meta = _sw_activity_dir(project, activity, user, write=False)
+
+    hashes = data.get("hashes") or []
+    if not isinstance(hashes, list):
+        raise ApiError(400, "VALIDATION", "hashes 必须是字符串数组")
+    checked = _photos.dedup_check(_photos.load_meta(act_dir),
+                                  [str(h) for h in hashes])
+
+    # 带 shot_date + scene 时顺带算一次 L3，前端可在上传前就提示整批重复
+    duplicate_batch = None
+    shot_date = str(data.get("shot_date") or "").strip()
+    if shot_date:
+        try:
+            _photos.target_name(shot_date, 1)
+        except ValueError as exc:
+            raise ApiError(400, "VALIDATION", str(exc))
+        duplicate_batch = _photos.batch_duplicate(
+            _photos.load_meta(act_dir), shot_date, str(data.get("scene") or ""))
+
+    return {"new": len(checked["new"]), "duplicated": checked["duplicated"],
+            "duplicate_batch": duplicate_batch}
+
+
+@app.post("/api/sw/photos/upload")
+def api_sw_photos_upload(
+        project: str = Form(...), activity: str = Form(...),
+        shot_date: str = Form(""), scene: str = Form(""), note: str = Form(""),
+        allow_duplicate: bool = Form(False), compress: bool = Form(True),
+        files: list[UploadFile] = File(...),
+        user=Depends(current_user), conn=Depends(db)):
+    """多文件批量上传。最多 200 张，单张 50MB；返回协议 §3.1 的结构。"""
+    act_dir, meta = _sw_activity_dir(project, activity, user, write=True)
+    day = _photo_shot_date(shot_date)
+    payloads = _photo_payloads(files)
+
+    result = _photos.save_photos(
+        act_dir, payloads, day, scene=scene, note=note,
+        uploaded_by=str(user.get("real_name") or user.get("username") or ""),
+        compress=bool(compress), allow_duplicate=bool(allow_duplicate))
+
+    if result.get("duplicate_batch"):
+        raise ApiError(
+            409, "DUPLICATE_BATCH",
+            f"24 小时内已上传过同活动、同日期、同场景的批次：{result['duplicate_batch']}",
+            "确认要再传一遍请带 allow_duplicate=true")
+
+    if result["saved"]:
+        audit(conn, user["id"], "upload_photos", project=meta["name"],
+              target=result["batch_id"],
+              detail={"activity": activity, "saved": result["saved"],
+                      "skipped": len(result["skipped"]),
+                      "shot_date": day, "scene": scene})
+
+    return {
+        "ok": True,
+        "batch_id": result["batch_id"],
+        "activity": activity,
+        "received": len(payloads),
+        "saved": result["saved"],
+        "skipped": result["skipped"],
+        "compressed": result["saved"] if compress else 0,
+        "paths": result["paths"],
+        "total_bytes": result["total_bytes"],
+    }
+
+
+@app.post("/api/sw/photos/upload-archive")
+def api_sw_photos_upload_archive(
+        project: str = Form(...), archive: UploadFile = File(...),
+        shot_date: str = Form(""), allow_duplicate: bool = Form(False),
+        user=Depends(current_user), conn=Depends(db)):
+    """zip 上传。一级目录名 = 活动目录名（允许前缀匹配，如 '11' 匹配 '11-共治行动-第一期'）。"""
+    meta = _sw_project_meta(project)
+    if user.get("role") not in ("admin", "editor"):
+        raise ApiError(403, "FORBIDDEN", "无写权限（需 editor/admin）")
+    check_project(user, meta["name"], write=True)
+
+    day = _photo_shot_date(shot_date, required=False)
+    fname = str(archive.filename or "")
+    if Path(fname).suffix.lower() != ".zip":
+        raise ApiError(400, "ARCHIVE_UNSUPPORTED",
+                       f"只支持 zip：{fname or '（无文件名）'}",
+                       "7z/rar 请先解压，或改用 /api/sw/photos/upload")
+
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(archive.file.read()))
+    except (zipfile.BadZipFile, OSError) as exc:
+        raise ApiError(400, "ARCHIVE_UNSUPPORTED", f"压缩包无法读取：{exc}")
+
+    act_root = Path(_projects.PROJECTS_ROOT) / meta["name"] / "活动"
+    names = (sorted(p.name for p in act_root.iterdir() if p.is_dir())
+             if act_root.is_dir() else [])
+
+    groups: dict[str, list[tuple[str, bytes]]] = {}
+    unmatched: dict[str, int] = {}
+    total_images = 0
+    with zf:
+        for info in zf.infolist():
+            if info.is_dir():
+                continue
+            parts = [p for p in info.filename.replace("\\", "/").split("/") if p]
+            if not parts or parts[0] == "__MACOSX":
+                continue
+            leaf = parts[-1]
+            if leaf.startswith(".") or Path(leaf).suffix.lower() not in _PHOTO_EXTS:
+                continue
+            if info.file_size > _PHOTO_MAX_BYTES:
+                raise ApiError(413, "FILE_TOO_LARGE",
+                               f"单张超过 50 MB：{info.filename}")
+            total_images += 1
+            dirname = parts[0] if len(parts) > 1 else ""
+            matched = _match_activity_dir(dirname, names)
+            if not matched:
+                key = dirname or "（根目录）"
+                unmatched[key] = unmatched.get(key, 0) + 1
+                continue
+            data = zf.read(info)
+            if len(data) > _PHOTO_MAX_BYTES:      # 声明大小可能造假，读后再核一次
+                raise ApiError(413, "FILE_TOO_LARGE",
+                               f"单张超过 50 MB：{info.filename}")
+            groups.setdefault(matched, []).append((leaf, data))
+
+    if total_images == 0:
+        raise ApiError(400, "ARCHIVE_EMPTY", "压缩包里没有图片")
+    if not groups:
+        raise ApiError(400, "NO_MATCHED_ACTIVITY",
+                       "压缩包内目录都匹配不上活动",
+                       "一级目录名用活动目录名或它的前缀，如 11-共治行动-第一期")
+
+    # 先统一做 L3 预检，避免写了一半才报重复
+    if not allow_duplicate:
+        for name in groups:
+            prev = _photos.batch_duplicate(
+                _photos.load_meta(act_root / name), day, "")
+            if prev:
+                raise ApiError(409, "DUPLICATE_BATCH",
+                               f"{name} 24 小时内已上传过同日期批次：{prev}",
+                               "确认要再传一遍请带 allow_duplicate=true")
+
+    matched_count: dict[str, int] = {}
+    total_saved = 0
+    for name, items in groups.items():
+        result = _photos.save_photos(
+            act_root / name, items, day,
+            uploaded_by=str(user.get("real_name") or user.get("username") or ""),
+            allow_duplicate=bool(allow_duplicate))
+        matched_count[name] = result["saved"]
+        total_saved += result["saved"]
+
+    if total_saved:
+        audit(conn, user["id"], "upload_photos_archive", project=meta["name"],
+              target=fname,
+              detail={"matched": matched_count, "unmatched": unmatched,
+                      "shot_date": day})
+
+    return {"ok": True, "matched": matched_count, "unmatched": unmatched,
+            "total_saved": total_saved}
 
 
 @app.get("/api/dashboard")
