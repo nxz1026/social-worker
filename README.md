@@ -122,7 +122,8 @@ curl -H "Authorization: Bearer sk-sw-xxx" https://<host>/sw-api/api/sw/capabilit
 
 | 文档 | 内容 |
 |---|---|
-| [API-使用说明](docs/API-使用说明.md) | Agent 接口：认证、错误码、11 个端点、工作流 |
+| [API-使用说明](docs/API-使用说明.md) | Agent 接口：认证、错误码、16 个端点、工作流 |
+| [照片上传协议](docs/照片上传协议.md) | 照片批量上传约定、三层防重复、压缩规格 |
 | [架构设计-v2](docs/架构设计-v2.md) | 多用户、权限矩阵、数据模型 |
 | [服务器部署](docs/服务器部署.md) | 服务清单、部署、数据库、同步、排障 |
 
