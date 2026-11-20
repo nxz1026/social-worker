@@ -1,0 +1,10 @@
+[Unit]
+Description=社工知识库：当日审计汇总 → 飞书
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/srv/social-work
+Environment=PATH=/home/ubuntu/.nvm/versions/node/v24.22.2/bin:/usr/local/bin:/usr/bin:/bin
+Environment=HOME=/home/ubuntu
+ExecStart=/usr/bin/python3 /srv/social-work/scripts/audit.py --send

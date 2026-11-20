@@ -1,0 +1,11 @@
+[Unit]
+Description=每 15 分钟扫一次飞书未分类
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=15min
+AccuracySec=1min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,11 @@
+[Unit]
+Description=社工工作台：刷新活动/项目 README 索引（Obsidian 用）
+
+[Service]
+Type=oneshot
+WorkingDirectory=/srv/social-work
+Environment=PATH=/home/ubuntu/.nvm/versions/node/v24.22.2/bin:/usr/local/bin:/usr/bin:/bin
+Environment=HOME=/home/ubuntu
+Environment=SOCIAL_WORK_ROOT=/srv/social-work
+EnvironmentFile=-/srv/social-work/.env.service
+ExecStart=/usr/bin/python3 /srv/social-work/scripts/refresh_readme.py

@@ -1,0 +1,10 @@
+[Unit]
+Description=每小时把 projects 镜像到飞书云文档
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=1h
+Persistent=false
+
+[Install]
+WantedBy=timers.target

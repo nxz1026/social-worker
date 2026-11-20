@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -31,6 +32,12 @@ from engine.projects import PROJECTS_ROOT  # noqa: E402
 ROOT = Path(PROJECTS_ROOT)
 # 飞书「已分类/益嘉仁」
 FEISHU_YIJIAREN = "CRXgfg1ljlJiUadvmPMcJA0CnLg"
+
+# 不该进飞书的本地同步元数据（Obsidian 配置 / Syncthing 标记 / 回收站）。
+# 之前没排除，导致飞书上出现 .obsidian/、.stfolder/、.stignore 的重名副本。
+FEISHU_SKIP_DIRS = {".obsidian", ".stfolder", ".stversions", ".trash", "__pycache__",
+                    ".thumbs"}
+FEISHU_SKIP_FILES = {".stignore", ".DS_Store", "Thumbs.db"}
 
 
 def lark(*args, timeout=3600) -> dict:
@@ -102,8 +109,15 @@ def push(project: str, folder_token: str | None = None,
         print(f"    [dry-run] 将镜像 {proj_dir} → {folder_token}")
         return {"name": name, "pushed": False, "uploaded": None, "skipped": None}
 
-    d = lark("+push", "--local-dir", str(proj_dir), "--folder-token", folder_token,
+    # lark-cli +push 不支持排除清单，直接推会带上 .obsidian/.stfolder/.stignore
+    # 并和上一轮推送形成重名副本。改为：先把项目目录硬链/复制到暂存目录，
+    # 剔除同步元数据后再推，从源头避免污染。
+    staged = _stage_project(proj_dir)
+    d = lark("+push", "--local-dir", str(staged), "--folder-token", folder_token,
              "--if-exists", "smart", timeout=7200)
+    # 推完再删：+push 返回后不会再读暂存区。之前放 /tmp 且立刻删，
+    # 报的是路径解析问题（不是删除时机）；现在路径正确，删除安全。
+    shutil.rmtree(staged.parent, ignore_errors=True)
     if "ok" in d and not d["ok"]:
         print(f"    镜像失败：{str(d)[:300]}")
         return {"name": name, "pushed": False, "uploaded": None, "skipped": None}
@@ -114,7 +128,97 @@ def push(project: str, folder_token: str | None = None,
     skip = (data.get("skipped") or data.get("skipped_files")
             or data.get("skip") or "")
     print(f"    镜像完成：上传 {up} {('跳过 ' + str(skip)) if skip else ''}")
-    return {"name": name, "pushed": True, "uploaded": up, "skipped": skip}
+    # 清理历史遗留的同步元数据（暂存已从源头挡住，这里只处理之前推上去的）
+    removed = _prune_feishu_meta(folder_token)
+    if removed:
+        print(f"    清理历史元数据：删掉 {removed} 项")
+    return {"name": name, "pushed": True, "uploaded": up, "skipped": skip,
+            "pruned": removed}
+
+
+def _stage_project(proj_dir: Path) -> Path:
+    """把项目目录复制到临时暂存区，剔除同步元数据后返回暂存路径。
+
+    用复制而不是硬链：硬链跟原文件共享 inode，改一边影响另一边，
+    而这里只需要一份干净的推送快照。文件数不多（几十到几百），复制够快。
+    """
+    # 暂存区必须放在 local-dir 的父级可控位置：lark-cli 会用 ../../ 相对解析
+    # --file，放到 /tmp 下会被解析成 /tmp/../../tmp/... 而找不到文件。
+    # 放在 state/feishu-stage 下，与 projects 同级。
+    import tempfile
+
+    stage_root = REPO_ROOT / "state" / "feishu-stage"
+    stage_root.mkdir(parents=True, exist_ok=True)
+    staged = Path(tempfile.mkdtemp(prefix="stage-", dir=stage_root)) / proj_dir.name
+    shutil.copytree(
+        proj_dir, staged,
+        ignore=shutil.ignore_patterns(*FEISHU_SKIP_DIRS, *FEISHU_SKIP_FILES),
+        symlinks=False,
+    )
+    return staged
+
+
+def _lark_api(method: str, path: str, **params) -> dict:
+    """调飞书开放 API（lark-cli api 逃生舱）。"""
+    cmd = ["lark-cli", "api", method, path, "--json"]
+    if params:
+        cmd += ["--params", json.dumps(params, ensure_ascii=False)]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        return json.loads(r.stdout)
+    except Exception:
+        return {"ok": False}
+
+
+def _list_children(folder_token: str) -> list[dict]:
+    """列一个目录的直接子项（分页取全）。"""
+    out, page = [], ""
+    while True:
+        params = {"folder_token": folder_token, "page_size": 200}
+        if page:
+            params["page_token"] = page
+        d = _lark_api("GET", "/open-apis/drive/v1/files", **params)
+        if not d.get("ok"):
+            break
+        data = d.get("data") or {}
+        out.extend(data.get("files") or [])
+        if not data.get("has_more"):
+            break
+        page = data.get("next_page_token") or ""
+        if not page:
+            break
+    return out
+
+
+def _prune_feishu_meta(folder_token: str, depth: int = 0) -> int:
+    """递归删掉远端的同步元数据目录/文件，返回删除数量。
+
+    depth 上限防目录环；删目录用 type=folder，删文件用 type=file。
+    """
+    if depth > 8:
+        return 0
+    removed = 0
+    for f in _list_children(folder_token):
+        name = str(f.get("name") or "")
+        typ = f.get("type")
+        tok = f.get("token")
+        if not tok:
+            continue
+        if name in FEISHU_SKIP_DIRS or name in FEISHU_SKIP_FILES:
+            kind = "folder" if typ == "folder" else "file"
+            r = subprocess.run(
+                ["lark-cli", "drive", "+delete", "--file-token", tok,
+                 "--type", kind, "--yes", "--json"],
+                capture_output=True, text=True, timeout=120)
+            try:
+                if json.loads(r.stdout).get("ok"):
+                    removed += 1
+            except Exception:
+                pass
+            continue
+        if typ == "folder":
+            removed += _prune_feishu_meta(tok, depth + 1)
+    return removed
 
 
 def sync(project: str | list[str] | None = "", dry_run: bool = False) -> list[dict]:

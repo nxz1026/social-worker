@@ -1,0 +1,11 @@
+[Unit]
+Description=每 15 分钟对账一次（vault → Cognee/飞书/台账）
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=15min
+AccuracySec=1min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

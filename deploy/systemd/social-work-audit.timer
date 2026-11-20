@@ -1,0 +1,10 @@
+[Unit]
+Description=每天 22:00（北京时间）发社工知识库审计汇总
+
+[Timer]
+# 系统时区是 UTC，所以写明 Asia/Shanghai —— systemd 会换算成 14:00 UTC
+OnCalendar=*-*-* 22:00:00 Asia/Shanghai
+Persistent=false
+
+[Install]
+WantedBy=timers.target

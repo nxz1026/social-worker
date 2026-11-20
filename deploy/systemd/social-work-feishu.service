@@ -1,0 +1,12 @@
+[Unit]
+Description=社工工作台：本地 projects 镜像到飞书云文档
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/srv/social-work
+Environment=PATH=/home/ubuntu/.nvm/versions/node/v24.22.2/bin:/usr/local/bin:/usr/bin:/bin
+Environment=HOME=/home/ubuntu
+Environment=SOCIAL_WORK_ROOT=/srv/social-work
+ExecStart=/usr/bin/python3 /srv/social-work/scripts/sync_feishu.py
+TimeoutStartSec=7200

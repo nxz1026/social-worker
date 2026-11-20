@@ -1,0 +1,10 @@
+[Unit]
+Description=每 15 分钟刷新社工工作台 README 索引
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=15min
+Persistent=false
+
+[Install]
+WantedBy=timers.target

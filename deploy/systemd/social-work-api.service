@@ -1,0 +1,17 @@
+[Unit]
+Description=社工文档服务 API（FastAPI，127.0.0.1:8001）
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/srv/social-work
+Environment=PATH=/home/ubuntu/.local/bin:/home/ubuntu/.nvm/versions/node/v24.22.2/bin:/usr/local/bin:/usr/bin:/bin
+Environment=HOME=/home/ubuntu
+Environment=SOCIAL_WORK_ROOT=/srv/social-work
+EnvironmentFile=/srv/social-work/.env.service
+ExecStart=/usr/bin/python3 /srv/social-work/api/app.py
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target
