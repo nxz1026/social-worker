@@ -60,6 +60,7 @@ social-worker/
 ├── deploy.sh              同步到生产并重启
 └── docs/
     ├── API-使用说明.md     面向 Agent 的接口文档
+    ├── 照片上传协议.md      照片批量上传约定与三层防重复
     ├── 架构设计-v2.md      多用户 + 权限 + API 架构
     └── 服务器部署.md       运维手册
 ```
@@ -72,6 +73,9 @@ social-worker/
 | T2 活动后 | 现场照片 | 简报、总结报告、满意度汇总表、图注 |
 | T3 报账 | 发票 | 决算表、报销单、发票明细表（含三表校验） |
 | T4 归档 | — | 15 项核对 + 归档目录 |
+
+**覆盖保护**：`/api/sw/run` 目标文件已存在、且活动 `status` 为 `reviewed`/`signed`/`edited`/`imported`
+时返回 409 `NEED_FORCE`，需显式传 `force=true` 才覆盖。纯生成件（`generated` 或未标注）直接覆盖。
 
 ## 代码 vs LLM 的分工
 

@@ -2320,13 +2320,46 @@ def _activity_require_code(act_dir: Path) -> None:
         raise HTTPException(400, "activity.yaml 缺 code，无法生成材料")
 
 
-def _fill_output(act_dir: Path, body: dict, tpl: Path) -> Path:
-    """解析输出路径：默认「模板名.扩展名」，限制在活动目录内。"""
+# 生成件被覆盖的保护：这些状态下目标文件视为「用户可能改过」，
+# 不加 force=true 不允许覆盖（覆盖不可撤销，手改内容会直接消失）。
+_OVERWRITE_GUARD_STATUS = {"generated", "imported", "signed", "edited", "reviewed"}
+
+
+def _overwrite_block_reason(act_dir: Path, dst: Path) -> str:
+    """判断覆盖 dst 是否需要显式确认；返回原因，可覆盖时返回空串。
+
+    规则：
+      1. 目标不存在 → 可写
+      2. activity.yaml 里 status 属于「可能被人工改过」的集合 → 需确认
+      3. status 明确是纯生成（未标 status 也算纯生成）→ 允许直接覆盖
+    """
+    if not dst.exists():
+        return ""
+    meta = _activity_yaml_data(act_dir)
+    status = str(meta.get("status") or "").strip().lower()
+    if status in _OVERWRITE_GUARD_STATUS - {"generated"}:
+        return (f"目标文件已存在且活动状态为 {status}，"
+                f"覆盖会丢失人工修改内容；确认覆盖请传 force=true")
+    return ""
+
+
+def _fill_output(act_dir: Path, body: dict, tpl: Path,
+                 *, check_overwrite: bool = True) -> Path:
+    """解析输出路径：默认「模板名.扩展名」，限制在活动目录内。
+
+    check_overwrite=True 时（默认），目标已存在且活动状态表明可能人工改过，
+    且调用方没给 force=true，就抛 409 NEED_FORCE，避免静默覆盖。
+    """
     default = f"{tpl.stem}{tpl.suffix}"
     out_rel = str(body.get("output") or default).strip()
     dst = _safe_rel_path(act_dir, out_rel)
     if not dst.suffix:
         dst = dst.with_name(dst.name + tpl.suffix)
+    if check_overwrite and not _as_bool(body.get("force", False)):
+        reason = _overwrite_block_reason(act_dir, dst)
+        if reason:
+            raise ApiError(409, "NEED_FORCE", reason,
+                           "确认无人工修改后重发请求并带上 force=true")
     return dst
 
 
@@ -2875,7 +2908,6 @@ def _sw_run_impl(body: dict, request: Request, conn, user) -> dict:
     if not isinstance(extra, dict):
         raise ApiError(400, "VALIDATION", "data 必须是对象")
     style = str(body.get("style") or "")
-    dry_run = bool(body.get("dry_run", False))
 
     # 生成材料的前置条件：活动必须有编号
     try:
@@ -2893,7 +2925,9 @@ def _sw_run_impl(body: dict, request: Request, conn, user) -> dict:
         tpl = _sw_template(tpl_name)
     else:
         tpl = _sw_template(template)
-    dst_rel = _fill_output(act_dir, body, tpl)
+    # dry_run 写到临时目录、不碰原文件，因此不参与覆盖检查
+    dry_run = bool(body.get("dry_run", False))
+    dst_rel = _fill_output(act_dir, body, tpl, check_overwrite=not dry_run)
     generated: dict = {}
     self_check = None
 

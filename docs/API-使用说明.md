@@ -161,6 +161,7 @@ DELETE /api/sw/keys/{key_id}   # 吊销（软删，写 revoked_at）
 | `TEMPLATE_NOT_FOUND` | 404 | 模板不存在 |
 | `VALIDATION` | 400 | 参数校验失败 |
 | `LLM_FAILED` | 502 | 上游 LLM 调用失败 |
+| `NEED_FORCE` | 409 | 目标文件已存在且可能被人工改过，需 `force=true` |
 | `DUPLICATE_NAME` | 409 | 同名文件已存在（项目资料上传） |
 | `DUPLICATE_BATCH` | 409 | 24 小时内同活动+同日期+同场景已传过（照片） |
 | `TOO_MANY_FILES` | 400 | 单请求超 200 张（照片） |
@@ -262,6 +263,7 @@ curl -X POST -H "Authorization: Bearer sk-sw-xxx" -H "Content-Type: application/
 | `data` | 覆盖字段，key 就是占位符名，不带 `{{}}` |
 | `output` | 输出文件名，默认 `<模板名>.docx` |
 | `dry_run` | `true` 不落盘，只返回预览 |
+| `force` | `true` 允许覆盖已存在且可能被人工改过的文件（见下） |
 
 **返回**：
 
@@ -293,7 +295,25 @@ curl -X POST -H "Authorization: Bearer sk-sw-xxx" -H "Content-Type: application/
 
 `self_check.ok` 只查文风，查不出「生成了但没填进模板」。**判交付看 `delivery.complete`。**
 
-### 5.2 各 task 的输出字段
+### 5.2 覆盖保护（重要）
+
+`render` 直接覆盖目标文件，**没有覆盖就没有了**。为防止 Agent 静默盖掉人工修改过的材料，约定：
+
+| 目标文件 | 活动 `activity.yaml` 的 `status` | 行为 |
+|---|---|---|
+| 不存在 | 任意 | 直接写 |
+| 已存在 | `generated` 或未标注 | 直接写（纯生成件） |
+| 已存在 | `reviewed` / `signed` / `edited` / `imported` | **409 `NEED_FORCE`** |
+
+```json
+{"error":{"code":"NEED_FORCE",
+  "message":"目标文件已存在且活动状态为 reviewed，覆盖会丢失人工修改内容；确认覆盖请传 force=true",
+  "hint":"确认无人工修改后重发请求并带上 force=true"}}
+```
+
+**调用方处理**：确认要覆盖时重发请求并带 `"force": true`。`dry_run=true` 不受此限制（它写临时目录）。
+
+### 5.3 各 task 的输出字段
 
 **字段名 = 模板占位符名**，所以 `task` 模式必须配 `template`（或用默认映射）：
 
@@ -315,7 +335,7 @@ curl -X POST -H "Authorization: Bearer sk-sw-xxx" -H "Content-Type: application/
 展开后对应 `{{环节内容_1}}`…`{{环节内容_5}}`、`{{预计困难_1}}`…、`{{物资名称_1}}`…。
 **超出模板行数会截断**并在 `missing` 里体现。
 
-### 5.3 数据来源
+### 5.4 数据来源
 
 `data` 不传时，engine 自动从项目 yaml + `activity.yaml` 组装：
 
