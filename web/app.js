@@ -418,6 +418,8 @@ async function pageProject(name) {
     <div class="crumb"><a href="#/dashboard">仪表盘</a> / 项目</div>
     ${pageHead(projectShort(proj), esc(p.name || name), `
       <a class="btn" href="#/project/${enc(name)}/activities">活动列表</a>
+      <button class="btn" data-act="open-projfile" data-project="${esc(name)}"
+        ${canWrite() ? '' : 'disabled title="需 editor/admin"'}>上传项目资料</button>
       <a class="btn primary" href="#/project/${enc(name)}/activities?view=plan">按指标建目录</a>`)}
     <div class="stats">
       <div class="stat"><div class="k">计划活动</div><div class="v">${planned.length}</div></div>
@@ -862,6 +864,65 @@ const todayIso = () => {
   const p = n => String(n).padStart(2, '0');
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
 };
+
+/* 项目级资料上传：不属于任何活动的文档（中期评估、管理制度、合同等）。
+   服务端二元判断：命中 19 项清单就归到对应项，不命中落 其他/ 并给改名建议。 */
+async function openProjectFileModal(project) {
+  if (!canWrite()) { toast('需 editor/admin 权限', 'warn'); return; }
+  openModal('上传项目资料', `
+    <div class="form-grid">
+      <label class="field"><span>项目</span>
+        <input type="text" id="pfProject" value="${esc(project)}" readonly></label>
+      <label class="field"><span>文件</span>
+        <input type="file" id="pfFile" accept=".docx,.xlsx,.doc,.xls,.pdf,.zip,.7z">
+      </label>
+    </div>
+    <div class="hint" style="margin-top:10px">
+      命中文档清单（19 项）的文件自动归到对应项，落在 <code>报告/</code>；
+      认不出的落在 <code>其他/</code>，返回规范的命名建议。
+    </div>
+    <div id="pfMsg" class="hint" style="margin-top:8px"></div>
+    <div id="pfResult"></div>
+  `, `<button class="btn" data-close-modal>取消</button>
+      <button class="btn primary" data-act="pf-upload" id="pfUploadBtn">上传</button>`);
+}
+
+async function doProjectFileUpload() {
+  const project = el('#pfProject')?.value || '';
+  const input = el('#pfFile');
+  const file = input?.files && input.files[0];
+  const msg = el('#pfMsg');
+  const btn = el('#pfUploadBtn');
+  if (!file) { msg.textContent = '请先选择文件'; return; }
+  btn.disabled = true;
+  msg.textContent = '上传中…';
+  try {
+    const fd = new FormData();
+    fd.append('project', project);
+    fd.append('file', file);
+    const r = await api('/sw/project-files/upload', { method: 'POST', body: fd });
+    const m = r.matched;
+    const sug = r.suggestion;
+    el('#pfResult').innerHTML = `
+      <div class="card" style="margin-top:10px">
+        <div class="kv-row"><span class="k">已保存</span>
+          <span class="v mono">${esc(r.stored)}</span></div>
+        <div class="kv-row"><span class="k">大小</span>
+          <span class="v">${(r.size / 1024 / 1024).toFixed(2)} MB</span></div>
+        <div class="kv-row"><span class="k">归属</span>
+          <span class="v">${m ? `清单第 ${m.item} 项：${esc(m.name)}` : '未命中清单，已放入 其他/'}</span></div>
+        ${sug && sug.rename_to ? `
+        <div class="kv-row"><span class="k">建议命名</span>
+          <span class="v mono">${esc(sug.rename_to)}</span></div>
+        <div class="hint">${esc(sug.hint || ('改名为上面这个，就能自动归到第 ' + (sug.item || '?') + ' 项'))}</div>` : ''}
+      </div>`;
+    msg.textContent = '';
+  } catch (e) {
+    msg.textContent = '上传失败：' + e.message;
+  } finally {
+    btn.disabled = false;
+  }
+}
 
 async function openPhotoUploadModal() {
   if (!actCtx) return;
@@ -2388,6 +2449,8 @@ document.addEventListener('click', async e => {
     if (act === 'act-upload') { await openActivityUploadModal(); return; }
     if (act === 'act-upload-run') { await uploadActivityFile(); return; }
     if (act === 'open-photo-upload') { await openPhotoUploadModal(); return; }
+    if (act === 'open-projfile') { await openProjectFileModal(node.dataset.project || parseHash().parts[1] || ''); return; }
+    if (act === 'pf-upload') { await doProjectFileUpload(); return; }
     if (act === 'photo-pick') { e.preventDefault(); el('#photoFiles').click(); return; }
     if (act === 'photo-precheck') { await runPhotoPrecheck(); return; }
     if (act === 'photo-upload') { await uploadPhotos(); return; }
