@@ -324,3 +324,104 @@ def test_sw_task_stub():
     out = app.api_sw_task("t-1", ADMIN)
     assert out["id"] == "t-1"
     assert out["status"] == "done"
+
+
+# ---------------- 审计修复回归（2026-11-20） ----------------
+
+def test_safe_rel_path_rejects_encoded_traversal(tmp_path):
+    """审计 P1-6：`%2f` 编码后的 `..` 与绝对路径必须拒绝。"""
+    from fastapi import HTTPException
+    for bad in ["..%2f..%2fx.docx", "%2fescape.docx", "%252e%252e/x.docx", "../x.docx"]:
+        with pytest.raises(HTTPException) as exc:
+            app._safe_rel_path(tmp_path, bad)
+        assert exc.value.status_code == 400, f"{bad} 应被拒绝"
+    # 正常文件名仍然通过
+    assert app._safe_rel_path(tmp_path, "ok.docx").name == "ok.docx"
+
+
+def test_safe_rel_path_rejects_overlong_segment(tmp_path):
+    """审计 P1-5：单段超 200 字节要 400，不能落到 500。"""
+    from fastapi import HTTPException
+    with pytest.raises(HTTPException) as exc:
+        app._safe_rel_path(tmp_path, "a" * 300 + ".docx")
+    assert exc.value.status_code == 400
+    assert app._safe_rel_path(tmp_path, "a" * 50 + ".docx").name.endswith(".docx")
+
+
+def test_require_admin_blocks_api_key():
+    """审计 P0-1：API Key 不能访问 /api/admin/*。"""
+    from fastapi import HTTPException
+    keyed = {"id": 4, "username": "admin", "role": "admin",
+             "auth_type": "api_key", "projects": {}}
+    with pytest.raises(HTTPException) as exc:
+        app.require_admin(keyed)
+    assert exc.value.status_code == 403
+    assert "API Key" in str(exc.value.detail)
+
+    # Web 会话仍可用
+    session_user = {"id": 4, "username": "admin", "role": "admin",
+                    "auth_type": "session", "projects": {}}
+    assert app.require_admin(session_user) is session_user
+
+
+def test_admin_cannot_disable_self():
+    """不能禁用自己：禁用后 Web 与 API 都进不来（审计发现的实际事故）。
+
+    直接调端点，验证 400 而不是靠条件推断。
+    """
+    from fastapi import HTTPException
+
+    conn = _db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id, username, role FROM users WHERE role='admin' "
+                        "ORDER BY id LIMIT 1")
+            row = cur.fetchone()
+        if not row:
+            pytest.skip("库里没有 admin")
+        uid = row[0]
+        admin_user = {"id": uid, "username": row[1], "role": "admin",
+                      "auth_type": "session", "projects": {}}
+        req = _fake_request()
+
+        with pytest.raises(HTTPException) as exc:
+            app.admin_update_user(uid, {"enabled": False}, req, conn, admin_user)
+        assert exc.value.status_code == 400
+        assert "不能禁用自己" in str(exc.value.detail)
+
+        with pytest.raises(HTTPException) as exc2:
+            app.admin_update_user(uid, {"role": "viewer"}, req, conn, admin_user)
+        assert exc2.value.status_code == 400
+        assert "管理员角色" in str(exc2.value.detail)
+
+        # 确认库里状态没被改坏
+        with conn.cursor() as cur:
+            cur.execute("SELECT role, enabled FROM users WHERE id=%s", (uid,))
+            role, enabled = cur.fetchone()
+        assert role == "admin" and enabled is True
+    finally:
+        conn.close()
+
+
+def _fake_request():
+    """构造 admin_update_user 需要的 Request（只用到 client.host）。"""
+    class _Client:
+        host = "127.0.0.1"
+
+    class _Req:
+        client = _Client()
+    return _Req()
+
+
+# 本文件的多数用例用假 DSN（离线跑），只有需要真实库的用例走这个
+REAL_DSN = (os.environ.get("SOCIALWORK_REAL_TEST_DSN")
+            or "host=127.0.0.1 port=5432 dbname=socialwork user=admin password=tjfjyjr")
+
+
+def _db():
+    """连真实库；连不上就 skip，不假通过。"""
+    psycopg = pytest.importorskip("psycopg")
+    try:
+        return psycopg.connect(REAL_DSN)
+    except Exception as exc:
+        pytest.skip(f"连不上数据库：{exc}")

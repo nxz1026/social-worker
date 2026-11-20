@@ -28,6 +28,7 @@ import sys
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
@@ -364,7 +365,15 @@ def require_write(user=Depends(current_user)):
         raise HTTPException(403, "无写权限（需 editor/admin）")
     return user
 
+# API Key 只用于 Agent 干活，不能接管用户管理与审计（审计 P0-1）。
+# 用户此前明确「除用户管理外所有功能」，这里把管理面单独关掉。
+API_KEY_BLOCKED_PREFIX = "/api/admin/"
+
+
 def require_admin(user=Depends(current_user)):
+    if user.get("auth_type") == "api_key":
+        raise HTTPException(
+            403, "API Key 不能访问管理接口（用户管理与审计只允许 Web 登录会话）")
     if user["role"] != "admin":
         raise HTTPException(403, "需 admin")
     return user
@@ -1425,11 +1434,18 @@ def admin_update_user(uid: int, body: dict, request: Request, conn=Depends(db),
             cur.execute("UPDATE users SET real_name=%s WHERE id=%s",
                         (str(body["real_name"] or "").strip(), uid))
         if "role" in body:
-            cur.execute("UPDATE users SET role=%s WHERE id=%s",
-                        (_valid_role(body["role"]), uid))
+            new_role = _valid_role(body["role"])
+            # 不能把自己降级：降完就没有 admin 能进管理页（审计发现的实际事故）
+            if uid == user["id"] and new_role != "admin":
+                raise HTTPException(400, "不能修改自己的管理员角色")
+            cur.execute("UPDATE users SET role=%s WHERE id=%s", (new_role, uid))
         if "enabled" in body:
+            new_enabled = _as_bool(body["enabled"])
+            # 不能禁用自己：禁用后 Web 与 API 都进不来，只能改库恢复
+            if uid == user["id"] and not new_enabled:
+                raise HTTPException(400, "不能禁用自己")
             cur.execute("UPDATE users SET enabled=%s WHERE id=%s",
-                        (_as_bool(body["enabled"]), uid))
+                        (new_enabled, uid))
         if "password" in body and body["password"]:
             cur.execute("UPDATE users SET password_hash=%s WHERE id=%s",
                         (hash_pw(body["password"]), uid))
@@ -1861,7 +1877,16 @@ def _safe_rel_path(base: Path, rel: str, *, allow_empty: bool = False) -> Path:
     先拒绝绝对路径与任何 `..` 段，再归一化并做 resolve 越界检查；
     这样 `../`、`a/../../b`、绝对路径都回 400，不会被 normpath 悄悄抹平。
     """
-    raw = str(rel or "").strip().replace("\\", "/")
+    # 先 URL 解码再校验：否则 `..%2f..%2fx.docx`、`%2Fabs.docx` 这类编码形式
+    # 能绕过 `..` 与绝对路径检查（审计 P1-6 实测过）。
+    # 解码两次覆盖 `%252e` 这种双重编码。
+    raw_text = str(rel or "").strip()
+    for _ in range(2):
+        decoded = urllib.parse.unquote(raw_text)
+        if decoded == raw_text:
+            break
+        raw_text = decoded
+    raw = raw_text.replace("\\", "/")
     if not raw:
         if allow_empty:
             return base.resolve()
@@ -1870,6 +1895,9 @@ def _safe_rel_path(base: Path, rel: str, *, allow_empty: bool = False) -> Path:
         raise HTTPException(400, "路径必须是相对路径")
     if any(seg == ".." for seg in raw.split("/")):
         raise HTTPException(400, "路径不能包含 ..")
+    # 文件名长度上限：Linux NAME_MAX 255，留余量给扩展名与 .trash 前缀
+    if any(len(seg.encode("utf-8")) > 200 for seg in raw.split("/")):
+        raise HTTPException(400, "路径段过长（单段上限 200 字节）")
     norm = _normalize_rel(raw)
     if not norm:
         raise HTTPException(400, "路径非法")
@@ -3220,9 +3248,21 @@ def api_sw_batch(body: dict, request: Request, conn=Depends(db),
                 if action == "check":
                     act_dir, _meta = _sw_activity_dir(name, activity, user, write=False)
                     check = _checks.check(act_dir)
+                    # 补生成前置条件（审计 P1-7）：核对清单不含「有没有编号」，
+                    # 但缺编号时 generate 必然失败，调用方据 check 无法预判。
+                    issues = list(check.get("issues") or [])
+                    try:
+                        _activity_require_code(act_dir)
+                    except HTTPException:
+                        issues.append({
+                            "code": "CODE_MISSING",
+                            "message": "activity.yaml 缺 code，无法生成材料",
+                        })
                     row.update(status="ok", detail={
-                        "complete": check.get("complete"),
-                        "issues": check.get("issues") or [],
+                        "complete": check.get("complete") and not issues,
+                        "issues": issues,
+                        "generatable": not any(
+                            i.get("code") == "CODE_MISSING" for i in issues),
                     })
                 elif action == "generate":
                     payload = {**params, "project": name, "activity": activity}
