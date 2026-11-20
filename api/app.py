@@ -3446,6 +3446,108 @@ def _match_activity_dir(dirname: str, names: list[str]) -> str | None:
     return hits[0] if hits else None
 
 
+def _project_level_suggestion(filename: str, project_dir: Path) -> dict | None:
+    """不命中任何清单项时给一条改名建议。
+
+    只做粗猜：把关键词逐个往文件名上试，命中最多关键词的那项优先；
+    一个都猜不中就给通用格式，让调用方自己填清单项名。
+    """
+    name = str(filename or "")
+    best, best_hits = None, 0
+    for item in _project_checks.PROJECT_CHECKLIST:
+        hits = sum(1 for kw in item["keywords"] if kw in name)
+        if hits > best_hits:
+            best, best_hits = item, hits
+    stem = Path(name).stem
+    suffix = Path(name).suffix or ".docx"
+    stamp = datetime.now().strftime("%Y%m%d")
+    if best:
+        # 建议名 = {清单项关键词}-{原标题}-{日期}，关键词放最前便于自动匹配
+        head = best["keywords"][0]
+        return {
+            "item": best["no"],
+            "item_name": best["name"],
+            "rename_to": f"{head}-{stem}-{stamp}{suffix}",
+            "keywords": list(best["keywords"]),
+        }
+    return {
+        "item": None,
+        "item_name": None,
+        "rename_to": f"清单项名称-{stem}-{stamp}{suffix}",
+        "keywords": [],
+        "hint": "文件名未命中任何清单项关键词，请按「清单项关键词-内容-日期」命名",
+    }
+
+
+@app.post("/api/sw/project-files/upload")
+def api_sw_project_file_upload(
+    project: str = Form(...),
+    file: UploadFile = File(...),
+    user=Depends(current_user),
+    conn=Depends(db),
+):
+    """上传项目级文件（不属于任何活动的资料）。
+
+    二元判断：命中清单项就正常入库并回报归到哪一项；不命中就落到 其他/，
+    并返回规范命名建议。**不拒绝、不猜、不自动分类** —— 用户上传是为了
+    存住和能搜到，认不出是什么不该挡人。
+    """
+    meta = _sw_project_meta(project)
+    check_project(user, meta["name"], write=True)
+    name = _sw_project_meta(meta["name"])  # 归一后重取，拿真实目录名
+    project_dir = _projects._project_dir(name["name"])
+    filename = _activity_upload_filename(file.filename or "")
+
+    root = project_dir
+    # 命中清单项 → 落 报告/；否则落 其他/
+    prefix_dirs = {"方案", "协议", "报告", "其他"}
+    matched_item = None
+    for item in _project_checks.PROJECT_CHECKLIST:
+        if any(kw in filename for kw in item["keywords"]):
+            matched_item = item
+            break
+    target_leaf = "报告" if matched_item else "其他"
+    target_dir = root / target_leaf
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    dest = target_dir / filename
+    if dest.exists():
+        raise ApiError(409, "DUPLICATE_NAME", f"同名文件已存在：{filename}")
+
+    max_mb = int(SETTINGS.upload.get("max_mb", 50))
+    max_bytes = max_mb * 1024 * 1024
+    size = 0
+    try:
+        with open(dest, "xb") as fh:
+            while True:
+                chunk = file.file.read(1 << 20)
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > max_bytes:
+                    dest.unlink(missing_ok=True)
+                    raise ApiError(413, "FILE_TOO_LARGE", f"文件超过 {max_mb} MB")
+                fh.write(chunk)
+    except FileExistsError:
+        raise ApiError(409, "DUPLICATE_NAME", f"同名文件已存在：{filename}")
+
+    rel = dest.relative_to(root).as_posix()
+    out = {
+        "stored": rel,
+        "size": size,
+        "matched": None,
+    }
+    if matched_item:
+        out["matched"] = {"item": matched_item["no"], "name": matched_item["name"]}
+    else:
+        out["suggestion"] = _project_level_suggestion(filename, project_dir)
+
+    audit(conn, user["id"], "upload_project_file", project=meta["name"],
+          target=rel, detail={"size": size, "matched": bool(matched_item)},
+          ip="api")
+    return out
+
+
 @app.post("/api/sw/photos/precheck")
 def api_sw_photos_precheck(body: dict, user=Depends(current_user)):
     """body: {project, activity, hashes: [sha256...]}
