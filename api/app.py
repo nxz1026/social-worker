@@ -112,17 +112,20 @@ app.add_middleware(
 from api import admin as _admin_module  # noqa: E402
 from api import auth as _auth_module  # noqa: E402
 from api.routes import docs as _r_docs  # noqa: E402
+from api.routes import activities as _r_activities  # noqa: E402
 from api.routes import projects as _r_projects  # noqa: E402
 
 app.include_router(_auth_module.router)
 app.include_router(_admin_module.router)
 app.include_router(_r_docs.router)
 app.include_router(_r_projects.router)
+app.include_router(_r_activities.router)
 # 测试直接按名字调端点函数（tests/test_api_web.py），这里保留同名入口。
 from api.routes.projects import (api_check_project, api_create_project,  # noqa: E402,F401
                                  api_get_project, api_list_activities,
                                  api_list_projects, api_project_code,
                                  api_update_project)
+from api.routes.activities import api_activity_detail  # noqa: E402,F401
 
 # 测试的 autouse fixture 只 patch app.audit（7 个测试文件都这么做）。routes 里的
 # 端点从 shared.audit 模块全局名取 audit，所以让 shared.audit.audit 与 app.audit
@@ -724,55 +727,6 @@ def generate(body: dict, request: Request, user=Depends(current_user),
     return {"ok": True, "content": content, "truncated": finish == "length",
             "finish_reason": finish}
 
-@app.post("/api/projects/{name}/activities/split")
-def api_split_activities(name: str, body: dict, user=Depends(current_user)):
-    """按 indicators 建活动目录。body: {"dry_run": true/false}，默认只预演。"""
-    meta = project_meta_or_404(name)
-    require_project_write(user, meta)
-    try:
-        data = _projects.load_project(name)
-    except FileNotFoundError:
-        raise HTTPException(404, f"项目不存在：{name}")
-    except ValueError as exc:
-        raise HTTPException(400, str(exc))
-    planned = _activities.plan_activities(data)
-    planned_names = [a["dirname"] for a in planned]
-    project_dir = Path(_projects.PROJECTS_ROOT) / name
-
-    if bool(body.get("dry_run", True)):
-        existing = set(_activities.list_existing_activities(project_dir))
-        return {
-            "dry_run": True,
-            "would_create": [d for d in planned_names if d not in existing],
-            "would_skip": [d for d in planned_names if d in existing],
-        }
-
-    created = _activities.create_activity_dirs(project_dir, planned)
-    created_set = set(created)
-    return {
-        "dry_run": False,
-        "created": created,
-        "skipped": [d for d in planned_names if d not in created_set],
-    }
-
-
-@app.patch("/api/projects/{name}/activities/{dirname}")
-def api_rename_activity(name: str, dirname: str, body: dict,
-                        user=Depends(current_user)):
-    """重命名活动目录。body: {"new_name": "..."}。"""
-    meta = project_meta_or_404(name)
-    require_project_write(user, meta)
-    new_name = str(body.get("new_name") or "").strip()
-    if not new_name:
-        raise HTTPException(400, "new_name 不能为空")
-    project_dir = Path(_projects.PROJECTS_ROOT) / name
-    try:
-        _activities.rename_activity_dir(project_dir, dirname, new_name)
-    except FileNotFoundError:
-        raise HTTPException(404, f"活动目录不存在：{dirname}")
-    except ValueError as exc:
-        raise HTTPException(400, str(exc))
-    return {"ok": True, "old": dirname, "new": new_name}
 
 @app.get("/api/projects/{name}/activities/{dirname}/check")
 def api_check_activity(name: str, dirname: str, user=Depends(current_user)):
@@ -923,31 +877,6 @@ def _activity_mtime(act_dir: Path) -> float:
     return latest
 
 
-
-@app.get("/api/projects/{name}/activities/{dirname}")
-def api_activity_detail(name: str, dirname: str, user=Depends(current_user)):
-    """活动详情：编号 / 状态 / 顶层文件 / 子目录文件数 / 15 项核对。"""
-    act_dir, _meta = activity_meta_or_404(name, dirname, user)
-    act = activity_yaml_data(act_dir)
-
-    files: list[dict] = []
-    dirs: list[dict] = []
-    for p in sorted(act_dir.iterdir(), key=lambda x: x.name):
-        if p.name.startswith("."):
-            continue
-        if p.is_dir():
-            dirs.append({"name": p.name, "count": _count_files(p)})
-        elif p.is_file():
-            files.append(_file_item(p))
-
-    return {
-        "dirname": dirname,
-        "code": str(act.get("code") or ""),
-        "status": str(act.get("status") or ""),
-        "files": files,
-        "dirs": dirs,
-        "check": _checks.check(act_dir),
-    }
 
 
 @app.get("/api/projects/{name}/activities/{dirname}/files")

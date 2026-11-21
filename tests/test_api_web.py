@@ -24,6 +24,7 @@ os.environ.setdefault(
     "SOCIALWORK_DB_DSN", "host=127.0.0.1 port=5432 dbname=test user=test password=x")
 
 import app  # noqa: E402
+from api.routes.activities import api_activity_detail  # noqa: E402
 
 ADMIN = {"id": 1, "username": "admin", "role": "admin",
          "projects": {"huimin": "write", "huadu": "write", "jili": "write"}}
@@ -140,7 +141,7 @@ def test_update_project_overwrites_yaml(projects_root):
 
 def test_activity_detail(projects_root):
     _activity(projects_root, "惠民项目", "01-走访调研-第一期")
-    out = app.api_activity_detail("惠民项目", "01-走访调研-第一期", ADMIN)
+    out = api_activity_detail("惠民项目", "01-走访调研-第一期", ADMIN)
 
     assert out["dirname"] == "01-走访调研-第一期"
     assert out["code"] == "CDYJR2026008-C-16110001"
@@ -209,7 +210,7 @@ def test_viewer_admin_endpoint_403(projects_root):
 def test_editor_foreign_project_403(projects_root):
     _activity(projects_root, "花都项目", "01-走访调研-第一期")
     with pytest.raises(app.HTTPException) as exc:
-        app.api_activity_detail("花都项目", "01-走访调研-第一期", EDITOR)
+        api_activity_detail("花都项目", "01-走访调研-第一期", EDITOR)
     assert exc.value.status_code == 403
 
 
