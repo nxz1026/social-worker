@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import secrets
 import threading
+import time
 from datetime import datetime, timezone
 
 import psycopg
@@ -60,12 +61,36 @@ def _row_invalid(row) -> bool:
     return not bool(enabled)
 
 
-def _touch_last_used(key_id: int) -> None:
-    """异步更新 last_used_at：独立线程 + 独立连接，失败静默。
+# last_used_at 是「尽力而为」的统计字段，不是安全审计依据。
+# 原实现每次认证都开一个新线程 + 新连接，资源随请求数 1:1 增长；
+# 数据库变慢时会堆积线程和连接，反过来拖垮主认证链路（审计 I-03）。
+# 现在加两道闸：同 key 节流（window 内只写一次）+ 全局并发上限。
+_TOUCH_MIN_INTERVAL = 60.0           # 秒；同一个 key 至少隔这么久才再写
+_TOUCH_MAX_THREADS = 4               # 同时在跑的 touch 线程上限
+_touch_last: dict[int, float] = {}   # key_id -> 上次写库的 monotonic 时间
+_touch_lock = threading.Lock()
+_touch_running = 0
 
-    这里是「尽力而为」的统计字段，不能因为写库慢或失败把认证拖垮。
+
+def _touch_last_used(key_id: int) -> None:
+    """节流后异步更新 last_used_at：独立线程 + 独立连接，失败静默。
+
+    节流不会让统计失真到有害程度（60 秒粒度对「最后使用时间」足够），
+    但能把高频调用的资源开销从 O(请求数) 压到 O(时间/60s)。
     """
+    global _touch_running
+    now = time.monotonic()
+    with _touch_lock:
+        last = _touch_last.get(key_id, 0.0)
+        if now - last < _TOUCH_MIN_INTERVAL:
+            return                      # 节流：窗口内不重复写
+        if _touch_running >= _TOUCH_MAX_THREADS:
+            return                      # 并发已满：这次统计直接丢弃
+        _touch_last[key_id] = now
+        _touch_running += 1
+
     def work() -> None:
+        global _touch_running
         try:
             with psycopg.connect(SETTINGS.db_dsn) as conn:
                 with conn.cursor() as cur:
@@ -75,8 +100,15 @@ def _touch_last_used(key_id: int) -> None:
                 conn.commit()
         except Exception:
             pass
+        finally:
+            with _touch_lock:
+                _touch_running -= 1
 
-    threading.Thread(target=work, daemon=True).start()
+    try:
+        threading.Thread(target=work, daemon=True).start()
+    except RuntimeError:                # 起不了线程就放弃统计，不影响认证
+        with _touch_lock:
+            _touch_running -= 1
 
 
 def load_projects(conn, user_id: int, role: str) -> dict[str, str]:

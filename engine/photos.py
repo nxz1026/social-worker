@@ -11,8 +11,12 @@
 """
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import hashlib
 import json
+import os
+import secrets
 import math
 import re
 from datetime import datetime, timedelta, timezone
@@ -149,6 +153,27 @@ def _empty_meta() -> dict:
     return {"batches": [], "photos": [], "hashes": {}}
 
 
+@contextlib.contextmanager
+def activity_lock(act_dir: Path):
+    """活动级跨进程互斥：包住「读 meta → 分配序号 → 写图 → 写 meta」。
+
+    单靠 save_meta 的原子 replace 只能保证文件不残缺，保证不了
+    「读—算—写」这组操作互斥：两个请求会拿到同一个序号、覆盖同一张图、
+    最后 meta 只记住其中一个（审计 I-01）。用 fcntl 排他锁覆盖整个临界区，
+    多 worker / 多进程都有效。
+    """
+    base = Path(act_dir)
+    base.mkdir(parents=True, exist_ok=True)
+    lock_path = base / f".{META_NAME}.lock"
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
 def load_meta(act_dir: Path) -> dict:
     """读 _photos.json，不存在返回 {"batches": [], "photos": [], "hashes": {}}。"""
     path = Path(act_dir) / META_NAME
@@ -176,7 +201,9 @@ def save_meta(act_dir: Path, meta: dict) -> None:
     base = Path(act_dir)
     base.mkdir(parents=True, exist_ok=True)
     path = base / META_NAME
-    tmp = base / (META_NAME + ".tmp")
+    # 临时名带 pid+随机后缀：即使外部没拿锁，也不会两个写者互相覆盖 .tmp
+    # （固定名会让并发下的 replace 报 FileNotFoundError）
+    tmp = base / f"{META_NAME}.{os.getpid()}.{secrets.token_hex(4)}.tmp"
     tmp.write_text(json.dumps(meta, ensure_ascii=False, indent=2) + "\n",
                    encoding="utf-8")
     tmp.replace(path)
@@ -296,6 +323,20 @@ def save_photos(act_dir: Path, files: list[tuple[str, bytes]],
     day = _compact_date(shot_date)            # 顺带校验日期
     photo_dir = base / PHOTO_SUBDIR
     photo_dir.mkdir(parents=True, exist_ok=True)
+
+    # 整个「读 meta → 算序号 → 写图 → 写 meta」必须在同一临界区内，
+    # 否则两个并发上传会拿到同一序号、覆盖同一张图、meta 只记住一个（审计 I-01）。
+    with activity_lock(base):
+        return _save_photos_locked(
+            base, photo_dir, day, files, scene, note, uploaded_by,
+            compress, allow_duplicate)
+
+
+def _save_photos_locked(base: Path, photo_dir: Path, day: str,
+                        files: list[tuple[str, bytes]], scene: str, note: str,
+                        uploaded_by: str, compress: bool,
+                        allow_duplicate: bool) -> dict:
+    """save_photos 的临界区本体，调用方已持有 activity_lock。"""
     meta = load_meta(base)
 
     # L3：整批重复不落盘，把上次批次号交回调用方决定是否强制

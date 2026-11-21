@@ -403,17 +403,23 @@ def upload_doc(
         # 本地来源的台账 key 由内容 hash 决定，归档前就能算出来，超时也能给客户端一个可查的 token
         token_hint = f"local-{sha[:16]}"
 
-        # 幂等：同一份内容已经归档过 → 直接回同一个 token，不产生第二份档案
+        # 幂等：同一份内容已经归档过 → 直接回同一个 token，不产生第二份档案。
+        # 但只能复用【调用方有权限的项目】里的记录：全台账按 sha256 找会命中
+        # 其他项目的同名内容，原实现直接返回那条记录的 token/文件名/md 路径，
+        # 等于跨项目元数据泄露（审计 I-04）。无权限就当作没命中，走正常归档。
         dup = _find_by_sha256(sha)
         if dup:
             dup_token, rec = dup
-            audit(conn, user["id"], "upload_duplicate", rec.get("project"), rec.get("name"),
-                  {"sha256": sha, "token": dup_token, "size": size},
-                  request.client.host)
-            return {"ok": True, "token": dup_token, "duplicate": True,
-                    "project": rec.get("project"), "category": rec.get("category"),
-                    "name": rec.get("name"), "status": rec.get("status"),
-                    "md": rec.get("md")}
+            dup_project = str(rec.get("project") or "")
+            if dup_project and dup_project in scopes_of(user, ""):
+                audit(conn, user["id"], "upload_duplicate", dup_project,
+                      rec.get("name"),
+                      {"sha256": sha, "token": dup_token, "size": size},
+                      request.client.host)
+                return {"ok": True, "token": dup_token, "duplicate": True,
+                        "project": rec.get("project"), "category": rec.get("category"),
+                        "name": rec.get("name"), "status": rec.get("status"),
+                        "md": rec.get("md")}
 
         # 受理即写审计：之后无论超时、断连还是服务重启，都能查到「谁在什么时候传了什么」
         audit(conn, user["id"], "upload_accepted", project, filename,
