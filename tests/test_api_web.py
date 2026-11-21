@@ -26,6 +26,8 @@ os.environ.setdefault(
 import app  # noqa: E402
 from api.routes.activities import api_activity_detail  # noqa: E402
 from api.routes.materials import api_activity_fill, api_activity_llm, api_activity_llm_fill
+from api.routes.assets import (api_activity_delete_file, api_activity_download,  # noqa: E402
+                               api_activity_files)
 
 ADMIN = {"id": 1, "username": "admin", "role": "admin",
          "projects": {"huimin": "write", "huadu": "write", "jili": "write"}}
@@ -154,7 +156,7 @@ def test_activity_detail(projects_root):
 
 def test_activity_files_sub(projects_root):
     _activity(projects_root, "惠民项目", "01-走访调研-第一期")
-    out = app.api_activity_files("惠民项目", "01-走访调研-第一期", "11-活动照片", ADMIN)
+    out = api_activity_files("惠民项目", "01-走访调研-第一期", "11-活动照片", ADMIN)
     assert out == [{"name": "a.jpg", "size": 3,
                     "mtime": out[0]["mtime"], "is_dir": False}]
 
@@ -162,29 +164,29 @@ def test_activity_files_sub(projects_root):
 def test_activity_files_traversal_400(projects_root):
     _activity(projects_root, "惠民项目", "01-走访调研-第一期")
     with pytest.raises(app.HTTPException) as exc:
-        app.api_activity_files("惠民项目", "01-走访调研-第一期", "../..", ADMIN)
+        api_activity_files("惠民项目", "01-走访调研-第一期", "../..", ADMIN)
     assert exc.value.status_code == 400
 
 
 def test_download_traversal_400(projects_root):
     _activity(projects_root, "惠民项目", "01-走访调研-第一期")
     with pytest.raises(app.HTTPException) as exc:
-        app.api_activity_download("惠民项目", "01-走访调研-第一期",
-                                  "../../../../etc/passwd", ADMIN)
+        api_activity_download("惠民项目", "01-走访调研-第一期",
+                              "../../../../etc/passwd", ADMIN)
     assert exc.value.status_code == 400
 
 
 def test_download_returns_file(projects_root):
     _activity(projects_root, "惠民项目", "01-走访调研-第一期")
-    resp = app.api_activity_download("惠民项目", "01-走访调研-第一期",
-                                     "11-活动照片/a.jpg", ADMIN)
+    resp = api_activity_download("惠民项目", "01-走访调研-第一期",
+                                 "11-活动照片/a.jpg", ADMIN)
     assert isinstance(resp, FileResponse)
     assert Path(resp.path).name == "a.jpg"
 
 
 def test_delete_file_moves_to_trash(projects_root):
     act = _activity(projects_root, "惠民项目", "01-走访调研-第一期")
-    out = app.api_activity_delete_file(
+    out = api_activity_delete_file(
         "惠民项目", "01-走访调研-第一期", {"path": "01-活动计划.docx"},
         _Req(), ADMIN, None)
 
@@ -196,7 +198,7 @@ def test_delete_file_moves_to_trash(projects_root):
 def test_viewer_write_403(projects_root):
     _activity(projects_root, "惠民项目", "01-走访调研-第一期")
     with pytest.raises(app.HTTPException) as exc:
-        app.api_activity_delete_file(
+        api_activity_delete_file(
             "惠民项目", "01-走访调研-第一期", {"path": "01-活动计划.docx"},
             _Req(), VIEWER, None)
     assert exc.value.status_code == 403

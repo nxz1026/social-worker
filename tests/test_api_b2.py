@@ -23,6 +23,9 @@ os.environ.setdefault(
 
 import app  # noqa: E402
 from api.routes.materials import api_activity_captions, api_captions_fill
+from api.routes.assets import (api_activity_photos, api_invoice_report,  # noqa: E402
+                               api_invoice_scan, api_sat_fill, api_sat_get,
+                               api_sat_list, api_sat_put)
 
 ADMIN = {"id": 1, "username": "admin", "role": "admin",
          "projects": {"huimin": "write", "huadu": "write"}}
@@ -119,7 +122,7 @@ def test_invoice_scan_returns_three_way_check(projects_root):
     act = _activity(projects_root)
     _invoice_set(act)
 
-    out = app.api_invoice_scan("惠民项目", ACT, ADMIN)
+    out = api_invoice_scan("惠民项目", ACT, ADMIN)
 
     assert out["决算"]["value"] == 1662
     assert out["报销"]["value"] == 1662
@@ -133,7 +136,7 @@ def test_invoice_scan_returns_three_way_check(projects_root):
 def test_invoice_scan_viewer_403(projects_root):
     _activity(projects_root)
     with pytest.raises(app.HTTPException) as exc:
-        app.api_invoice_scan("惠民项目", ACT, VIEWER)
+        api_invoice_scan("惠民项目", ACT, VIEWER)
     assert exc.value.status_code == 403
 
 
@@ -142,7 +145,7 @@ def test_invoice_report_writes_detail_sheet(projects_root):
     _invoice_set(act)
     _report_template(projects_root)
 
-    out = app.api_invoice_report("惠民项目", ACT, {}, ADMIN)
+    out = api_invoice_report("惠民项目", ACT, {}, ADMIN)
 
     assert out["count"] == 3
     assert out["total"] == 1662
@@ -158,12 +161,12 @@ def test_invoice_report_custom_output_and_traversal(projects_root):
     _invoice_set(act)
     _report_template(projects_root)
 
-    out = app.api_invoice_report(
+    out = api_invoice_report(
         "惠民项目", ACT, {"output": "12-发票/明细-自定义.xlsx"}, ADMIN)
     assert (act / out["path"]).is_file()
 
     with pytest.raises(app.HTTPException) as exc:
-        app.api_invoice_report("惠民项目", ACT, {"output": "../逃逸.xlsx"}, ADMIN)
+        api_invoice_report("惠民项目", ACT, {"output": "../逃逸.xlsx"}, ADMIN)
     assert exc.value.status_code == 400
 
 
@@ -176,7 +179,7 @@ def test_photos_lists_images_and_marks_default(projects_root):
     (folder / "微信图片_001.jpg").write_bytes(b"img")
     (folder / "说明.txt").write_text("不是图片", encoding="utf-8")
 
-    out = app.api_activity_photos("惠民项目", ACT, user=ADMIN)
+    out = api_activity_photos("惠民项目", ACT, user=ADMIN)
 
     assert [item["name"] for item in out] == ["全景-01.jpg", "微信图片_001.jpg"]
     by_name = {item["name"]: item for item in out}
@@ -190,7 +193,7 @@ def test_photos_lists_images_and_marks_default(projects_root):
 
 def test_photos_missing_subdir_returns_empty(projects_root):
     _activity(projects_root)
-    assert app.api_activity_photos("惠民项目", ACT, "99-不存在", ADMIN) == []
+    assert api_activity_photos("惠民项目", ACT, "99-不存在", ADMIN) == []
 
 
 def test_captions_use_picked_files(projects_root, monkeypatch):
@@ -280,7 +283,7 @@ def test_sat_list_creates_scores_and_keeps_existing(projects_root):
           "satisfied": True}], ensure_ascii=False), encoding="utf-8")
 
     (folder / "微信图片_20261115193203_153_107.jpg").write_bytes(b"")
-    out = app.api_sat_list("惠民项目", ACT, ADMIN)
+    out = api_sat_list("惠民项目", ACT, ADMIN)
 
     assert out[0]["score"] == 92 and out[0]["satisfied"] is True
     assert out[-1] == {"file": "微信图片_20261115193203_153_107.jpg",
@@ -292,23 +295,23 @@ def test_sat_list_creates_scores_and_keeps_existing(projects_root):
 def test_sat_get_returns_saved_scores(projects_root):
     act = _activity(projects_root)
     _survey_photos(act, count=1)
-    app.api_sat_list("惠民项目", ACT, ADMIN)
+    api_sat_list("惠民项目", ACT, ADMIN)
 
-    out = app.api_sat_get("惠民项目", ACT, ADMIN)
+    out = api_sat_get("惠民项目", ACT, ADMIN)
     assert out == [{"file": "微信图片_20261115193201_151_107.jpg",
                     "score": None, "satisfied": None}]
 
 
 def test_sat_get_without_file_returns_empty(projects_root):
     _activity(projects_root)
-    assert app.api_sat_get("惠民项目", ACT, ADMIN) == []
+    assert api_sat_get("惠民项目", ACT, ADMIN) == []
 
 
 def test_sat_put_writes_scores(projects_root):
     act = _activity(projects_root)
     _survey_photos(act, count=2)
 
-    out = app.api_sat_put("惠民项目", ACT, {"scores": [
+    out = api_sat_put("惠民项目", ACT, {"scores": [
         {"file": "微信图片_20261115193201_151_107.jpg", "score": 91,
          "satisfied": True},
         {"file": "微信图片_20261115193202_152_107.jpg", "score": 88,
@@ -324,7 +327,7 @@ def test_sat_put_writes_scores(projects_root):
 def test_sat_put_rejects_non_numeric_score(projects_root):
     _activity(projects_root)
     with pytest.raises(app.HTTPException) as exc:
-        app.api_sat_put("惠民项目", ACT, {"scores": [
+        api_sat_put("惠民项目", ACT, {"scores": [
             {"file": "a.jpg", "score": "九十"}]}, ADMIN)
     assert exc.value.status_code == 400
 
@@ -332,7 +335,7 @@ def test_sat_put_rejects_non_numeric_score(projects_root):
 def test_sat_fill_writes_summary(projects_root, monkeypatch):
     act = _activity(projects_root)
     _survey_photos(act, count=3)
-    app.api_sat_put("惠民项目", ACT, {"scores": [
+    api_sat_put("惠民项目", ACT, {"scores": [
         {"file": "p1.jpg", "score": 90, "satisfied": True},
         {"file": "p2.jpg", "score": 92, "satisfied": True},
         {"file": "p3.jpg", "score": 94, "satisfied": True},
@@ -357,7 +360,7 @@ def test_sat_fill_writes_summary(projects_root, monkeypatch):
         "项目社工": "社工甲", "实际人数": 19, "年月日": "2026年11月19日",
     })
 
-    out = app.api_sat_fill("惠民项目", ACT, ADMIN)
+    out = api_sat_fill("惠民项目", ACT, ADMIN)
 
     assert out["份数"] == 3
     assert out["总得分"] == 276
@@ -373,7 +376,7 @@ def test_sat_fill_writes_summary(projects_root, monkeypatch):
 def test_sat_fill_without_scores_400(projects_root):
     _activity(projects_root)
     with pytest.raises(app.HTTPException) as exc:
-        app.api_sat_fill("惠民项目", ACT, ADMIN)
+        api_sat_fill("惠民项目", ACT, ADMIN)
     assert exc.value.status_code == 400
     assert "先点" in exc.value.detail
 
@@ -381,8 +384,8 @@ def test_sat_fill_without_scores_400(projects_root):
 def test_sat_fill_without_recorded_scores_400(projects_root):
     act = _activity(projects_root)
     _survey_photos(act, count=2)
-    app.api_sat_list("惠民项目", ACT, ADMIN)
+    api_sat_list("惠民项目", ACT, ADMIN)
 
     with pytest.raises(app.HTTPException) as exc:
-        app.api_sat_fill("惠民项目", ACT, ADMIN)
+        api_sat_fill("惠民项目", ACT, ADMIN)
     assert exc.value.status_code == 400

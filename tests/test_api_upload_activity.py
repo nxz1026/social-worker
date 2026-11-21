@@ -21,6 +21,7 @@ os.environ.setdefault(
     "SOCIALWORK_DB_DSN", "host=127.0.0.1 port=5432 dbname=test user=test password=x")
 
 import app  # noqa: E402
+from api.routes.assets import api_activity_upload  # noqa: E402
 
 ADMIN = {"id": 1, "username": "admin", "role": "admin",
          "projects": {"huimin": "write", "huadu": "write"}}
@@ -77,8 +78,8 @@ def _file(name: str, data: bytes = b"test content") -> UploadFile:
 
 def _upload(project: str, dirname: str, file: UploadFile, sub: str = "",
             user=ADMIN, conn=None):
-    return app.api_activity_upload(project, dirname, file=file, sub=sub,
-                                   user=user, conn=conn)
+    return api_activity_upload(project, dirname, file=file, sub=sub,
+                               user=user, conn=conn)
 
 
 # ---------------- 正常上传 ----------------

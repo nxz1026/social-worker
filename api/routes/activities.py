@@ -14,10 +14,9 @@ from engine import projects as _projects
 
 router = APIRouter()
 
-# _count_files / _file_item 仍留在 app.py（未搬的
-# /api/projects/{name}/activities/{dirname}/files 也在用），这里按 docs.py 的
-# 先例做函数内延迟 import：api.app 在 import 本模块时还没执行完，
-# 模块级 `from api.app import ...` 会循环 import。
+# _count_files / _file_item 随 files/upload/download/delete 一起搬到 assets.py；
+# api.app 在 import 本模块时还没执行完，模块级 `from api.app import ...`
+# 会循环 import，所以这里做函数内延迟 import。
 
 @router.post("/api/projects/{name}/activities/split")
 def api_split_activities(name: str, body: dict, user=Depends(current_user)):
@@ -73,7 +72,7 @@ def api_rename_activity(name: str, dirname: str, body: dict,
 @router.get("/api/projects/{name}/activities/{dirname}")
 def api_activity_detail(name: str, dirname: str, user=Depends(current_user)):
     """活动详情：编号 / 状态 / 顶层文件 / 子目录文件数 / 15 项核对。"""
-    from api.app import _count_files, _file_item
+    from api.routes.assets import _count_files, _file_item
 
     act_dir, _meta = activity_meta_or_404(name, dirname, user)
     act = activity_yaml_data(act_dir)
