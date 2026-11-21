@@ -44,4 +44,13 @@ n=$(curl -s http://127.0.0.1:8001/openapi.json \
 echo "  路由数: $n"
 [ "$n" -ge 30 ] || { echo "  ! 路由数异常，服务可能没起来"; exit 1; }
 
+echo "== 资产验收（模板/项目数据不入库，跳过不算通过）=="
+SOCIAL_WORK_TEST_REPO="${TEST_REPO:-/home/ubuntu/DSH/social-worker}" \
+  python3 /srv/social-work/scripts/verify_assets.py
+va=$?
+if [ "$va" -ne 0 ]; then
+    echo "  ! 资产验收未通过（见上），服务已起但发布状态存疑"
+    exit 1
+fi
+
 echo "== 完成：https://<host>/sw/ =="
