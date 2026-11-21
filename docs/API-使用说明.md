@@ -163,6 +163,8 @@ DELETE /api/sw/keys/{key_id}   # 吊销（软删，写 revoked_at）
 | `LLM_FAILED` | 502 | 上游 LLM 调用失败 |
 | `NEED_FORCE` | 409 | 目标文件已存在且可能被人工改过，需 `force=true` |
 | `DUPLICATE_NAME` | 409 | 同名文件已存在（项目资料上传） |
+| `FILE_EXISTS` | 409 | 目标路径已有同名文件（/api/sw/run 生成时） |
+| `KEY_NOT_FOUND` | 404 | 要吊销的 API Key 不存在 |
 | `DUPLICATE_BATCH` | 409 | 24 小时内同活动+同日期+同场景已传过（照片） |
 | `TOO_MANY_FILES` | 400 | 单请求超 200 张（照片） |
 | `FILE_TOO_LARGE` | 413 | 单文件超限 |
@@ -426,6 +428,11 @@ Content-Type: multipart/form-data
 压缩包 ≤1GB、条目 ≤5000、解压后总量 ≤2GB；单条压缩比 >200 且原始大小 >10MB
 视为可疑压缩炸弹，返回 `ARCHIVE_SUSPICIOUS`。
 
+**图片像素闸门同样生效**：逐条读取后、落盘前会做像素检查，
+超过 8000 万像素返回 400 `IMAGE_TOO_LARGE`。这项针对「小体积巨图」——
+一张 9000×9000 的纯色 PNG 压缩后只有几十 KB，字节预算拦不住，
+只能靠像素判定。zip 与直接上传走同一套校验。
+
 ```json
 {"ok":true,"matched":{"11-共治行动-第一期":42},"unmatched":{"其他照片":8},"total_saved":42}
 ```
@@ -554,7 +561,15 @@ cd /home/ubuntu/DSH/social-worker && ./deploy.sh
 
 # 测试
 python3 -m pytest tests/ -q
+
+# 资产验收（部署机必跑；模板/项目数据不入库，跳过不算通过）
+python3 scripts/verify_assets.py
 ```
+
+`deploy.sh` 已内置两道门禁：路由数 ≥30、资产验收无跳过。
+资产类测试在干净检出环境会因为缺模板/样本而 skip，`pytest` 仍显示通过；
+`verify_assets.py` 把跳过当失败，避免「全绿」假象。详见
+[服务器部署](服务器部署.md) 的「为什么资产验收要单独一道」。
 
 **注意**：仓库 `/home/ubuntu/DSH/social-worker` 是开发目录，生产服务跑 `/srv/social-work` 副本。
 **改代码不同步就没生效**——必须跑 `deploy.sh`。

@@ -142,12 +142,18 @@ pip install -r requirements.txt
 # 测试
 python3 -m pytest tests/ -q
 
-# 部署（改完代码必跑）
+# 资产验收（模板与业务数据不入库，跳过不算通过）
+python3 scripts/verify_assets.py
+
+# 部署（改完代码必跑；内含路由数 + 资产验收两道门禁）
 ./deploy.sh
 
 # Agent 查能力
 curl -H "Authorization: Bearer sk-sw-xxx" https://<host>/sw-api/api/sw/capabilities
 ```
+
+> 模板文件与项目资料**不入 git**（合规要求）。干净检出下 22 项资产类测试会 skip，
+> `pytest` 仍显示通过——`verify_assets.py` 把跳过当失败，避免「全绿」假象。
 
 ## 文档
 
