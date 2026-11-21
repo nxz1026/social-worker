@@ -28,6 +28,9 @@ from api.routes.activities import api_activity_detail  # noqa: E402
 from api.routes.materials import api_activity_fill, api_activity_llm, api_activity_llm_fill
 from api.routes.assets import (api_activity_delete_file, api_activity_download,  # noqa: E402
                                api_activity_files)
+from api.routes import misc as _misc  # noqa: E402
+from api.routes.misc import (  # noqa: E402
+    api_cognee_datasets, api_cognee_index, api_dashboard, api_sync_feishu, api_templates)
 
 ADMIN = {"id": 1, "username": "admin", "role": "admin",
          "projects": {"huimin": "write", "huadu": "write", "jili": "write"}}
@@ -229,7 +232,7 @@ def test_templates_returns_15(tmp_path, monkeypatch):
     monkeypatch.setattr(app._fill, "scan_placeholders",
                         lambda p: ["{{项目名称}}", "{{活动名称}}"])
 
-    out = app.api_templates(ADMIN)
+    out = api_templates(ADMIN)
     assert len(out) == 15
     assert out[0]["name"] == "模板01"
     assert out[0]["kind"] == "docx"
@@ -325,10 +328,10 @@ def test_template_name_traversal_400(tmp_path, projects_root, monkeypatch):
 
 def test_sync_feishu_schedules_background(projects_root, monkeypatch):
     called = []
-    monkeypatch.setattr(app, "_run_feishu_sync", lambda project: called.append(project))
+    monkeypatch.setattr(_misc, "_run_feishu_sync", lambda project: called.append(project))
     bg = BackgroundTasks()
 
-    out = app.api_sync_feishu({"project": "惠民项目"}, bg, _Req(), ADMIN, None)
+    out = api_sync_feishu({"project": "惠民项目"}, bg, _Req(), ADMIN, None)
     assert out["started"] is True
     assert [p["name"] for p in out["projects"]] == ["惠民项目"]
     assert called == []                    # 请求阶段不跑
@@ -338,16 +341,16 @@ def test_sync_feishu_schedules_background(projects_root, monkeypatch):
 
 def test_sync_feishu_unknown_project_404(projects_root):
     with pytest.raises(app.HTTPException) as exc:
-        app.api_sync_feishu({"project": "不存在"}, BackgroundTasks(), _Req(), ADMIN, None)
+        api_sync_feishu({"project": "不存在"}, BackgroundTasks(), _Req(), ADMIN, None)
     assert exc.value.status_code == 404
 
 
 def test_cognee_index_schedules_background(projects_root, monkeypatch):
     called = []
-    monkeypatch.setattr(app, "_run_cognee_index", lambda project: called.append(project))
+    monkeypatch.setattr(_misc, "_run_cognee_index", lambda project: called.append(project))
     bg = BackgroundTasks()
 
-    out = app.api_cognee_index({"project": ""}, bg, _Req(), ADMIN, None)
+    out = api_cognee_index({"project": ""}, bg, _Req(), ADMIN, None)
     assert out["started"] is True
     asyncio.run(bg())
     assert called == [""]
@@ -361,7 +364,7 @@ def test_cognee_datasets_with_stats(monkeypatch):
                         lambda root: {"d1": {"numNodes": 278}})
     monkeypatch.setattr(app._cognee_index, "data_count", lambda root, did: 69)
 
-    out = app.api_cognee_datasets(ADMIN)
+    out = api_cognee_datasets(ADMIN)
     assert out["total"] == 1
     assert out["items"][0] == {"id": "d1", "name": "惠民", "count": 69,
                                "nodes": 278, "created_at": "2026-11-18"}
@@ -373,7 +376,7 @@ def test_cognee_datasets_upstream_error_502(monkeypatch):
 
     monkeypatch.setattr(app._cognee_index, "list_datasets", boom)
     with pytest.raises(app.HTTPException) as exc:
-        app.api_cognee_datasets(ADMIN)
+        api_cognee_datasets(ADMIN)
     assert exc.value.status_code == 502
 
 
@@ -384,7 +387,7 @@ def test_dashboard_three_projects(projects_root):
     _activity(projects_root, "花都项目", "02-爱邻议事会-第一期", complete=False)
     # 激励项目没有活动，也应出现在项目列表里
 
-    out = app.api_dashboard(ADMIN)
+    out = api_dashboard(ADMIN)
     assert len(out["projects"]) == 3
     by_name = {p["name"]: p for p in out["projects"]}
     assert by_name["惠民项目"]["activity_total"] == 1
@@ -399,5 +402,5 @@ def test_dashboard_three_projects(projects_root):
 
 
 def test_dashboard_filters_by_scope(projects_root):
-    out = app.api_dashboard(VIEWER)
+    out = api_dashboard(VIEWER)
     assert [p["short"] for p in out["projects"]] == ["huimin"]

@@ -16,6 +16,7 @@ os.environ.setdefault(
 
 import app  # noqa: E402
 from api.routes.materials import api_regen_readme
+from api.routes.misc import api_refresh_all_readme
 
 ADMIN = {"id": 1, "username": "admin", "role": "admin", "projects": {"测试项目": "write"}}
 VIEWER = {"id": 3, "username": "viewer", "role": "viewer", "projects": {"测试项目": "readonly"}}
@@ -49,7 +50,7 @@ def test_regen_readme_endpoint(root):
 
 def test_refresh_all_readme_endpoint(root):
     """全量刷新返回 {written: n, skipped: n}。"""
-    out = app.api_refresh_all_readme(ADMIN)
+    out = api_refresh_all_readme(ADMIN)
     assert out == {"written": 2, "skipped": 0}     # 1 活动 + 1 项目
 
 

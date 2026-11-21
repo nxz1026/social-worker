@@ -440,7 +440,8 @@ def api_sw_search(q: str, project: str = "", limit: int = 10,
     """统一检索：文档台账 + Cognee 图谱。"""
     # _load_manifest / search_datasets / _legacy_project_name 留在 app.py（有外部引用），
     # 这里函数内延迟 import：api.app 在 import 本模块时还没执行完，模块级会循环。
-    from api.app import _legacy_project_name, _load_manifest, search_datasets
+    from api.app import _legacy_project_name, _load_manifest
+    from api.routes.misc import search_datasets
 
     query = str(q or "").strip()
     if not query:

@@ -19,6 +19,8 @@ from api.admin import valid_role
 from api.deps import scopes_of
 from api.shared.audit import safe_detail  # noqa: E402
 from api.shared.parse import as_bool  # noqa: E402
+from api.routes.misc import generate, search
+from api.routes import misc as _misc  # noqa: E402
 
 
 def _user(projects=None, role="editor"):
@@ -59,9 +61,9 @@ def test_list_docs_filters_foreign_project(monkeypatch):
 
 def test_search_zero_projects_403(monkeypatch):
     called = []
-    monkeypatch.setattr(app, "search_datasets", lambda *a, **k: called.append(a) or (True, "", False))
+    monkeypatch.setattr(_misc, "search_datasets", lambda *a, **k: called.append(a) or (True, "", False))
     with pytest.raises(app.HTTPException) as exc:
-        app.search("x", "", _user({}))
+        search("x", "", _user({}))
     assert exc.value.status_code == 403
     assert called == []
 
@@ -70,7 +72,7 @@ def test_generate_zero_projects_403(tmp_path, monkeypatch):
     (tmp_path / "case-record.md").write_text("模板", encoding="utf-8")
     monkeypatch.setattr(app, "TEMPLATES_DIR", tmp_path)
     with pytest.raises(app.HTTPException) as exc:
-        app.generate({"type": "个案记录", "context": "x"}, None, _user({}), None)
+        generate({"type": "个案记录", "context": "x"}, None, _user({}), None)
     assert exc.value.status_code == 403
 
 
