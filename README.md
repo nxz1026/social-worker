@@ -76,6 +76,7 @@ social-worker/
 ├── projects/              三个项目的资料
 ├── web/                   Web 管理界面（纯原生 JS）
 ├── tests/                 pytest 用例（数量以 pytest 输出为准）
+│   └── conftest.py        按 pid 给每个 pytest 进程独立的 basetemp
 ├── deploy.sh              同步到生产并重启
 └── docs/
     ├── API-使用说明.md     面向 Agent 的接口文档
@@ -156,7 +157,7 @@ curl -H "Authorization: Bearer sk-sw-xxx" https://<host>/sw-api/api/sw/capabilit
 > `pytest` 仍显示通过——`verify_assets.py` 覆盖 9 个文件 99 项，把跳过当失败。
 > `deploy.sh` 把它放在**同步之前**：验收不过就不部署。
 >
-> 有资产环境下完整测试：**644 passed, 0 skipped**（2026-11-22 实测）。
+> 有资产环境下完整测试：**779 passed, 0 skipped**（2026-11-22 实测）。
 
 ## 文档
 
