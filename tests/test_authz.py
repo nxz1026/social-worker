@@ -14,6 +14,7 @@ os.environ.setdefault(
     "SOCIALWORK_DB_DSN", "host=127.0.0.1 port=5432 dbname=test user=test password=x")
 
 import app  # noqa: E402
+from api.routes import docs as docs_routes  # noqa: E402
 from api.admin import valid_role
 from api.deps import scopes_of
 from api.shared.audit import safe_detail  # noqa: E402
@@ -37,22 +38,22 @@ def test_scopes_of_rejects_foreign_project():
 
 
 def test_list_docs_zero_projects_returns_nothing(monkeypatch):
-    monkeypatch.setattr(app, "_load_manifest", lambda: {
+    monkeypatch.setattr(docs_routes, "_load_manifest", lambda: {
         "files": {"t1": {"name": "居民名单.docx", "project": "huadu",
                          "status": "done"}}})
-    out = app.list_docs("", "", "", _user({}))
+    out = docs_routes.list_docs("", "", "", _user({}))
     assert out == {"total": 0, "items": []}
 
 
 def test_list_docs_filters_foreign_project(monkeypatch):
-    monkeypatch.setattr(app, "_load_manifest", lambda: {
+    monkeypatch.setattr(docs_routes, "_load_manifest", lambda: {
         "files": {
             "t1": {"name": "花都.docx", "project": "花都社区保障资金项目",
                    "status": "done"},
             "t2": {"name": "惠民.docx", "project": "惠民社区保障资金项目",
                    "status": "done"},
         }})
-    out = app.list_docs("", "", "", _user({"惠民社区保障资金项目": "write"}))
+    out = docs_routes.list_docs("", "", "", _user({"惠民社区保障资金项目": "write"}))
     assert [x["token"] for x in out["items"]] == ["t2"]
 
 
@@ -74,7 +75,7 @@ def test_generate_zero_projects_403(tmp_path, monkeypatch):
 
 
 def test_docs_health_zero_projects_empty():
-    assert app.docs_health("", _user({})) == {"total": 0, "items": {}}
+    assert docs_routes.docs_health("", _user({})) == {"total": 0, "items": {}}
 
 
 def test_safe_detail_redacts_secrets_and_case_text():
@@ -102,5 +103,5 @@ def test_role_and_bool_parsing():
 
 def test_parse_archive_receipt_reads_last_marker():
     stdout = "human line\n__RESULT__ {\"ok\": true, \"token\": \"t1\"}\n"
-    assert app._parse_archive_receipt(stdout)["token"] == "t1"
-    assert app._parse_archive_receipt("no marker") == {}
+    assert docs_routes._parse_archive_receipt(stdout)["token"] == "t1"
+    assert docs_routes._parse_archive_receipt("no marker") == {}

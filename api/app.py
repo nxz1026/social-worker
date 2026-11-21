@@ -103,13 +103,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 第 2 步拆出去的模块用 APIRouter 定义路由，在这里挂上。
+# 已拆出的模块用 APIRouter 定义路由，在这里挂上。
 # 顺序无关；路径与方法是路由装饰器里写的，与拆分前完全一致。
 from api import admin as _admin_module  # noqa: E402
 from api import auth as _auth_module  # noqa: E402
+from api.routes import docs as _r_docs  # noqa: E402
 
 app.include_router(_auth_module.router)
 app.include_router(_admin_module.router)
+app.include_router(_r_docs.router)
 
 
 @app.on_event("startup")
@@ -457,188 +459,6 @@ def _suggest_project(path: Path) -> tuple[str, str]:
         return "", ""
 
 
-def _audit_rows(date: str | None = None) -> list[dict]:
-    day = date or datetime.now(TZ).strftime("%Y-%m-%d")
-    p = ROOT / "state" / "audit" / f"{day}.jsonl"
-    rows: list[dict] = []
-    try:
-        with open(p, encoding="utf-8") as fh:
-            for line in fh:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    obj = json.loads(line)
-                except ValueError:
-                    continue
-                if isinstance(obj, dict):
-                    rows.append(obj)
-    except OSError:
-        return []
-    return rows
-
-# ---------- 文档 ----------
-@app.get("/api/docs")
-def list_docs(project: str = "", category: str = "", q: str = "",
-              user=Depends(current_user)):
-    scopes = scopes_of(user, project)
-    if not scopes:
-        return {"total": 0, "items": []}
-    manifest = _load_manifest()
-    out = []
-    for token, e in (manifest.get("files") or {}).items():
-        if not isinstance(e, dict) or e.get("status") == "deleted":
-            continue
-        if _legacy_project_name(str(e.get("project") or "")) not in scopes:
-            continue
-        if category and e.get("category") != category:
-            continue
-        if q and q.lower() not in (e.get("name") or "").lower():
-            continue
-        out.append({
-            "token": token,
-            "name": e.get("name"),
-            "project": e.get("project"),
-            "category": e.get("category"),
-            "md": e.get("md"),
-            "original": e.get("original"),
-            "status": e.get("status"),
-            "archived_at": e.get("archived_at"),
-            "detected_project": e.get("detected_project"),
-        })
-    return {"total": len(out), "items": out}
-
-@app.get("/api/docs/health")
-def docs_health(project: str = "", user=Depends(current_user)):
-    """列表用的批量健康状态（source/md/feishu/index），按项目取一次 Cognee。"""
-    scopes = scopes_of(user, project)
-    if not scopes:
-        return {"total": 0, "items": {}}
-    manifest = _load_manifest()
-    url_tpl = _feishu_template()
-    entries_by_ds: dict[str, list[dict] | None] = {}
-    for p in scopes:
-        ds = _dataset_for(p)
-        if ds not in entries_by_ds:
-            entries_by_ds[ds] = _dataset_entries(ds)
-    out: dict[str, dict] = {}
-    for token, e in (manifest.get("files") or {}).items():
-        if not isinstance(e, dict) or e.get("status") == "deleted":
-            continue
-        entry_project = _legacy_project_name(str(e.get("project") or ""))
-        if entry_project not in scopes:
-            continue
-        ds = _dataset_for(entry_project)
-        st = status_mod.doc_status(
-            ROOT, token, e, entries_by_ds.get(ds), url_tpl,
-            roster={},                 # 列表不显示关系，不必读名册
-            include_relations=False,
-        )
-        out[token] = {
-            "source": st["source"]["state"],
-            "md": st["md"]["state"],
-            "index": st["index"]["state"],
-        }
-    return {"total": len(out), "items": out}
-
-@app.get("/api/docs/{token}")
-def get_doc(token: str, user=Depends(current_user)):
-    manifest = _load_manifest()
-    e = (manifest.get("files") or {}).get(token)
-    if not e:
-        raise HTTPException(404, "文档不存在")
-    if e.get("status") == "deleted":
-        raise HTTPException(404, "文档已删除")
-    check_project(user, _legacy_project_name(str(e.get("project") or "")))
-    content = ""
-    md_path = _entry_md_path(e)
-    if md_path and md_path.is_file():
-        content = md_path.read_text(encoding="utf-8")
-    return {"token": token, "name": e.get("name"), "project": e.get("project"),
-            "category": e.get("category"), "content": content,
-            "original": e.get("original"),
-            "detected_project": e.get("detected_project")}
-@app.get("/api/docs/{token}/source")
-def download_source(token: str, request: Request,
-                    user=Depends(current_user), conn=Depends(db)):
-    """下载原件。按项目鉴权，逐次写审计。"""
-    e = _manifest_entry(token)
-    if not e:
-        raise HTTPException(404, "文档不存在")
-    if e.get("status") == "deleted":
-        raise HTTPException(404, "文档已删除")
-    check_project(user, _legacy_project_name(str(e.get("project") or "")))
-    rel = normalize_rel(str(e.get("original") or ""), root=ROOT)
-    if not rel:
-        raise HTTPException(404, "台账没有原件路径")
-    path = (ROOT / rel).resolve()
-    try:
-        path.relative_to(ROOT.resolve())
-    except ValueError:
-        raise HTTPException(400, "原件路径越界")
-    if not path.is_file():
-        raise HTTPException(404, "原件不存在")
-    audit(conn, user["id"], "download", e.get("project"), e.get("name"),
-          {"path": rel}, request.client.host)
-    media = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
-    return FileResponse(path, media_type=media, filename=e.get("name") or path.name)
-
-def _parse_archive_receipt(stdout: str) -> dict:
-    """archive.py --json 在最后一行输出 `__RESULT__ {json}`。"""
-    for line in reversed((stdout or "").splitlines()):
-        if line.startswith("__RESULT__ "):
-            try:
-                data = json.loads(line[len("__RESULT__ "):])
-                return data if isinstance(data, dict) else {}
-            except ValueError:
-                return {}
-    return {}
-
-def _archive_timeout() -> int:
-    return int(SETTINGS.tasks["archive_timeout_seconds"])
-
-def _scan_timeout() -> int:
-    """archive.py 内部等 scan-inbox 的秒数，比外层短一点，让它先自己收尾。"""
-    return max(30, _archive_timeout() - 15)
-
-def run_archive(cmd: list[str], timeout: float) -> tuple[int | None, str, str, bool]:
-    """跑 archive.py，返回 (returncode, stdout, stderr, timed_out)。
-
-    超时要杀**整个进程组**：archive.py → scan-inbox.py → reconcile.py/cognify
-    是一条链，subprocess.run 的 timeout 只杀第一层，孙子进程会变孤儿继续跑。
-    """
-    proc = subprocess.Popen(cmd, cwd=str(ROOT), stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE, text=True, start_new_session=True)
-    try:
-        out, err = proc.communicate(timeout=timeout)
-        return proc.returncode, out, err, False
-    except subprocess.TimeoutExpired:
-        for sig in (signal.SIGTERM, signal.SIGKILL):
-            try:
-                os.killpg(os.getpgid(proc.pid), sig)
-            except OSError:
-                pass
-            try:
-                out, err = proc.communicate(timeout=10)
-                break
-            except subprocess.TimeoutExpired:
-                continue
-        else:
-            out, err = proc.communicate()
-        return None, out, err, True
-
-def _find_by_sha256(sha: str) -> tuple[str, dict] | None:
-    """按内容 hash 找已归档条目（上传幂等用）。"""
-    try:
-        manifest = _load_manifest()
-    except HTTPException:
-        return None
-    for tok, rec in (manifest.get("files") or {}).items():
-        if (isinstance(rec, dict) and rec.get("sha256") == sha
-                and rec.get("status") in {"done", "pending", "pending_review"}):
-            return tok, rec
-    return None
-
 def _project_alias_maps() -> tuple[dict, dict]:
     """项目别名（config/project_aliases.yaml）+ 项目标签（feishu-flow.yaml）。"""
     aliases: dict[str, list[str]] = {}
@@ -677,180 +497,27 @@ def check_api_upload_name(filename: str) -> str:
             "（例：2026-11-05-花都-爱邻议事会第一期活动签到表.jpg）；"
             "请客户端自行 OCR 并规范命名后重新上传，服务端不再对未规范命名的图片/PDF 做 OCR/识图。")
 
-@app.post("/api/docs")
-def upload_doc(
-    request: Request,
-    file: UploadFile = File(...),
-    project: str = Form(""),
-    category: str = Form(""),
-    user=Depends(require_write),
-    conn=Depends(db),
-):
-    """上传一个文件并归档。
-
-    同步返回（客户端要 token），但**不在上传链路里重建索引**：归档只做
-    落 inbox → 分类 → 转 md → 写台账 → 飞书归档，索引交给 15 分钟一次的
-    reconcile 定时器。以前每传 1 张都跑一次全库对账，HTTP 响应被拖到 200–600 秒。
-    端点用普通 def：Starlette 会丢线程池，不会像 async def 里 subprocess.run 那样
-    把事件循环占死。
-
-    图片 / PDF 先过命名护栏（check_api_upload_name）：缺日期 / 项目名称 / 图片描述
-    一律 400 拒收，让客户端自行 OCR + 规范命名，服务端不再替它 OCR/识图。
-    """
-    if project:
-        # 上传属于写操作：readonly 项目必须拒绝
-        check_project(user, project, write=True)
-    elif set(user["projects"]) != set(ALL_PROJECTS):
-        # 自动判项目会把文件写进用户没权限的项目；没有全部项目权限时必须显式指定
-        raise HTTPException(400, "请指定项目（project）：当前账号没有全部项目权限，不能自动判定归属")
-
-    category = (category or "").strip()
-    categories = [str(c) for c in (_flow().get("categories") or [])]
-    if category and categories and category not in categories:
-        raise HTTPException(400, f"未知类别 {category}（可选：{'、'.join(categories)}）")
-
-    filename = Path(file.filename or "upload.bin").name
-    name_error = check_api_upload_name(filename)
-    if name_error:
-        raise HTTPException(400, name_error)
-    max_mb = int(SETTINGS.upload.get("max_mb", 50))
-    max_bytes = max_mb * 1024 * 1024
-    tmpdir = tempfile.mkdtemp()
-    tmp_path = os.path.join(tmpdir, filename)
-    size = 0
-    digest = hashlib.sha256()
+def _audit_rows(date: str | None = None) -> list[dict]:
+    day = date or datetime.now(TZ).strftime("%Y-%m-%d")
+    p = ROOT / "state" / "audit" / f"{day}.jsonl"
+    rows: list[dict] = []
     try:
-        with open(tmp_path, "wb") as f:
-            while True:
-                chunk = file.file.read(1 << 20)
-                if not chunk:
-                    break
-                size += len(chunk)
-                if size > max_bytes:
-                    raise HTTPException(413, f"文件超过 {max_mb} MB 限制")
-                digest.update(chunk)
-                f.write(chunk)
-        if size == 0:
-            raise HTTPException(400, "空文件")
-        sha = digest.hexdigest()
-        # 本地来源的台账 key 由内容 hash 决定，归档前就能算出来，超时也能给客户端一个可查的 token
-        token_hint = f"local-{sha[:16]}"
+        with open(p, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(obj, dict):
+                    rows.append(obj)
+    except OSError:
+        return []
+    return rows
 
-        # 幂等：同一份内容已经归档过 → 直接回同一个 token，不产生第二份档案
-        dup = _find_by_sha256(sha)
-        if dup:
-            dup_token, rec = dup
-            audit(conn, user["id"], "upload_duplicate", rec.get("project"), rec.get("name"),
-                  {"sha256": sha, "token": dup_token, "size": size},
-                  request.client.host)
-            return {"ok": True, "token": dup_token, "duplicate": True,
-                    "project": rec.get("project"), "category": rec.get("category"),
-                    "name": rec.get("name"), "status": rec.get("status"),
-                    "md": rec.get("md")}
-
-        # 受理即写审计：之后无论超时、断连还是服务重启，都能查到「谁在什么时候传了什么」
-        audit(conn, user["id"], "upload_accepted", project, filename,
-              {"sha256": sha, "size": size, "token": token_hint, "category": category},
-              request.client.host)
-
-        cmd = ["python3", str(SCRIPTS / "archive.py"), "--file", tmp_path, "--json",
-               "--no-cognify", "--only-self", "--scan-timeout", str(_scan_timeout())]
-        if project:
-            cmd += ["--project", project]
-        if category:
-            cmd += ["--category", category]
-        rc, out, err, timed_out = run_archive(cmd, _archive_timeout())
-        receipt = _parse_archive_receipt(out)
-
-        # rc=6 是 archive.py 自己等 scan-inbox 超时（它杀完进程组后返回），
-        # 和外层超时是同一件事，都给 202 + 可查询的 token
-        if timed_out or rc == 6:
-            audit(conn, user["id"], "create", project or receipt.get("project"), token_hint,
-                  {"returncode": None, "timeout": True, "sha256": sha, "size": size,
-                   "category": category}, request.client.host)
-            return JSONResponse(status_code=202, content={
-                "ok": False, "accepted": True, "token": token_hint, "status": "unknown",
-                "message": ("归档超时，已终止整个进程组。用该 token 查 "
-                            "/api/docs/{token}/status；同一内容重复提交不会重复建档"),
-            })
-
-        audit(conn, user["id"], "create", project or receipt.get("project"),
-              receipt.get("token") or filename,
-              {"returncode": rc, "size": size, "sha256": sha,
-               "token": receipt.get("token"), "archived_project": receipt.get("project"),
-               "category": receipt.get("category")},
-              request.client.host)
-        if rc != 0:
-            raise HTTPException(500, f"归档失败：{(out or err)[-300:]}")
-        if not receipt.get("ok"):
-            raise HTTPException(500, f"归档结果未通过校验：{(out or err)[-300:]}")
-
-        archived_project = _legacy_project_name(str(receipt.get("project") or ""))
-        if archived_project and user.get("role") != "admin" \
-                and project_access(user, archived_project) is None:
-            raise HTTPException(403, f"归档到无权限项目 {archived_project}，请联系管理员处理")
-        return {"ok": True, **receipt, "output": (out or "")[-800:]}
-    finally:
-        shutil.rmtree(tmpdir, ignore_errors=True)
-
-@app.patch("/api/docs/{token}")
-def update_doc(token: str, body: dict, request: Request,
-               user=Depends(require_write), conn=Depends(db)):
-    manifest = _load_manifest()
-    e = (manifest.get("files") or {}).get(token)
-    if not e:
-        raise HTTPException(404, "文档不存在")
-    check_project(user, _legacy_project_name(str(e.get("project") or "")), write=True)
-    content = body.get("content")
-    if content is None:
-        raise HTTPException(400, "缺 content")
-    md_path = _entry_md_path(e)
-    if not md_path or not md_path.is_file():
-        raise HTTPException(400, "该文档无 md，无法修改")
-    md_path.write_text(content, encoding="utf-8")
-    # 改内容后触发索引重建；失败不阻断保存，但要把结果告诉调用方（不再静默 pass）
-    reconcile_rc, reconcile_note = 0, ""
-    try:
-        proc = subprocess.run(
-            ["python3", str(SCRIPTS / "reconcile.py"), "--pg-dsn", PG_DSN, "--no-notify"],
-            cwd=str(ROOT), capture_output=True, text=True,
-            timeout=int(SETTINGS.tasks["reconcile_timeout_seconds"]))
-        reconcile_rc = proc.returncode
-        if proc.returncode != 0:
-            reconcile_note = (proc.stdout or proc.stderr)[-300:]
-    except subprocess.TimeoutExpired:
-        reconcile_rc = 124
-        reconcile_note = "索引重建超时，15 分钟定时器会补"
-    audit(conn, user["id"], "update", e.get("project"), e.get("name"),
-          {"md": e.get("md")}, request.client.host)
-    return {"ok": True, "reconcile": {"returncode": reconcile_rc,
-                                      "warning": reconcile_note}}
-
-@app.delete("/api/docs/{token}")
-def delete_doc(token: str, request: Request, user=Depends(require_admin),
-               conn=Depends(db), purge: bool = False):
-    """删除文档。默认 trash（下架，可恢复）；purge=true 连 sources 原件一起彻底删。"""
-    manifest = _load_manifest()
-    e = (manifest.get("files") or {}).get(token)
-    if not e:
-        raise HTTPException(404, "文档不存在")
-    # 待确认条目 project 为空（不属于任何项目），admin 端点直接放行；
-    # 否则 check_project("") 会因 admin 的 projects 不含空串而 403
-    if e.get("project"):
-        check_project(user, _legacy_project_name(str(e.get("project") or "")))
-    mode = "purge" if purge else "trash"
-    try:
-        proc = subprocess.run(
-            ["python3", str(SCRIPTS / "delete.py"), token, "--mode", mode, "--yes"],
-            cwd=str(ROOT), capture_output=True, text=True,
-            timeout=int(SETTINGS.tasks["delete_timeout_seconds"]))
-    except subprocess.TimeoutExpired:
-        raise HTTPException(504, "删除超时（后台可能仍在跑，请稍后查回收站）")
-    audit(conn, user["id"], "delete", e.get("project"), e.get("name"),
-          {"mode": mode, "returncode": proc.returncode}, request.client.host)
-    if proc.returncode != 0:
-        raise HTTPException(500, f"删除失败：{proc.stdout[-300:]}")
-    return {"ok": True, "mode": mode, "output": proc.stdout[-500:]}
+# ---------- 文档（端点已拆到 api/routes/docs.py，此处只留共用辅助） ----------
 
 # ---------- 文档操作：关系 / 飞书 / 索引 / 待确认 / 回收站 ----------
 def _flow() -> dict:

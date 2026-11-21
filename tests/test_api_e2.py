@@ -21,6 +21,7 @@ os.environ.setdefault(
     "SOCIALWORK_DB_DSN", "host=127.0.0.1 port=5432 dbname=test user=test password=x")
 
 import app  # noqa: E402
+from api.routes import docs as docs_routes  # noqa: E402
 from api.admin import admin_create_user
 from api.admin import admin_delete_user
 from api.admin import admin_update_user
@@ -308,12 +309,12 @@ def test_legacy_project_name_maps_english_keys(projects_root):
 
 
 def test_list_docs_filters_legacy_manifest_project(projects_root, monkeypatch):
-    monkeypatch.setattr(app, "_load_manifest", lambda: {
+    monkeypatch.setattr(docs_routes, "_load_manifest", lambda: {
         "files": {
             "t1": {"name": "花都.docx", "project": "huadu", "status": "done"},
             "t2": {"name": "惠民.docx", "project": "huimin", "status": "done"},
         }})
-    out = app.list_docs("", "", "", {"id": 1, "role": "editor",
+    out = docs_routes.list_docs("", "", "", {"id": 1, "role": "editor",
                                      "projects": {HUIMIN: "write"}})
     assert [x["token"] for x in out["items"]] == ["t2"]
 

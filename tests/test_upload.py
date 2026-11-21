@@ -29,6 +29,7 @@ os.environ.setdefault(
     "SOCIALWORK_DB_DSN", "host=127.0.0.1 port=5432 dbname=test user=test password=x")
 
 import app  # noqa: E402
+from api.routes import docs as docs_routes  # noqa: E402
 
 HUADU = "花都社区保障资金项目"
 HUIMIN = "惠民社区保障资金项目"
@@ -56,10 +57,10 @@ def _receipt(**kw) -> str:
 
 
 def _prep(monkeypatch, *, size_limit_mb=1, projects=(HUADU, HUIMIN)):
-    monkeypatch.setattr(app, "audit", lambda *a, **k: None)
+    monkeypatch.setattr(docs_routes, "audit", lambda *a, **k: None)
     monkeypatch.setattr(app.SETTINGS, "upload", {"max_mb": size_limit_mb}, raising=False)
     monkeypatch.setattr(app.SETTINGS, "tasks", {"archive_timeout_seconds": 5}, raising=False)
-    monkeypatch.setattr(app, "_find_by_sha256", lambda sha: None)
+    monkeypatch.setattr(docs_routes, "_find_by_sha256", lambda sha: None)
     return {"id": 1, "role": "editor",
             "projects": {str(p): "write" for p in projects}}
 
@@ -69,13 +70,13 @@ def _fake_archive(monkeypatch, *, rc=0, out="", err="", timed_out=False, called=
         if called is not None:
             called.append(cmd)
         return rc, out, err, timed_out
-    monkeypatch.setattr(app, "run_archive", _run)
+    monkeypatch.setattr(docs_routes, "run_archive", _run)
 
 
 def test_upload_requires_explicit_project_without_all_projects(monkeypatch):
     user = _prep(monkeypatch, projects=(HUADU,))
     with pytest.raises(app.HTTPException) as ei:
-        app.upload_doc(FakeRequest(), FakeUpload(b"x"), "", "", user, None)
+        docs_routes.upload_doc(FakeRequest(), FakeUpload(b"x"), "", "", user, None)
     assert ei.value.status_code == 400
     assert "请指定项目" in ei.value.detail
 
@@ -83,16 +84,16 @@ def test_upload_requires_explicit_project_without_all_projects(monkeypatch):
 def test_upload_rejects_empty_file(monkeypatch):
     user = _prep(monkeypatch)
     with pytest.raises(app.HTTPException) as ei:
-        app.upload_doc(FakeRequest(), FakeUpload(b""), HUADU, "", user, None)
+        docs_routes.upload_doc(FakeRequest(), FakeUpload(b""), HUADU, "", user, None)
     assert ei.value.status_code == 400
     assert "空文件" in ei.value.detail
 
 
 def test_upload_rejects_unknown_category(monkeypatch):
     user = _prep(monkeypatch)
-    monkeypatch.setattr(app, "_flow", lambda: {"categories": ["其他", "日常工作佐证"]})
+    monkeypatch.setattr(docs_routes, "_flow", lambda: {"categories": ["其他", "日常工作佐证"]})
     with pytest.raises(app.HTTPException) as ei:
-        app.upload_doc(FakeRequest(), FakeUpload(b"x"), HUADU, "乱写的类别", user, None)
+        docs_routes.upload_doc(FakeRequest(), FakeUpload(b"x"), HUADU, "乱写的类别", user, None)
     assert ei.value.status_code == 400
     assert "未知类别" in ei.value.detail
 
@@ -103,7 +104,7 @@ def test_upload_rejects_oversize_before_archiving(monkeypatch):
     _fake_archive(monkeypatch, out=_receipt(), called=called)
     big = b"x" * (2 * 1024 * 1024)
     with pytest.raises(app.HTTPException) as ei:
-        app.upload_doc(FakeRequest(), FakeUpload(big), HUADU, "", user, None)
+        docs_routes.upload_doc(FakeRequest(), FakeUpload(big), HUADU, "", user, None)
     assert ei.value.status_code == 413
     assert called == []          # 超限时根本没调 archive.py
 
@@ -113,7 +114,7 @@ def test_upload_skips_index_and_only_handles_own_file(monkeypatch):
     user = _prep(monkeypatch)
     called = []
     _fake_archive(monkeypatch, out=_receipt(), called=called)
-    app.upload_doc(FakeRequest(), FakeUpload(b"x"), HUADU, "", user, None)
+    docs_routes.upload_doc(FakeRequest(), FakeUpload(b"x"), HUADU, "", user, None)
     cmd = called[0]
     assert "--no-cognify" in cmd
     assert "--only-self" in cmd
@@ -123,7 +124,7 @@ def test_upload_passes_category_through(monkeypatch):
     user = _prep(monkeypatch)
     called = []
     _fake_archive(monkeypatch, out=_receipt(category="日常工作佐证"), called=called)
-    out = app.upload_doc(FakeRequest(), FakeUpload(b"x"), HUADU, "日常工作佐证", user, None)
+    out = docs_routes.upload_doc(FakeRequest(), FakeUpload(b"x"), HUADU, "日常工作佐证", user, None)
     assert "--category" in called[0]
     assert called[0][called[0].index("--category") + 1] == "日常工作佐证"
     assert out["category"] == "日常工作佐证"
@@ -133,7 +134,7 @@ def test_upload_surfaces_archive_failure(monkeypatch):
     user = _prep(monkeypatch)
     _fake_archive(monkeypatch, rc=0, out=_receipt(ok=False))
     with pytest.raises(app.HTTPException) as ei:
-        app.upload_doc(FakeRequest(), FakeUpload(b"x"), HUADU, "", user, None)
+        docs_routes.upload_doc(FakeRequest(), FakeUpload(b"x"), HUADU, "", user, None)
     assert ei.value.status_code == 500
     assert "未通过校验" in ei.value.detail
 
@@ -142,7 +143,7 @@ def test_upload_timeout_returns_202_with_token(monkeypatch):
     """超时不再回模糊的 504：202 + 由内容 hash 算出的 token，客户端可查状态。"""
     user = _prep(monkeypatch)
     _fake_archive(monkeypatch, rc=None, timed_out=True)
-    resp = app.upload_doc(FakeRequest(), FakeUpload(b"x"), HUADU, "", user, None)
+    resp = docs_routes.upload_doc(FakeRequest(), FakeUpload(b"x"), HUADU, "", user, None)
     assert resp.status_code == 202
     body = json.loads(resp.body)
     assert body["ok"] is False and body["accepted"] is True
@@ -153,7 +154,7 @@ def test_upload_scan_timeout_exit_code_also_202(monkeypatch):
     """archive.py 自己等 scan-inbox 超时会返回 6，语义同外层超时。"""
     user = _prep(monkeypatch)
     _fake_archive(monkeypatch, rc=6)
-    resp = app.upload_doc(FakeRequest(), FakeUpload(b"y"), HUADU, "", user, None)
+    resp = docs_routes.upload_doc(FakeRequest(), FakeUpload(b"y"), HUADU, "", user, None)
     assert resp.status_code == 202
     assert json.loads(resp.body)["accepted"] is True
 
@@ -162,11 +163,11 @@ def test_upload_duplicate_returns_same_token_without_archiving(monkeypatch):
     user = _prep(monkeypatch)
     called = []
     _fake_archive(monkeypatch, out=_receipt(), called=called)
-    monkeypatch.setattr(app, "_find_by_sha256",
+    monkeypatch.setattr(docs_routes, "_find_by_sha256",
                         lambda sha: ("local-abc", {"name": "旧.jpg", "project": HUADU,
                                                    "category": "其他", "status": "done",
                                                    "md": "m.md"}))
-    out = app.upload_doc(FakeRequest(), FakeUpload(b"x"), HUADU, "", user, None)
+    out = docs_routes.upload_doc(FakeRequest(), FakeUpload(b"x"), HUADU, "", user, None)
     assert out["duplicate"] is True and out["token"] == "local-abc"
     assert called == []          # 幂等命中时不再跑归档
 
@@ -175,14 +176,14 @@ def test_upload_rejects_archive_into_unauthorized_project(monkeypatch):
     user = _prep(monkeypatch, projects=(HUADU,))
     _fake_archive(monkeypatch, out=_receipt(project=HUIMIN))
     with pytest.raises(app.HTTPException) as ei:
-        app.upload_doc(FakeRequest(), FakeUpload(b"x"), HUADU, "", user, None)
+        docs_routes.upload_doc(FakeRequest(), FakeUpload(b"x"), HUADU, "", user, None)
     assert ei.value.status_code == 403
 
 
 def test_upload_returns_receipt(monkeypatch):
     user = _prep(monkeypatch)
     _fake_archive(monkeypatch, out=_receipt(token="abc"))
-    out = app.upload_doc(FakeRequest(), FakeUpload(b"hello"), HUADU, "", user, None)
+    out = docs_routes.upload_doc(FakeRequest(), FakeUpload(b"hello"), HUADU, "", user, None)
     assert out["ok"] is True
     assert out["token"] == "abc"
     assert out["project"] == HUADU
@@ -195,7 +196,7 @@ def test_upload_rejects_image_without_date_or_project(monkeypatch):
     called = []
     _fake_archive(monkeypatch, out=_receipt(), called=called)
     with pytest.raises(app.HTTPException) as ei:
-        app.upload_doc(FakeRequest(), FakeUpload(b"x", "微信图片_20261105.jpg"),
+        docs_routes.upload_doc(FakeRequest(), FakeUpload(b"x", "微信图片_20261105.jpg"),
                        HUADU, "", user, None)
     assert ei.value.status_code == 400
     assert "文件名不规范" in ei.value.detail
@@ -207,7 +208,7 @@ def test_upload_rejects_image_missing_project_name(monkeypatch):
     called = []
     _fake_archive(monkeypatch, out=_receipt(), called=called)
     with pytest.raises(app.HTTPException) as ei:
-        app.upload_doc(FakeRequest(), FakeUpload(b"x", "2026-11-05-签到表.jpg"),
+        docs_routes.upload_doc(FakeRequest(), FakeUpload(b"x", "2026-11-05-签到表.jpg"),
                        HUADU, "", user, None)
     assert ei.value.status_code == 400
     assert "项目名称" in ei.value.detail
@@ -219,7 +220,7 @@ def test_upload_rejects_unnamed_pdf(monkeypatch):
     called = []
     _fake_archive(monkeypatch, out=_receipt(), called=called)
     with pytest.raises(app.HTTPException) as ei:
-        app.upload_doc(FakeRequest(), FakeUpload(b"x", "扫描件.pdf"), HUADU, "", user, None)
+        docs_routes.upload_doc(FakeRequest(), FakeUpload(b"x", "扫描件.pdf"), HUADU, "", user, None)
     assert ei.value.status_code == 400
     assert "文件名不规范" in ei.value.detail
     assert called == []
@@ -229,7 +230,7 @@ def test_upload_accepts_well_named_image(monkeypatch):
     user = _prep(monkeypatch)
     called = []
     _fake_archive(monkeypatch, out=_receipt(), called=called)
-    out = app.upload_doc(FakeRequest(),
+    out = docs_routes.upload_doc(FakeRequest(),
                          FakeUpload(b"x", "2026-11-05-花都-爱邻议事会第一期活动签到表.jpg"),
                          HUADU, "", user, None)
     assert out["ok"] is True
@@ -240,17 +241,19 @@ def test_upload_naming_rule_does_not_apply_to_documents(monkeypatch):
     user = _prep(monkeypatch)
     called = []
     _fake_archive(monkeypatch, out=_receipt(), called=called)
-    out = app.upload_doc(FakeRequest(), FakeUpload(b"x", "a.docx"), HUADU, "", user, None)
+    out = docs_routes.upload_doc(FakeRequest(), FakeUpload(b"x", "a.docx"), HUADU, "", user, None)
     assert out["ok"] is True
     assert called
 
 
 def test_check_api_upload_name_direct(monkeypatch):
+    # check_api_upload_name 留在 app.py，它内部的 _flow 也读 app 模块的同名函数；
+    # 直接调 app 的实现，patch 也应打在 app 上。
     monkeypatch.setattr(app, "_flow",
                         lambda: {"projects": {"huadu": {"label": "花都"},
                                               "huimin": {"label": "惠民"}}})
-    assert app.check_api_upload_name("2026-11-05-花都-签到表.jpg") == ""
-    assert app.check_api_upload_name("2026-11-05-花都-签到表.pdf") == ""
-    assert app.check_api_upload_name("a.docx") == ""
-    assert "日期" in app.check_api_upload_name("花都-签到表.jpg")
-    assert "图片描述" in app.check_api_upload_name("2026-11-05-花都.jpg")
+    assert docs_routes.check_api_upload_name("2026-11-05-花都-签到表.jpg") == ""
+    assert docs_routes.check_api_upload_name("2026-11-05-花都-签到表.pdf") == ""
+    assert docs_routes.check_api_upload_name("a.docx") == ""
+    assert "日期" in docs_routes.check_api_upload_name("花都-签到表.jpg")
+    assert "图片描述" in docs_routes.check_api_upload_name("2026-11-05-花都.jpg")
