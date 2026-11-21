@@ -288,15 +288,43 @@ def test_generate_no_project_permission_403(admin):
             _purge_user(uid)
 
 
-@pytest.mark.skip(reason="refresh_all 会重写全部活动索引（全局副作用，改真实文件）；"
-                         "monkeypatch 对独立 uvicorn 进程无效，无法用桩隔离。"
-                         "端点权限已由 test_readme_refresh_permission 覆盖，"
-                         "全量刷新由部署后的定时任务负责")
-def test_readme_refresh(admin):
-    r = _req(admin, "POST", "/api/readme/refresh")
-    assert r.status_code == 200, r.text
-    body = r.json()
-    assert "written" in body and "skipped" in body
+def test_readme_refresh():
+    """全量刷新返回 {written: n, skipped: n}。
+
+    沿用仓库习惯**直接调用端点函数**（不经 HTTP）：这样 monkeypatch 才对
+    测试进程内的模块生效。走 HTTP 的话服务是独立 uvicorn 进程，桩够不到，
+    而 refresh_all 会重写全部活动索引（全局副作用，改真实业务文件）。
+    """
+    sys.path.insert(0, str(REPO / "api"))
+    from api.routes import misc as _misc
+    ADMIN = {"id": 4, "username": "admin", "role": "admin",
+             "projects": {PROJECT_A: "write", PROJECT_B: "write"}}
+    called = []
+
+    def _fake_refresh():
+        called.append(1)
+        return {"written": ["a.md", "b.md"], "skipped": 7, "errors": []}
+
+    orig = _misc._readme.refresh_all
+    _misc._readme.refresh_all = _fake_refresh
+    try:
+        out = _misc.api_refresh_all_readme(ADMIN)
+    finally:
+        _misc._readme.refresh_all = orig
+    assert out == {"written": 2, "skipped": 7}, out
+    assert called == [1], "端点应恰好调用一次 refresh_all"
+
+
+def test_readme_refresh_requires_admin():
+    """非 admin → 403（直接调用，不发真实刷新）。"""
+    sys.path.insert(0, str(REPO / "api"))
+    from fastapi import HTTPException
+    from api.routes import misc as _misc
+    VIEWER = {"id": 9, "username": "v", "role": "viewer",
+              "projects": {PROJECT_A: "readonly"}}
+    with pytest.raises(HTTPException) as exc:
+        _misc.api_refresh_all_readme(VIEWER)
+    assert exc.value.status_code == 403
 
 def test_readme_refresh_permission(admin_token):
     """只验权限闸：非 admin 必须 403，不发真实刷新。"""

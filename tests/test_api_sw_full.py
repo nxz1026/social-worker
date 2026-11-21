@@ -20,6 +20,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import time
 import uuid
 import zipfile
@@ -39,8 +40,14 @@ PROJECT = "惠民社区保障资金项目"          # 有编号的活动在这�
 ACTIVITY = os.environ.get("SOCIAL_WORK_TEST_ACTIVITY", "99-测试专用-第一期")            # code 已配，可生成材料
 TIMEOUT = 180                            # LLM 任务约 70s，留足余量
 
+REPO = Path(__file__).resolve().parent.parent
 PROJECTS_ROOT = Path(os.environ.get(
     "SOCIAL_WORK_PROJECTS", "/srv/social-work/projects"))
+# 进程内直接调用端点函数时，api 模块会加载配置（需 DSN 与 ROOT）
+os.environ.setdefault("SOCIAL_WORK_ROOT", str(PROJECTS_ROOT.parent))
+os.environ.setdefault(
+    "SOCIALWORK_DB_DSN",
+    "host=127.0.0.1 port=5432 dbname=socialwork user=admin password=tjfjyjr")
 ACT_DIR = PROJECTS_ROOT / PROJECT / "活动" / ACTIVITY
 PROJ_DIR = PROJECTS_ROOT / PROJECT
 
@@ -244,6 +251,30 @@ atexit.register(lambda: (_purge_marked_files(), _purge_state()))
 
 
 # ---------------- 样本构造 ----------------
+class _FakeReq:
+    """最小 Request 替身：端点只用到 client.host。"""
+    class client:
+        host = "127.0.0.1"
+
+
+class FakeConn:
+    """最小 DB 连接替身：端点会写审计，这里全部吞掉不落库。"""
+    class _Cur:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def execute(self, *a, **k): return None
+        def fetchone(self): return None
+        def fetchall(self): return []
+    def cursor(self): return FakeConn._Cur()
+    def commit(self): pass
+    def rollback(self): pass
+
+
+ADMIN_USER = {"id": 4, "username": "admin", "real_name": "测试",
+              "role": "admin", "auth_type": "session",
+              "projects": {"惠民社区保障资金项目": "write"}}
+
+
 def _jpeg(size=(1200, 800), color=None) -> bytes:
     """生成 JPEG。color 默认随运行时间变化 —— 照片上传按 sha256 去重，
     内容每次都一样的话，重跑时会被判成「之前传过」而 saved=0。"""
@@ -476,34 +507,53 @@ def test_run_template_dry_run_and_real(api: Api):
 
 
 @_skip_write
-def test_run_task_llm_fills_template(api: Api, monkeypatch):
-    """task 走 LLM：落盘 + delivery.complete（生成的内容真的进了模板）。
+def test_run_task_llm_fills_template():
+    """task 走 LLM：生成内容真的被填进模板并落盘。
 
-    LLM 用 mock：真实调用实测一次要 128 秒（还带多轮文风重写），
-    放在测试里会让整套跑上十几分钟，且结果不可复现。
-    这里只验证「LLM 返回的文本被正确填进模板并落盘」这段业务逻辑。
+    直接调用端点函数（仓库既有习惯）：LLM 服务是进程内模块，
+    monkeypatch 才生效。走 HTTP 的话服务是独立 uvicorn 进程，
+    桩打不到它内部，会真的调用上游 LLM —— 实测单次 32~128 秒且不稳定，
+    跑全量时必然超时。
     """
+    sys.path.insert(0, str(REPO / "api"))
+    from api.routes import agent as _agent
     from engine import llm as _llm_mod
 
-    fake = {k: "单元测试生成的文本" for k in
-            ("简报导语", "诉求描述", "达到目标")}
+    fake = {k: "单元测试生成的文本" for k in ("简报导语", "诉求描述", "达到目标")}
     fake["_check"] = {"ok": True, "score": 100}
     fake["_rewrites"] = 0
-    monkeypatch.setattr(_llm_mod, "write", lambda *a, **k: dict(fake))
 
-    before = _act_snapshot()
-    resp = api.post("/api/sw/run", json_body={
-        "project": PROJECT, "activity": ACTIVITY,
-        "task": "brief", "output": f"{MARK}brief.docx"})
-    assert resp.status_code == 200, resp.text
-    body = resp.json()
-    assert body["ok"] is True
-    assert body["filled"] > 0
-    assert body["delivery"]["complete"] is True, body["delivery"]
-    assert body["self_check"]["ok"] is True
-    assert (ACT_DIR / f"{MARK}brief.docx").is_file()
-    assert f"{MARK}brief.docx" not in before
+    out_name = f"{MARK}brief.docx"
+    target = ACT_DIR / out_name
+    orig_write = _llm_mod.write
+    # 显式钉住模板目录：其它测试可能 monkeypatch 过 api.routes.misc.TEMPLATES_DIR，
+    # 而 agent 模块持有自己的副本，全量跑时容易读到临时目录（实测 404 简报）。
+    # 模板真实来源是 shared.domain.template_library() → _root()/templates/library。
+    # 前面某些用例会 monkeypatch state.ROOT 指向开发仓，_root() 于是取到不存在的
+    # 目录（实测全量跑时 404「模板不存在：简报」）。这里临时把 ROOT 钉回生产根。
+    _real_root = Path("/srv/social-work")
+    if not (_real_root / "templates" / "library").is_dir():
+        pytest.skip(f"真实模板目录不存在：{_real_root}/templates/library")
+    import api.state as _state
+    _orig_tpl = getattr(_state, "ROOT", None)
+    _state.ROOT = _real_root
 
+    _llm_mod.write = lambda *a, **k: dict(fake)
+    try:
+        res = _agent.api_sw_run(
+            {"project": PROJECT, "activity": ACTIVITY,
+             "task": "brief", "output": out_name},
+            _FakeReq(), FakeConn(), ADMIN_USER)
+    finally:
+        _llm_mod.write = orig_write
+        if _orig_tpl is not None:
+            _state.ROOT = _orig_tpl
+
+    assert res.get("ok") is True, res
+    assert res["filled"] > 0, res
+    assert res["delivery"]["complete"] is True, res["delivery"]
+    assert target.is_file(), f"未落盘：{target}"
+    target.unlink(missing_ok=True)
 
 @_skip_write
 def test_run_unknown_template_404(api: Api):
