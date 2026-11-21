@@ -34,6 +34,10 @@ __pycache__/
 .venv/
 venv/
 .pytest_cache/
+.pytest_tmp/
+
+# ---------- pytest 临时目录（--basetemp，防测试在仓库根拉垃圾）----------
+pytest-cache-files-*/
 
 # ---------- 编辑器 / 系统 ----------
 .DS_Store
