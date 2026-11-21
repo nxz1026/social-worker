@@ -33,10 +33,15 @@ PROJECTS = ROOT / "projects"
 
 # 资产类测试：这些文件里的 skip 只允许在无资产环境下出现
 ASSET_TESTS = [
-    "tests/test_template_layout.py",
-    "tests/test_engine_fill.py",
-    "tests/test_engine_markdown.py",
-    "tests/test_engine_plan_parse.py",
+    "tests/test_template_layout.py",    # 13 个真实模板的版式
+    "tests/test_engine_fill.py",        # 真实模板的占位符扫描
+    "tests/test_engine_markdown.py",    # 真实 docx/xlsx 转 md
+    "tests/test_engine_plan_parse.py",  # 真实计划书解析
+    "tests/test_engine_checks.py",      # 真实活动目录的 15 项核对
+    "tests/test_readme.py",             # 真实活动目录的索引生成
+    "tests/test_engine_p1.py",          # 两个项目资料目录
+    "tests/test_engine_p2.py",          # 两个项目资料目录
+    "tests/test_engine_ingest.py",      # 真实活动目录的编号读取
 ]
 
 

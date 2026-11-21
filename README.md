@@ -152,8 +152,9 @@ python3 scripts/verify_assets.py
 curl -H "Authorization: Bearer sk-sw-xxx" https://<host>/sw-api/api/sw/capabilities
 ```
 
-> 模板文件与项目资料**不入 git**（合规要求）。干净检出下 22 项资产类测试会 skip，
-> `pytest` 仍显示通过——`verify_assets.py` 把跳过当失败，避免「全绿」假象。
+> 模板文件与项目资料**不入 git**（合规要求）。干净检出下 31 项资产类测试会 skip，
+> `pytest` 仍显示通过——`verify_assets.py` 覆盖 9 个文件 99 项，把跳过当失败。
+> `deploy.sh` 把它放在**同步之前**：验收不过就不部署。
 
 ## 文档
 

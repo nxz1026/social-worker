@@ -1,6 +1,7 @@
 """engine P2.5：活动包归档入库 + 编号读取 + activity.yaml。"""
 from __future__ import annotations
 
+import os
 import sys
 import zipfile
 from pathlib import Path
@@ -14,7 +15,12 @@ from engine import activities, ingest, projects  # noqa: E402
 
 HUIMIN = "惠民社区保障资金项目"
 # 工单指定的真实样本；机器上没有就跳过，不伪造
-REAL_DOCX_DIR = Path("/tmp/act4/共治行动第一期")
+# 真实活动目录（编码为 CDYJR2026008-C-1110002 的那份）。
+# 原先硬编码 /tmp/act4/…，那是解压临时目录、早被清理，导致这条测试长期跳过；
+# 改成走 SOCIAL_WORK_PROJECTS，与其他资产类测试口径一致。
+_PROJECTS = Path(os.environ.get("SOCIAL_WORK_PROJECTS",
+                                "/srv/social-work/projects"))
+REAL_DOCX_DIR = _PROJECTS / "惠民社区保障资金项目" / "活动" / "11-共治行动-第一期"
 
 
 def _make_docx(path: Path, text: str) -> None:
