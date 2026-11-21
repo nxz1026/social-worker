@@ -22,6 +22,7 @@ os.environ.setdefault(
     "SOCIALWORK_DB_DSN", "host=127.0.0.1 port=5432 dbname=test user=test password=x")
 
 import app  # noqa: E402
+from api.routes.materials import api_activity_captions, api_captions_fill
 
 ADMIN = {"id": 1, "username": "admin", "role": "admin",
          "projects": {"huimin": "write", "huadu": "write"}}
@@ -208,7 +209,7 @@ def test_captions_use_picked_files(projects_root, monkeypatch):
 
     monkeypatch.setattr(app._caption, "write_captions", fake_write)
 
-    out = app.api_activity_captions(
+    out = api_activity_captions(
         "惠民项目", ACT, {"sub": "11-活动照片资料", "style": "务实",
                           "picked": ["c.jpg", "a.jpg"]}, ADMIN)
 
@@ -226,7 +227,7 @@ def test_captions_empty_picked_falls_back_to_program(projects_root, monkeypatch)
                         lambda photos, facts, *, style="": [
                             {"file": p.name, "caption": "图1 活动现场"} for p in photos])
 
-    out = app.api_activity_captions("惠民项目", ACT, {"picked": []}, ADMIN)
+    out = api_activity_captions("惠民项目", ACT, {"picked": []}, ADMIN)
 
     assert out == [{"file": "微信图片_001.jpg", "caption": "图1 活动现场"}]
 
@@ -236,7 +237,7 @@ def test_captions_rejects_unknown_picked(projects_root, monkeypatch):
     monkeypatch.setattr(app._caption, "write_captions",
                         lambda *a, **k: pytest.fail("不该调 LLM"))
     with pytest.raises(app.HTTPException) as exc:
-        app.api_activity_captions("惠民项目", ACT, {"picked": ["没有.jpg"]}, ADMIN)
+        api_activity_captions("惠民项目", ACT, {"picked": ["没有.jpg"]}, ADMIN)
     assert exc.value.status_code == 400
 
 
@@ -248,7 +249,7 @@ def test_captions_fill_writes_template(projects_root):
     doc.add_paragraph("{{图注_2}}")
     doc.save(str(lib / "简报.docx"))
 
-    out = app.api_captions_fill(
+    out = api_captions_fill(
         "惠民项目", ACT,
         {"template": "简报",
          "captions": [{"file": "a.jpg", "caption": "图1 活动现场"},
@@ -264,7 +265,7 @@ def test_captions_fill_writes_template(projects_root):
 def test_captions_fill_empty_400(projects_root):
     _activity(projects_root)
     with pytest.raises(app.HTTPException) as exc:
-        app.api_captions_fill("惠民项目", ACT, {"template": "简报", "captions": []},
+        api_captions_fill("惠民项目", ACT, {"template": "简报", "captions": []},
                               ADMIN)
     assert exc.value.status_code == 400
 

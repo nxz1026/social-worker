@@ -15,6 +15,7 @@ os.environ.setdefault(
     "SOCIALWORK_DB_DSN", "host=127.0.0.1 port=5432 dbname=test user=test password=x")
 
 import app  # noqa: E402
+from api.routes.materials import api_regen_readme
 
 ADMIN = {"id": 1, "username": "admin", "role": "admin", "projects": {"测试项目": "write"}}
 VIEWER = {"id": 3, "username": "viewer", "role": "viewer", "projects": {"测试项目": "readonly"}}
@@ -38,11 +39,11 @@ def root(tmp_path, monkeypatch):
 
 def test_regen_readme_endpoint(root):
     """单活动重生成：首次 written=True，再调 written=False。"""
-    first = app.api_regen_readme("测试项目", ACT, ADMIN)
+    first = api_regen_readme("测试项目", ACT, ADMIN)
     assert first == {"ok": True, "written": True, "path": "_01-走访调研-第一期-资料索引.md"}
     assert (root / "测试项目" / "活动" / ACT / "_01-走访调研-第一期-资料索引.md").is_file()
 
-    second = app.api_regen_readme("测试项目", ACT, ADMIN)
+    second = api_regen_readme("测试项目", ACT, ADMIN)
     assert second["written"] is False
 
 
@@ -55,5 +56,5 @@ def test_refresh_all_readme_endpoint(root):
 def test_regen_readme_requires_write(root):
     """viewer 无写权限。"""
     with pytest.raises(Exception) as exc:
-        app.api_regen_readme("测试项目", ACT, VIEWER)
+        api_regen_readme("测试项目", ACT, VIEWER)
     assert getattr(exc.value, "status_code", None) == 403

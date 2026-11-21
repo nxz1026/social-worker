@@ -25,6 +25,7 @@ os.environ.setdefault(
 
 import app  # noqa: E402
 from api.routes.activities import api_activity_detail  # noqa: E402
+from api.routes.materials import api_activity_fill, api_activity_llm, api_activity_llm_fill
 
 ADMIN = {"id": 1, "username": "admin", "role": "admin",
          "projects": {"huimin": "write", "huadu": "write", "jili": "write"}}
@@ -241,7 +242,7 @@ def test_fill_writes_output(tmp_path, projects_root, monkeypatch):
     monkeypatch.setattr("api.state.ROOT", tmp_path)
     act = _activity(projects_root, "惠民项目", "01-走访调研-第一期")
 
-    out = app.api_activity_fill(
+    out = api_activity_fill(
         "惠民项目", "01-走访调研-第一期",
         {"template": "决算表", "data": {"合计金额": "1000"},
          "output": "08-决算表.docx"},
@@ -263,7 +264,7 @@ def test_fill_without_code_400(tmp_path, projects_root, monkeypatch):
     (act / "activity.yaml").write_text("status: imported\n", encoding="utf-8")
 
     with pytest.raises(app.HTTPException) as exc:
-        app.api_activity_fill("惠民项目", "01-走访调研-第一期",
+        api_activity_fill("惠民项目", "01-走访调研-第一期",
                               {"template": "决算表"}, _Req(), ADMIN, None)
     assert exc.value.status_code == 400
 
@@ -278,7 +279,7 @@ def test_llm_returns_result_without_writing(projects_root, monkeypatch):
         return {"导语": "测试导语", "目的": "测试目的"}
 
     monkeypatch.setattr(app._llm, "write", fake_write)
-    out = app.api_activity_llm("惠民项目", "01-走访调研-第一期",
+    out = api_activity_llm("惠民项目", "01-走访调研-第一期",
                                {"task": "brief", "style": "务实"}, _Req(), ADMIN, None)
 
     assert out["result"]["导语"] == "测试导语"
@@ -296,7 +297,7 @@ def test_llm_fill_writes_output(tmp_path, projects_root, monkeypatch):
     monkeypatch.setattr(app._llm, "write",
                         lambda task, facts, style="": {"导语": "AI 写的导语"})
 
-    out = app.api_activity_llm_fill(
+    out = api_activity_llm_fill(
         "惠民项目", "01-走访调研-第一期",
         {"task": "brief", "template": "简报", "output": "07-简报.docx"},
         _Req(), ADMIN, None)
@@ -313,7 +314,7 @@ def test_template_name_traversal_400(tmp_path, projects_root, monkeypatch):
     monkeypatch.setattr("api.state.ROOT", tmp_path)
     _activity(projects_root, "惠民项目", "01-走访调研-第一期")
     with pytest.raises(app.HTTPException) as exc:
-        app.api_activity_fill("惠民项目", "01-走访调研-第一期",
+        api_activity_fill("惠民项目", "01-走访调研-第一期",
                               {"template": "../决算表"}, _Req(), ADMIN, None)
     assert exc.value.status_code == 400
 

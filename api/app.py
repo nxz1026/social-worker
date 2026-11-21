@@ -94,7 +94,6 @@ from engine import project_checks as _project_checks  # noqa: E402
 from engine import readme as _readme  # noqa: E402
 from engine import cognee_index as _cognee_index  # noqa: E402
 from engine import fill as _fill  # noqa: E402
-from engine import ingest as _ingest  # noqa: E402
 from engine import llm as _llm  # noqa: E402
 from engine import photos as _photos  # noqa: E402
 from engine import projects as _projects  # noqa: E402
@@ -114,18 +113,19 @@ from api import auth as _auth_module  # noqa: E402
 from api.routes import docs as _r_docs  # noqa: E402
 from api.routes import activities as _r_activities  # noqa: E402
 from api.routes import projects as _r_projects  # noqa: E402
+from api.routes import materials as _r_materials  # noqa: E402
 
 app.include_router(_auth_module.router)
 app.include_router(_admin_module.router)
 app.include_router(_r_docs.router)
 app.include_router(_r_projects.router)
 app.include_router(_r_activities.router)
+app.include_router(_r_materials.router)
 # 测试直接按名字调端点函数（tests/test_api_web.py），这里保留同名入口。
 from api.routes.projects import (api_check_project, api_create_project,  # noqa: E402,F401
                                  api_get_project, api_list_activities,
                                  api_list_projects, api_project_code,
                                  api_update_project)
-from api.routes.activities import api_activity_detail  # noqa: E402,F401
 
 # 测试的 autouse fixture 只 patch app.audit（7 个测试文件都这么做）。routes 里的
 # 端点从 shared.audit 模块全局名取 audit，所以让 shared.audit.audit 与 app.audit
@@ -728,86 +728,13 @@ def generate(body: dict, request: Request, user=Depends(current_user),
             "finish_reason": finish}
 
 
-@app.get("/api/projects/{name}/activities/{dirname}/check")
-def api_check_activity(name: str, dirname: str, user=Depends(current_user)):
-    """15 项核对。返回 check() 的结果。权限同其它 activity 端点。"""
-    try:
-        data = _projects.load_project(name)
-    except FileNotFoundError:
-        raise HTTPException(404, f"项目不存在：{name}")
-    except ValueError as exc:
-        raise HTTPException(400, str(exc))
-    if user["role"] != "admin" and project_access(user, name) is None:
-        raise HTTPException(403, f"无项目 {name} 权限")
-    try:
-        act_dir = _projects.activity_dir(name, dirname)
-    except ValueError as exc:
-        raise HTTPException(400, str(exc))
-    if not act_dir.is_dir():
-        raise HTTPException(404, f"活动目录不存在：{dirname}")
-    return _checks.check(act_dir)
-
-
-@app.post("/api/projects/{name}/activities/{dirname}/readme")
-def api_regen_readme(name: str, dirname: str, user=Depends(require_write)):
-    """手动重生成单个活动的 README。内容没变时 written=False。"""
-    require_write(user)
-    activity_meta_or_404(name, dirname, user, write=True)
-    try:
-        written = _readme.write_activity_readme(name, dirname)
-    except FileNotFoundError:
-        raise HTTPException(404, f"活动目录不存在：{dirname}")
-    except ValueError as exc:
-        raise HTTPException(400, str(exc))
-    return {"ok": True, "written": written,
-            "path": _readme.readme_filename(dirname=dirname)}
-
-
 @app.post("/api/readme/refresh")
 def api_refresh_all_readme(user=Depends(require_admin)):
-    """全量刷新 README。只读目录 + 写 md，同步执行即可。"""
     require_admin(user)
     result = _readme.refresh_all()
     return {"written": len(result["written"]), "skipped": result["skipped"]}
 
 
-
-@app.patch("/api/projects/{name}/activities/{dirname}/check")
-def api_set_na(name: str, dirname: str, body: dict,
-               user=Depends(require_write)):
-    """标记活动核对项不适用。body: {"not_applicable": [15, 3]}。
-
-    只改 activity.yaml 的 not_applicable 字段，其余字段原样保留。
-    """
-    act_dir, _meta = activity_meta_or_404(name, dirname, user, write=True)
-    raw = body.get("not_applicable") if isinstance(body, dict) else None
-    if not isinstance(raw, list):
-        raise HTTPException(400, "not_applicable 必须是数组")
-
-    nos: set[int] = set()
-    for value in raw:
-        if isinstance(value, bool):
-            raise HTTPException(400, f"核对序号非法：{value}")
-        try:
-            no = int(value)
-        except (TypeError, ValueError):
-            raise HTTPException(400, f"核对序号非法：{value}")
-        if no < 1 or no > 15:
-            raise HTTPException(400, f"核对序号超出范围 1-15：{no}")
-        nos.add(no)
-
-    data = _ingest.read_activity_yaml(act_dir)
-    data["not_applicable"] = sorted(nos)
-    path = act_dir / _ingest.ACTIVITY_YAML
-    text = yaml.safe_dump(data, allow_unicode=True, sort_keys=False)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(text, encoding="utf-8")
-    tmp.replace(path)
-    return {"ok": True, "not_applicable": sorted(nos)}
-
-
-
-# ---------- Web 管理界面：项目管理 / 活动文件 / 材料生成 / 同步 / 仪表盘 ----------
 def _load_script(name: str):
     """按仓库 scripts/ 的路径加载脚本模块。
 
@@ -1070,93 +997,6 @@ def api_templates(user=Depends(current_user)):
                     "placeholders": placeholders})
     return out
 
-@app.post("/api/projects/{name}/activities/{dirname}/fill")
-def api_activity_fill(name: str, dirname: str, body: dict, request: Request,
-                      user=Depends(require_write), conn=Depends(db)):
-    """模板填充：build_data → 合并 data → render → 写到活动目录。"""
-    require_write(user)
-    act_dir, _meta = activity_meta_or_404(name, dirname, user, write=True)
-    activity_require_code(act_dir)
-
-    tpl = find_template(body.get("template"))
-    extra = body.get("data") or {}
-    if not isinstance(extra, dict):
-        raise HTTPException(400, "data 必须是对象")
-    dst = fill_output(act_dir, body, tpl)
-
-    merged = _activity.build_data(name, dirname, extra=extra, user=user)
-    try:
-        result = _fill.render(tpl, dst, merged)
-    except ValueError as exc:
-        raise HTTPException(400, str(exc))
-
-    rel = dst.relative_to(act_dir.resolve()).as_posix()
-    audit(conn, user["id"], "fill_template", project=name, target=rel,
-          detail={"activity": dirname, "template": tpl.stem,
-                  "filled": result["filled"]}, ip=request.client.host)
-    return {"path": rel, "filled": result["filled"],
-            "missing": result["missing"]}
-
-
-@app.post("/api/projects/{name}/activities/{dirname}/llm")
-def api_activity_llm(name: str, dirname: str, body: dict, request: Request,
-                     user=Depends(require_write), conn=Depends(db)):
-    """LLM 生成：提取 facts → llm.write()，结果直接返回，不落盘。"""
-    require_write(user)
-    act_dir, _meta = activity_meta_or_404(name, dirname, user, write=True)
-
-    task = str(body.get("task") or "").strip()
-    if not task:
-        raise HTTPException(400, "缺 task")
-    style = str(body.get("style") or "")
-    facts = _activity.build_data(name, dirname, user=user)
-    try:
-        result = _llm.write(task, facts, style=style)
-    except ValueError as exc:
-        raise HTTPException(400, str(exc))
-    except _llm.LLMError as exc:
-        raise HTTPException(502, f"LLM 生成失败：{exc}")
-
-    audit(conn, user["id"], "llm_generate", project=name, target=task,
-          detail={"activity": dirname, "style": style}, ip=request.client.host)
-    return {"task": task, "style": style, "result": result}
-
-
-@app.post("/api/projects/{name}/activities/{dirname}/llm-fill")
-def api_activity_llm_fill(name: str, dirname: str, body: dict, request: Request,
-                          user=Depends(require_write), conn=Depends(db)):
-    """LLM 生成 + 落盘：llm.write() → 合并进 build_data() → fill.render()。"""
-    require_write(user)
-    act_dir, _meta = activity_meta_or_404(name, dirname, user, write=True)
-
-    task = str(body.get("task") or "").strip()
-    if not task:
-        raise HTTPException(400, "缺 task")
-    tpl = find_template(body.get("template"))
-    style = str(body.get("style") or "")
-    dst = fill_output(act_dir, body, tpl)
-
-    facts = _activity.build_data(name, dirname, user=user)
-    try:
-        generated = _llm.write(task, facts, style=style)
-    except ValueError as exc:
-        raise HTTPException(400, str(exc))
-    except _llm.LLMError as exc:
-        raise HTTPException(502, f"LLM 生成失败：{exc}")
-
-    merged = _activity.build_data(name, dirname, extra=generated, user=user)
-    try:
-        result = _fill.render(tpl, dst, merged)
-    except ValueError as exc:
-        raise HTTPException(400, str(exc))
-
-    rel = dst.relative_to(act_dir.resolve()).as_posix()
-    audit(conn, user["id"], "llm_fill", project=name, target=rel,
-          detail={"activity": dirname, "task": task, "template": tpl.stem},
-          ip=request.client.host)
-    return {"path": rel, "filled": result["filled"],
-            "missing": result["missing"], "generated": generated}
-
 
 # ---------- B2：报销校验 / 图注 / 满意度 ----------
 # 缩略图缓存目录：放 ROOT/state 下，不落进项目目录（避免 Syncthing 同步缓存）
@@ -1266,67 +1106,6 @@ def api_activity_photos(name: str, dirname: str, sub: str = _caption.PHOTO_SUBDI
         })
     return out
 
-
-@app.post("/api/projects/{name}/activities/{dirname}/captions")
-def api_activity_captions(name: str, dirname: str, body: dict,
-                          user=Depends(require_write)):
-    """生成图注：picked 为空时由程序按文件名挑图。"""
-    require_write(user)
-    act_dir, _meta = activity_meta_or_404(name, dirname, user, write=True)
-
-    sub = str(body.get("sub") or _caption.PHOTO_SUBDIR).strip()
-    style = str(body.get("style") or "")
-    picked = body.get("picked") or []
-    if not isinstance(picked, list):
-        raise HTTPException(400, "picked 必须是文件名数组")
-
-    folder = safe_rel_path(act_dir, sub)
-    if picked:
-        photos: list[Path] = []
-        for raw in picked:
-            target = safe_rel_path(folder, str(raw).strip())
-            if target.is_file() and target.suffix.lower() in _caption.IMAGE_EXTS:
-                photos.append(target)
-        if not photos:
-            raise HTTPException(400, "勾选的照片都不存在")
-    else:
-        photos = _caption.pick_photos(act_dir, sub)
-    if not photos:
-        raise HTTPException(404, f"没有可用的照片：{sub}")
-
-    facts = _activity.build_data(name, dirname, user=user)
-    try:
-        return _caption.write_captions(photos, facts, style=style)
-    except _llm.LLMError as exc:
-        raise HTTPException(502, f"图注生成失败：{exc}")
-
-
-@app.post("/api/projects/{name}/activities/{dirname}/captions/fill")
-def api_captions_fill(name: str, dirname: str, body: dict,
-                      user=Depends(require_write)):
-    """把图注填进模板的 {{图注_N}}，返回 {path, filled, missing}。"""
-    require_write(user)
-    act_dir, _meta = activity_meta_or_404(name, dirname, user, write=True)
-
-    raw = body.get("captions")
-    if not isinstance(raw, list) or not raw:
-        raise HTTPException(400, "captions 不能为空")
-    captions = [{"file": str(item.get("file") or ""),
-                 "caption": str(item.get("caption") or "").strip()}
-                for item in raw if isinstance(item, dict)]
-    captions = [item for item in captions if item["caption"]]
-    if not captions:
-        raise HTTPException(400, "captions 里没有有效图注")
-
-    tpl = find_template(body.get("template"))
-    dst = fill_output(act_dir, body, tpl)
-    try:
-        result = _fill.render(tpl, dst, _caption.as_fill_data(captions))
-    except ValueError as exc:
-        raise HTTPException(400, str(exc))
-
-    return {"path": dst.relative_to(act_dir.resolve()).as_posix(),
-            "filled": result["filled"], "missing": result["missing"]}
 
 
 @app.post("/api/projects/{name}/activities/{dirname}/satisfaction/list")
