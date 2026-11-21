@@ -20,6 +20,7 @@ os.environ.setdefault(
     "SOCIALWORK_DB_DSN", "host=127.0.0.1 port=5432 dbname=test user=test password=x")
 
 import app  # noqa: E402
+from api.shared.paths import fill_output, force_flag  # noqa: E402
 
 
 def _act_dir(tmp_path, status=None):
@@ -41,7 +42,7 @@ def _tpl(tmp_path):
 def test_new_file_allowed(tmp_path):
     """目标不存在：直接允许。"""
     act = _act_dir(tmp_path, "reviewed")
-    dst = app._fill_output(act, {"output": "新文件.docx"}, _tpl(tmp_path))
+    dst = fill_output(act, {"output": "新文件.docx"}, _tpl(tmp_path))
     assert dst.name == "新文件.docx"
 
 
@@ -51,7 +52,7 @@ def test_existing_with_reviewed_status_blocked(tmp_path, status):
     act = _act_dir(tmp_path, status)
     (act / "已有.docx").write_bytes(b"x")
     with pytest.raises(app.ApiError) as exc:
-        app._fill_output(act, {"output": "已有.docx"}, _tpl(tmp_path))
+        fill_output(act, {"output": "已有.docx"}, _tpl(tmp_path))
     assert exc.value.status_code == 409
     assert exc.value.code == "NEED_FORCE"
 
@@ -60,7 +61,7 @@ def test_existing_with_generated_status_allowed(tmp_path):
     """纯生成件（status=generated）允许直接覆盖。"""
     act = _act_dir(tmp_path, "generated")
     (act / "生成件.docx").write_bytes(b"x")
-    dst = app._fill_output(act, {"output": "生成件.docx"}, _tpl(tmp_path))
+    dst = fill_output(act, {"output": "生成件.docx"}, _tpl(tmp_path))
     assert dst.name == "生成件.docx"
 
 
@@ -68,7 +69,7 @@ def test_existing_without_status_allowed(tmp_path):
     """没有 activity.yaml 的活动按纯生成件处理。"""
     act = _act_dir(tmp_path, None)
     (act / "无名.docx").write_bytes(b"x")
-    dst = app._fill_output(act, {"output": "无名.docx"}, _tpl(tmp_path))
+    dst = fill_output(act, {"output": "无名.docx"}, _tpl(tmp_path))
     assert dst.name == "无名.docx"
 
 
@@ -76,7 +77,7 @@ def test_force_overrides_guard(tmp_path):
     """force=true 时放行。"""
     act = _act_dir(tmp_path, "reviewed")
     (act / "已有.docx").write_bytes(b"x")
-    dst = app._fill_output(act, {"output": "已有.docx", "force": True}, _tpl(tmp_path))
+    dst = fill_output(act, {"output": "已有.docx", "force": True}, _tpl(tmp_path))
     assert dst.name == "已有.docx"
 
 
@@ -84,7 +85,7 @@ def test_check_overwrite_false_skips_guard(tmp_path):
     """dry_run 场景不参与检查。"""
     act = _act_dir(tmp_path, "reviewed")
     (act / "已有.docx").write_bytes(b"x")
-    dst = app._fill_output(act, {"output": "已有.docx"}, _tpl(tmp_path),
+    dst = fill_output(act, {"output": "已有.docx"}, _tpl(tmp_path),
                            check_overwrite=False)
     assert dst.name == "已有.docx"
 
@@ -93,7 +94,7 @@ def test_force_accepts_string_true(tmp_path):
     """表单传来的 "true" 字符串也要认。"""
     act = _act_dir(tmp_path, "signed")
     (act / "已有.docx").write_bytes(b"x")
-    dst = app._fill_output(act, {"output": "已有.docx", "force": "true"}, _tpl(tmp_path))
+    dst = fill_output(act, {"output": "已有.docx", "force": "true"}, _tpl(tmp_path))
     assert dst.name == "已有.docx"
 
 
@@ -102,21 +103,21 @@ def test_force_accepts_string_true(tmp_path):
 def test_force_flag_accepts_valid_values():
     """标准布尔表示都能认。"""
     for v in [True, "true", "TRUE", "1", "yes", "on"]:
-        assert app._force_flag(v) is True, f"{v!r} 应为 True"
+        assert force_flag(v) is True, f"{v!r} 应为 True"
     for v in [False, "false", "0", "no", "off", 0]:
-        assert app._force_flag(v) is False, f"{v!r} 应为 False"
+        assert force_flag(v) is False, f"{v!r} 应为 False"
 
 
 def test_force_flag_empty_means_false():
     """表单没填 force 时给空串，不该报错。"""
-    assert app._force_flag("") is False
-    assert app._force_flag(None) is False
+    assert force_flag("") is False
+    assert force_flag(None) is False
 
 
 def test_force_flag_invalid_gives_force_message():
     """非法值报错文案要说 force，不能说 enabled（原实现复用了 _as_bool）。"""
     with pytest.raises(app.ApiError) as exc:
-        app._force_flag("abc")
+        force_flag("abc")
     assert exc.value.status_code == 400
     assert "force" in exc.value.message
     assert "enabled" not in exc.value.message
@@ -131,11 +132,11 @@ def test_corrupt_activity_yaml_still_blocked(tmp_path):
     (act / "activity.yaml").write_text("这不是合法 yaml: [unclosed", encoding="utf-8")
     (act / "已有.docx").write_bytes(b"x")
     with pytest.raises(app.ApiError) as exc:
-        app._fill_output(act, {"output": "已有.docx"}, _tpl(tmp_path))
+        fill_output(act, {"output": "已有.docx"}, _tpl(tmp_path))
     assert exc.value.status_code == 409
     assert exc.value.code == "NEED_FORCE"
     assert "无法解析" in exc.value.message
 
     # 带 force 仍可覆盖
-    dst = app._fill_output(act, {"output": "已有.docx", "force": True}, _tpl(tmp_path))
+    dst = fill_output(act, {"output": "已有.docx", "force": True}, _tpl(tmp_path))
     assert dst.name == "已有.docx"

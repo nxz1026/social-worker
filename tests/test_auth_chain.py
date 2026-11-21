@@ -32,6 +32,7 @@ os.environ["SOCIALWORK_DB_DSN"] = (
 psycopg = pytest.importorskip("psycopg")
 
 import app  # noqa: E402
+from api.shared.paths import normalize_rel  # noqa: E402
 import apikey  # noqa: E402
 
 
@@ -278,15 +279,15 @@ def test_normalize_rel_strips_traversal():
 
     端点里还有第二道防线（resolve 后 relative_to(ROOT)），这里只验证第一道。
     """
-    assert ".." not in app._normalize_rel("../../etc/passwd")
-    assert app._normalize_rel("../../etc/passwd") == "etc/passwd"
-    assert app._normalize_rel("sources/a.docx") == "sources/a.docx"
+    assert ".." not in normalize_rel("../../etc/passwd")
+    assert normalize_rel("../../etc/passwd") == "etc/passwd"
+    assert normalize_rel("sources/a.docx") == "sources/a.docx"
     # 绝对路径越界归一成空串
-    assert app._normalize_rel("/etc/passwd") == ""
-    assert app._normalize_rel("") == ""
+    assert normalize_rel("/etc/passwd") == ""
+    assert normalize_rel("") == ""
 
 
 def test_download_source_rejects_absolute_outside():
     """绝对路径指向 ROOT 之外 → 归一为空 → 端点 404，不读文件。"""
-    rel = app._normalize_rel("/etc/shadow")
+    rel = normalize_rel("/etc/shadow")
     assert rel == "", "ROOT 之外的绝对路径必须归一为空"

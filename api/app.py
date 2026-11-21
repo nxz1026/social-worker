@@ -18,7 +18,6 @@ import io
 import json
 import mimetypes
 import os
-import posixpath
 import re
 import secrets
 import socket
@@ -27,10 +26,7 @@ import signal
 import subprocess
 import sys
 import tempfile
-import threading
 import time
-import urllib.error
-import urllib.parse
 import urllib.request
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
@@ -48,17 +44,38 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from PIL import Image
 
-import apikey as _apikey
-import keysafe as _keysafe
-from settings import SETTINGS
-import status as status_mod
+# 让脚本模式（python3 api/app.py）与包模式（import api.app）都能定位到
+# 同目录的 apikey/settings，以及仓库根的 engine/scripts 包。
+_API_DIR = Path(__file__).resolve().parent
+_REPO_ROOT = _API_DIR.parent
+for _p in (str(_REPO_ROOT), str(_API_DIR)):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
-ROOT = SETTINGS.root
-SCRIPTS = ROOT / "scripts"
+import apikey as _apikey  # noqa: E402
+import keysafe as _keysafe  # noqa: E402
+from settings import SETTINGS  # noqa: E402
+import status as status_mod  # noqa: E402
+
+from api.errors import ApiError  # noqa: E402
+from api.shared.audit import audit  # noqa: E402
+from api.shared.delivery import sw_delivery  # noqa: E402
+from api.shared.parse import as_bool  # noqa: E402
+from api.shared.paths import (  # noqa: E402
+    fill_output, force_flag, normalize_rel, safe_rel_path)
+from api.state import (  # noqa: E402
+    ALL_PROJECTS, API_KEY_BLOCKED_PREFIX, COGNEE_BASE, PG_DSN, REPO_ROOT,
+    ROOT, SCRIPTS, TEMPLATES_DIR, TOKEN_TTL_HOURS, TYPE_MAP, TZ,
+    _ALIAS_CACHE, _API_OCR_EXTS, _ARCHIVE_MAX_BYTES, _ARCHIVE_MAX_ENTRIES,
+    _ARCHIVE_MAX_UNCOMPRESSED, _ARCHIVE_RATIO_LIMIT, _ARCHIVE_RATIO_MIN_BYTES,
+    _COGNEE_CACHE, _COGNEE_TTL, _LOGIN_FAIL_MAX, _LOGIN_FAIL_WINDOW,
+    _LOGIN_FAILS, _LOGIN_FAILS_LOCK, _PHOTO_EXTS, _PHOTO_MAX_BYTES,
+    _PHOTO_MAX_FILES, _PHOTO_MAX_PIXELS, _PHOTO_MAX_TOTAL_BYTES,
+    _PROJECT_ACCESS, _SCRIPT_CACHE, _SUGGEST_CACHE)
+
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
-# engine 是仓库根下的包，不在 scripts 里，单独把仓库根加进 sys.path
-REPO_ROOT = Path(__file__).resolve().parent.parent
+# engine 是仓库根下的包，不在 scripts 里
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 import name_parse as _np  # noqa: E402
@@ -76,10 +93,6 @@ from engine import ingest as _ingest  # noqa: E402
 from engine import llm as _llm  # noqa: E402
 from engine import photos as _photos  # noqa: E402
 from engine import projects as _projects  # noqa: E402
-PG_DSN = SETTINGS.db_dsn
-TZ = timezone(timedelta(hours=SETTINGS.timezone_offset_hours))
-TOKEN_TTL_HOURS = SETTINGS.token_ttl_hours
-ALL_PROJECTS = SETTINGS.projects
 
 app = FastAPI(title="社工文档服务", version="0.1")
 app.add_middleware(
@@ -105,13 +118,6 @@ def _ensure_api_key_secret_column() -> None:
             conn.commit()
     except Exception:
         pass
-
-TEMPLATES_DIR = SETTINGS.templates_dir
-TYPE_MAP = {
-    "个案记录": "case-record", "家访提纲": "home-visit-outline",
-    "服务计划": "service-plan", "活动方案": "activity-plan",
-    "项目申报": "project-application", "评估报告": "evaluation-report",
-}
 
 def llm_chat(prompt: str, max_tokens: int | None = None) -> tuple[str, str]:
     """调上游 LLM。三个参数：base_url / api_key / model_id。
@@ -233,55 +239,7 @@ def user_projects(conn, user_id: int, role: str) -> dict[str, str]:
     """
     return _apikey.load_projects(conn, user_id, role)
 
-# ---------- 审计 ----------
-# 审计明细里绝不能出现口令 / token / 个案正文；只保留排查需要的字段。
-_SENSITIVE_DETAIL_KEYS = {
-    "password", "passwd", "pwd", "token", "api_key", "apikey", "key",
-    "secret", "context", "content",
-}
-
-def _safe_detail(detail):
-    """剔敏后的审计明细。口令/token/正文一律替换，不落库。"""
-    if not isinstance(detail, dict):
-        return detail
-    out = {}
-    for key, value in detail.items():
-        if str(key).lower() in _SENSITIVE_DETAIL_KEYS:
-            out[key] = "<redacted>"
-        elif isinstance(value, str) and len(value) > 300:
-            out[key] = value[:300] + "…"
-        else:
-            out[key] = value
-    return out
-
-def audit(conn, user_id, action, project=None, target=None, detail=None, ip=None):
-    with conn.cursor() as cur:
-        cur.execute(
-            """INSERT INTO audit_log(user_id, action, project, target, detail, ip)
-               VALUES(%s,%s,%s,%s,%s,%s)""",
-            (user_id, action, project, target,
-             json.dumps(_safe_detail(detail), ensure_ascii=False) if detail else None, ip),
-        )
-    conn.commit()
-
 # ---------- 统一错误 ----------
-class ApiError(HTTPException):
-    """机器可读的业务错误。
-
-    /api/sw/* 用 {"error": {code, message, hint}}；其余端点仍回 {"detail": ...}，
-    保持 Web 界面原有契约不变。
-    """
-
-    def __init__(self, status: int, code: str, message: str, hint: str = "",
-                 *, retry_after: int | None = None):
-        super().__init__(status_code=status, detail=message)
-        self.code = code
-        self.message = message
-        self.hint = hint
-        # 限速类错误用：客户端按秒数退避，同时写 Retry-After 头
-        self.retry_after = retry_after
-
-
 @app.exception_handler(ApiError)
 async def api_error_handler(request: Request, exc: ApiError):
     body: dict = {"error": {"code": exc.code, "message": exc.message,
@@ -384,11 +342,6 @@ def require_write(user=Depends(current_user)):
         raise HTTPException(403, "无写权限（需 editor/admin）")
     return user
 
-# API Key 只用于 Agent 干活，不能接管用户管理与审计（审计 P0-1）。
-# 用户此前明确「除用户管理外所有功能」，这里把管理面单独关掉。
-API_KEY_BLOCKED_PREFIX = "/api/admin/"
-
-
 def require_admin(user=Depends(current_user)):
     if user.get("auth_type") == "api_key":
         raise HTTPException(
@@ -396,9 +349,6 @@ def require_admin(user=Depends(current_user)):
     if user["role"] != "admin":
         raise HTTPException(403, "需 admin")
     return user
-
-
-_ALIAS_CACHE: dict[str, dict[str, list[str]]] = {}
 
 
 def _cached_project_aliases() -> dict[str, list[str]]:
@@ -522,10 +472,6 @@ def scopes_of(user, project: str = "") -> list[str]:
     return list((user.get("projects") or {}).keys())
 
 # ---------- 台账 / Cognee / 状态辅助 ----------
-COGNEE_BASE = "http://127.0.0.1:8000"
-_COGNEE_CACHE: dict[str, tuple[float, list[dict] | None]] = {}
-_COGNEE_TTL = 15
-
 def _manifest_file() -> Path:
     return ROOT / "state" / "manifest.yaml"
 
@@ -582,22 +528,9 @@ def _update_manifest(mutator):
     except ManifestCorrupt as exc:
         raise HTTPException(500, f"台账损坏，请先修复：{exc}")
 
-def _normalize_rel(rel: str) -> str:
-    """把台账里的路径归一成相对 ROOT 的 posix 形式；空值返回空串。"""
-    rel = str(rel or "").strip().replace("\\", "/")
-    if not rel:
-        return ""
-    p = Path(rel)
-    if p.is_absolute():
-        try:
-            return p.resolve().relative_to(ROOT.resolve()).as_posix()
-        except ValueError:
-            return ""
-    return posixpath.normpath(rel).lstrip("./")
-
 def _entry_md_path(e: dict) -> Path | None:
     """台账条目的 md 路径；没有就返回 None。"""
-    rel = _normalize_rel(e.get("md") or e.get("md_path") or "")
+    rel = normalize_rel(e.get("md") or e.get("md_path") or "", root=ROOT)
     return (ROOT / rel) if rel else None
 
 
@@ -679,9 +612,6 @@ def _roster_summary(project: str = "") -> dict:
         "rebuild": "python3 scripts/convert-md.py --relink-only",
     }
 
-_SUGGEST_CACHE: dict[tuple[str, float, int], tuple[str, str]] = {}
-
-
 def _suggest_project(path: Path) -> tuple[str, str]:
     """按文件名推荐项目：命中 project_aliases.yaml 就返回，判不了返回空。"""
     try:
@@ -721,14 +651,6 @@ def _audit_rows(date: str | None = None) -> list[dict]:
     return rows
 
 # ---------- 登录 ----------
-# 登录失败限速：内存计数，key = 用户名|客户端 IP。
-# 单机部署 + 多线程（uvicorn 线程池），用 Lock 保护；进程重启后清零可接受。
-_LOGIN_FAIL_WINDOW = 15 * 60          # 窗口 15 分钟
-_LOGIN_FAIL_MAX = 10                  # 同 key 窗口内失败 10 次后拒绝
-_LOGIN_FAILS: dict[str, list[float]] = {}
-_LOGIN_FAILS_LOCK = threading.Lock()
-
-
 def _client_ip(request: Request) -> str:
     """取客户端 IP；拿不到时用空串，避免 None 拼进 key。"""
     client = getattr(request, "client", None)
@@ -894,7 +816,7 @@ def download_source(token: str, request: Request,
     if e.get("status") == "deleted":
         raise HTTPException(404, "文档已删除")
     check_project(user, _legacy_project_name(str(e.get("project") or "")))
-    rel = _normalize_rel(str(e.get("original") or ""))
+    rel = normalize_rel(str(e.get("original") or ""), root=ROOT)
     if not rel:
         raise HTTPException(404, "台账没有原件路径")
     path = (ROOT / rel).resolve()
@@ -964,9 +886,6 @@ def _find_by_sha256(sha: str) -> tuple[str, dict] | None:
                 and rec.get("status") in {"done", "pending", "pending_review"}):
             return tok, rec
     return None
-
-# 图片 / PDF 经 API 上传时必须规范命名，否则拒收（服务端不再替客户端 OCR/识图）
-_API_OCR_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tif", ".tiff", ".pdf"}
 
 def _project_alias_maps() -> tuple[dict, dict]:
     """项目别名（config/project_aliases.yaml）+ 项目标签（feishu-flow.yaml）。"""
@@ -1383,21 +1302,6 @@ def _valid_role(role: str) -> str:
         raise HTTPException(400, "角色非法")
     return role
 
-def _as_bool(value) -> bool:
-    """严格布尔解析：字符串 "false" 不能当 True。"""
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return bool(value)
-    text = str(value).strip().lower()
-    if text in {"1", "true", "yes", "on"}:
-        return True
-    if text in {"0", "false", "no", "off"}:
-        return False
-    raise HTTPException(400, "enabled 必须是布尔值")
-
-_PROJECT_ACCESS = ("readonly", "write")
-
 def _canonical_project(name: str) -> str:
     """项目授权统一存中文项目名（目录名）；传 short 时尽量归一到目录名。"""
     raw = str(name or "").strip()
@@ -1485,7 +1389,7 @@ def admin_update_user(uid: int, body: dict, request: Request, conn=Depends(db),
                 raise HTTPException(400, "不能修改自己的管理员角色")
             cur.execute("UPDATE users SET role=%s WHERE id=%s", (new_role, uid))
         if "enabled" in body:
-            new_enabled = _as_bool(body["enabled"])
+            new_enabled = as_bool(body["enabled"])
             # 不能禁用自己：禁用后 Web 与 API 都进不来，只能改库恢复
             if uid == user["id"] and not new_enabled:
                 raise HTTPException(400, "不能禁用自己")
@@ -1862,9 +1766,6 @@ def _run_cognee_index(project: str) -> dict:
     return _load_script("index_cognee").run(ROOT, project)
 
 
-_SCRIPT_CACHE: dict[str, object] = {}
-
-
 def _script(name: str):
     """加载并缓存 scripts/<name>.py，同一进程内只 exec 一次。"""
     module = _SCRIPT_CACHE.get(name)
@@ -1914,44 +1815,6 @@ def _activity_meta_or_404(name: str, dirname: str, user, write: bool = False):
     if not act_dir.is_dir():
         raise HTTPException(404, f"活动目录不存在：{dirname}")
     return act_dir, meta
-
-
-def _safe_rel_path(base: Path, rel: str, *, allow_empty: bool = False) -> Path:
-    """把请求里的相对路径限制在 base 目录内。
-
-    先拒绝绝对路径与任何 `..` 段，再归一化并做 resolve 越界检查；
-    这样 `../`、`a/../../b`、绝对路径都回 400，不会被 normpath 悄悄抹平。
-    """
-    # 先 URL 解码再校验：否则 `..%2f..%2fx.docx`、`%2Fabs.docx` 这类编码形式
-    # 能绕过 `..` 与绝对路径检查（审计 P1-6 实测过）。
-    # 解码两次覆盖 `%252e` 这种双重编码。
-    raw_text = str(rel or "").strip()
-    for _ in range(2):
-        decoded = urllib.parse.unquote(raw_text)
-        if decoded == raw_text:
-            break
-        raw_text = decoded
-    raw = raw_text.replace("\\", "/")
-    if not raw:
-        if allow_empty:
-            return base.resolve()
-        raise HTTPException(400, "缺 path")
-    if raw.startswith("/"):
-        raise HTTPException(400, "路径必须是相对路径")
-    if any(seg == ".." for seg in raw.split("/")):
-        raise HTTPException(400, "路径不能包含 ..")
-    # 文件名长度上限：Linux NAME_MAX 255，留余量给扩展名与 .trash 前缀
-    if any(len(seg.encode("utf-8")) > 200 for seg in raw.split("/")):
-        raise HTTPException(400, "路径段过长（单段上限 200 字节）")
-    norm = _normalize_rel(raw)
-    if not norm:
-        raise HTTPException(400, "路径非法")
-    path = (base / norm).resolve()
-    try:
-        path.relative_to(base.resolve())
-    except ValueError:
-        raise HTTPException(400, "路径越界")
-    return path
 
 
 def _activity_yaml_data(act_dir: Path) -> dict:
@@ -2105,7 +1968,7 @@ def api_activity_files(name: str, dirname: str, sub: str = "",
                        user=Depends(current_user)):
     """列活动目录（或 sub 子目录）下的一级条目，按名称排序。"""
     act_dir, _meta = _activity_meta_or_404(name, dirname, user)
-    base = _safe_rel_path(act_dir, sub, allow_empty=True)
+    base = safe_rel_path(act_dir, sub, allow_empty=True)
     if not base.is_dir():
         raise HTTPException(404, f"目录不存在：{sub}")
     return [_file_item(p) for p in sorted(base.iterdir(), key=lambda x: x.name)
@@ -2296,7 +2159,7 @@ def api_activity_download(name: str, dirname: str, path: str,
                           user=Depends(current_user)):
     """下载活动内文件。path 相对活动目录，越界 → 400。"""
     act_dir, _meta = _activity_meta_or_404(name, dirname, user)
-    target = _safe_rel_path(act_dir, path)
+    target = safe_rel_path(act_dir, path)
     if not target.is_file():
         raise HTTPException(404, f"文件不存在：{path}")
     media = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
@@ -2309,7 +2172,7 @@ def api_activity_delete_file(name: str, dirname: str, body: dict, request: Reque
     """删除活动内文件：移到 <活动目录>/.trash/<时间戳>/ 下，不真删。"""
     require_write(user)
     act_dir, _meta = _activity_meta_or_404(name, dirname, user, write=True)
-    target = _safe_rel_path(act_dir, body.get("path"))
+    target = safe_rel_path(act_dir, body.get("path"))
     if not target.is_file():
         raise HTTPException(404, f"文件不存在：{body.get('path')}")
 
@@ -2362,76 +2225,6 @@ def _activity_require_code(act_dir: Path) -> None:
         raise HTTPException(400, "activity.yaml 缺 code，无法生成材料")
 
 
-def _force_flag(value) -> bool:
-    """解析 force 参数。非法值给 force 专属的报错文案，不复用 enabled 的。
-
-    空串 / None 按 False 处理：表单没填这一项时不该报错。
-    """
-    if value is None:
-        return False
-    if isinstance(value, bool):
-        return value
-    text = str(value).strip().lower()
-    if text == "":
-        return False
-    if text in {"1", "true", "yes", "on"}:
-        return True
-    if text in {"0", "false", "no", "off"}:
-        return False
-    raise ApiError(400, "VALIDATION", f"force 必须是布尔值，收到 {value!r}",
-                   "传 true 或 false，或不传")
-
-
-# 生成件被覆盖的保护：这些状态下目标文件视为「用户可能改过」，
-# 不加 force=true 不允许覆盖（覆盖不可撤销，手改内容会直接消失）。
-_OVERWRITE_GUARD_STATUS = {"generated", "imported", "signed", "edited", "reviewed"}
-
-
-def _overwrite_block_reason(act_dir: Path, dst: Path) -> str:
-    """判断覆盖 dst 是否需要显式确认；返回原因，可覆盖时返回空串。
-
-    规则：
-      1. 目标不存在 → 可写
-      2. activity.yaml 里 status 属于「可能被人工改过」的集合 → 需确认
-      3. status 明确是纯生成（未标 status 也算纯生成）→ 允许直接覆盖
-    """
-    if not dst.exists():
-        return ""
-    # activity.yaml 读不出来（损坏/解析失败）时按「状态不明」处理，要求确认。
-    # 否则把 yaml 写坏就等于关掉了保护 —— 审计发现的绕过路径。
-    raw_meta = _ingest.read_activity_yaml  # 便于测试 monkeypatch
-    try:
-        meta = raw_meta(act_dir)
-    except ValueError:
-        return ("activity.yaml 无法解析，无法判断是否有人工修改；"
-                "确认覆盖请传 force=true（建议先修好 activity.yaml）")
-    status = str(meta.get("status") or "").strip().lower()
-    if status in _OVERWRITE_GUARD_STATUS - {"generated"}:
-        return (f"目标文件已存在且活动状态为 {status}，"
-                f"覆盖会丢失人工修改内容；确认覆盖请传 force=true")
-    return ""
-
-
-def _fill_output(act_dir: Path, body: dict, tpl: Path,
-                 *, check_overwrite: bool = True) -> Path:
-    """解析输出路径：默认「模板名.扩展名」，限制在活动目录内。
-
-    check_overwrite=True 时（默认），目标已存在且活动状态表明可能人工改过，
-    且调用方没给 force=true，就抛 409 NEED_FORCE，避免静默覆盖。
-    """
-    default = f"{tpl.stem}{tpl.suffix}"
-    out_rel = str(body.get("output") or default).strip()
-    dst = _safe_rel_path(act_dir, out_rel)
-    if not dst.suffix:
-        dst = dst.with_name(dst.name + tpl.suffix)
-    if check_overwrite and not _force_flag(body.get("force", False)):
-        reason = _overwrite_block_reason(act_dir, dst)
-        if reason:
-            raise ApiError(409, "NEED_FORCE", reason,
-                           "确认无人工修改后重发请求并带上 force=true")
-    return dst
-
-
 @app.post("/api/projects/{name}/activities/{dirname}/fill")
 def api_activity_fill(name: str, dirname: str, body: dict, request: Request,
                       user=Depends(require_write), conn=Depends(db)):
@@ -2444,7 +2237,7 @@ def api_activity_fill(name: str, dirname: str, body: dict, request: Request,
     extra = body.get("data") or {}
     if not isinstance(extra, dict):
         raise HTTPException(400, "data 必须是对象")
-    dst = _fill_output(act_dir, body, tpl)
+    dst = fill_output(act_dir, body, tpl)
 
     merged = _activity.build_data(name, dirname, extra=extra, user=user)
     try:
@@ -2496,7 +2289,7 @@ def api_activity_llm_fill(name: str, dirname: str, body: dict, request: Request,
         raise HTTPException(400, "缺 task")
     tpl = _find_template(body.get("template"))
     style = str(body.get("style") or "")
-    dst = _fill_output(act_dir, body, tpl)
+    dst = fill_output(act_dir, body, tpl)
 
     facts = _activity.build_data(name, dirname, user=user)
     try:
@@ -2575,7 +2368,7 @@ def api_invoice_report(name: str, dirname: str, body: dict,
     report = _script("invoice_report")
     out_rel = str(body.get("output")
                   or f"{_invoice.INVOICE_SUBDIR}/{report.DETAIL_NAME}").strip()
-    dst = _safe_rel_path(act_dir, out_rel)
+    dst = safe_rel_path(act_dir, out_rel)
     if not dst.suffix:
         dst = dst.with_name(dst.name + ".xlsx")
 
@@ -2602,7 +2395,7 @@ def api_activity_photos(name: str, dirname: str, sub: str = _caption.PHOTO_SUBDI
     缩略图是 data URI（认证只走 x-token header，`<img src>` 带不了 header）。
     """
     act_dir, _meta = _activity_meta_or_404(name, dirname, user)
-    folder = _safe_rel_path(act_dir, sub)
+    folder = safe_rel_path(act_dir, sub)
     if not folder.is_dir():
         return []
 
@@ -2642,11 +2435,11 @@ def api_activity_captions(name: str, dirname: str, body: dict,
     if not isinstance(picked, list):
         raise HTTPException(400, "picked 必须是文件名数组")
 
-    folder = _safe_rel_path(act_dir, sub)
+    folder = safe_rel_path(act_dir, sub)
     if picked:
         photos: list[Path] = []
         for raw in picked:
-            target = _safe_rel_path(folder, str(raw).strip())
+            target = safe_rel_path(folder, str(raw).strip())
             if target.is_file() and target.suffix.lower() in _caption.IMAGE_EXTS:
                 photos.append(target)
         if not photos:
@@ -2681,7 +2474,7 @@ def api_captions_fill(name: str, dirname: str, body: dict,
         raise HTTPException(400, "captions 里没有有效图注")
 
     tpl = _find_template(body.get("template"))
-    dst = _fill_output(act_dir, body, tpl)
+    dst = fill_output(act_dir, body, tpl)
     try:
         result = _fill.render(tpl, dst, _caption.as_fill_data(captions))
     except ValueError as exc:
@@ -2931,34 +2724,6 @@ def _sw_preview(path: Path, limit: int = 500) -> str:
         return ""
 
 
-def _sw_delivery(missing: list[str], task: str) -> dict:
-    """判断本次 task 的产物是否真的落进了模板。
-
-    missing 里混着两类占位符：
-      1. 本 task 负责的（如 brief 的 简报导语/诉求描述/达到目标）—— 没填上就是失败
-      2. 别的环节负责的（图注_N 归 caption、合计金额归人工）—— 没填上只是提示
-
-    task 的字段清单就是白名单：只有落在里面的才算本次的责任。
-    返回 {"complete": bool, "expected": [...], "unfilled": [...], "other_missing": [...]}
-    """
-    spec = (_llm.TASKS or {}).get(task) or {}
-    expected = [str(x) for x in (spec.get("fields") or ())]
-    if not expected:
-        # 未知 task（理论上到不了这里）：不做判断，避免误报
-        return {"complete": True, "expected": [], "unfilled": [],
-                "other_missing": list(missing or [])}
-
-    missing_set = {str(m).strip("{} ") for m in (missing or [])}
-    unfilled = [f for f in expected if f in missing_set]
-    others = [m for m in (missing or []) if str(m).strip("{} ") not in set(expected)]
-    return {
-        "complete": not unfilled,
-        "expected": expected,
-        "unfilled": unfilled,
-        "other_missing": others,
-    }
-
-
 def _sw_run_impl(body: dict, request: Request, conn, user) -> dict:
     """一步生成的核心实现，/run 与 /batch generate 共用。"""
     project = str(body.get("project") or "").strip()
@@ -2996,7 +2761,7 @@ def _sw_run_impl(body: dict, request: Request, conn, user) -> dict:
         tpl = _sw_template(template)
     # dry_run 写到临时目录、不碰原文件，因此不参与覆盖检查
     dry_run = bool(body.get("dry_run", False))
-    dst_rel = _fill_output(act_dir, body, tpl, check_overwrite=not dry_run)
+    dst_rel = fill_output(act_dir, body, tpl, check_overwrite=not dry_run)
     generated: dict = {}
     self_check = None
 
@@ -3057,7 +2822,7 @@ def _sw_run_impl(body: dict, request: Request, conn, user) -> dict:
                             if not str(k).startswith("_")}
         # 交付完整性：本 task 该填的字段有没有真的落进模板。
         # self_check 只查文风用词与字数，查不出「生成了但没填进模板」这种丢内容问题。
-        out["delivery"] = _sw_delivery(result["missing"], task)
+        out["delivery"] = sw_delivery(result["missing"], task)
     return out
 
 
@@ -3479,21 +3244,6 @@ def api_sw_search(q: str, project: str = "", limit: int = 10,
 
 
 # ---------- 活动照片批量上传（docs/照片上传协议.md） ----------
-_PHOTO_MAX_FILES = 200
-_PHOTO_MAX_BYTES = 50 * 1024 * 1024
-_PHOTO_MAX_TOTAL_BYTES = 500 * 1024 * 1024   # 单次多文件上传整批上限
-# 单图像素上限（宽 × 高）：防「小文件解压出巨图」的解压炸弹
-_PHOTO_MAX_PIXELS = 80_000_000
-# 与 engine.photos.IMAGE_SUFFIXES 保持一致；这里单独写一份便于错误提示
-_PHOTO_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp"}
-# zip 上传预算：先看中央目录，再决定读不读，避免解压炸弹打爆内存/磁盘
-_ARCHIVE_MAX_BYTES = 1024 * 1024 * 1024           # 压缩包本身 1 GB
-_ARCHIVE_MAX_ENTRIES = 5000                        # 条目数上限
-_ARCHIVE_MAX_UNCOMPRESSED = 2 * 1024 * 1024 * 1024  # 解压后总量 2 GB
-_ARCHIVE_RATIO_LIMIT = 200                         # 单条压缩比上限
-_ARCHIVE_RATIO_MIN_BYTES = 10 * 1024 * 1024        # 只对 >10MB 的条目查压缩比
-
-
 def _photo_shot_date(raw: str, *, required: bool = True) -> str:
     """校验拍摄日期：必填、YYYY-MM-DD、不晚于今天。返回原字符串。"""
     text = str(raw or "").strip()

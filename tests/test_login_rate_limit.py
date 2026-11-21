@@ -18,6 +18,7 @@ os.environ.setdefault(
     "SOCIALWORK_DB_DSN", "host=127.0.0.1 port=5432 dbname=test user=test password=x")
 
 import app  # noqa: E402
+from api.state import _LOGIN_FAIL_MAX  # noqa: E402
 
 
 class Req:
@@ -74,7 +75,7 @@ def _login(password: str, *, username: str = "admin", ip: str = "203.0.113.9"):
 
 
 def test_11th_failure_returns_429():
-    for _ in range(app._LOGIN_FAIL_MAX):
+    for _ in range(_LOGIN_FAIL_MAX):
         with pytest.raises(app.HTTPException) as exc:
             _login("bad")
         assert exc.value.status_code == 401
@@ -94,14 +95,14 @@ def test_success_clears_failures():
     assert _login("good")["token"] == "tok-1"
 
     # 清零后又能连续失败 10 次而不被锁
-    for _ in range(app._LOGIN_FAIL_MAX):
+    for _ in range(_LOGIN_FAIL_MAX):
         with pytest.raises(app.HTTPException) as exc:
             _login("bad")
         assert exc.value.status_code == 401
 
 
 def test_different_ip_counts_independently():
-    for _ in range(app._LOGIN_FAIL_MAX):
+    for _ in range(_LOGIN_FAIL_MAX):
         with pytest.raises(app.HTTPException):
             _login("bad", ip="203.0.113.9")
 
@@ -114,7 +115,7 @@ def test_different_ip_counts_independently():
 
 
 def test_different_username_counts_independently():
-    for _ in range(app._LOGIN_FAIL_MAX):
+    for _ in range(_LOGIN_FAIL_MAX):
         with pytest.raises(app.HTTPException):
             _login("bad", username="admin")
 

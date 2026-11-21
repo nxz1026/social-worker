@@ -23,6 +23,7 @@ os.environ.setdefault(
     "SOCIALWORK_DB_DSN", "host=127.0.0.1 port=5432 dbname=test user=test password=x")
 
 import app  # noqa: E402
+from api.state import _ARCHIVE_MAX_ENTRIES  # noqa: E402
 
 PROJECT = "惠民社区保障资金项目"
 ACT = "11-共治行动-第一期"
@@ -123,7 +124,7 @@ def test_archive_compressed_size_413(env, monkeypatch):
 
 
 def test_archive_too_many_entries_400(env):
-    entries = {f"{ACT}/{i}.jpg": b"" for i in range(app._ARCHIVE_MAX_ENTRIES + 1)}
+    entries = {f"{ACT}/{i}.jpg": b"" for i in range(_ARCHIVE_MAX_ENTRIES + 1)}
     with pytest.raises(app.ApiError) as exc:
         _archive(_zip_bytes(entries))
     assert exc.value.status_code == 400

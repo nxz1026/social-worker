@@ -23,6 +23,7 @@ os.environ.setdefault(
     "SOCIALWORK_DB_DSN", "host=127.0.0.1 port=5432 dbname=test user=test password=x")
 
 import app  # noqa: E402
+from api.shared.paths import safe_rel_path  # noqa: E402
 import apikey  # noqa: E402
 
 ADMIN = {"id": 1, "username": "admin", "role": "admin",
@@ -335,19 +336,19 @@ def test_safe_rel_path_rejects_encoded_traversal(tmp_path):
     from fastapi import HTTPException
     for bad in ["..%2f..%2fx.docx", "%2fescape.docx", "%252e%252e/x.docx", "../x.docx"]:
         with pytest.raises(HTTPException) as exc:
-            app._safe_rel_path(tmp_path, bad)
+            safe_rel_path(tmp_path, bad)
         assert exc.value.status_code == 400, f"{bad} 应被拒绝"
     # 正常文件名仍然通过
-    assert app._safe_rel_path(tmp_path, "ok.docx").name == "ok.docx"
+    assert safe_rel_path(tmp_path, "ok.docx").name == "ok.docx"
 
 
 def test_safe_rel_path_rejects_overlong_segment(tmp_path):
     """审计 P1-5：单段超 200 字节要 400，不能落到 500。"""
     from fastapi import HTTPException
     with pytest.raises(HTTPException) as exc:
-        app._safe_rel_path(tmp_path, "a" * 300 + ".docx")
+        safe_rel_path(tmp_path, "a" * 300 + ".docx")
     assert exc.value.status_code == 400
-    assert app._safe_rel_path(tmp_path, "a" * 50 + ".docx").name.endswith(".docx")
+    assert safe_rel_path(tmp_path, "a" * 50 + ".docx").name.endswith(".docx")
 
 
 def test_require_admin_blocks_api_key():

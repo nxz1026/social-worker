@@ -14,6 +14,8 @@ os.environ.setdefault(
     "SOCIALWORK_DB_DSN", "host=127.0.0.1 port=5432 dbname=test user=test password=x")
 
 import app  # noqa: E402
+from api.shared.audit import safe_detail  # noqa: E402
+from api.shared.parse import as_bool  # noqa: E402
 
 
 def _user(projects=None, role="editor"):
@@ -74,7 +76,7 @@ def test_docs_health_zero_projects_empty():
 
 
 def test_safe_detail_redacts_secrets_and_case_text():
-    out = app._safe_detail({
+    out = safe_detail({
         "password": "tjfjyjr", "token": "abc", "context": "个案正文",
         "role": "admin", "projects": ["huadu"],
     })
@@ -89,11 +91,11 @@ def test_role_and_bool_parsing():
     assert app._valid_role("editor") == "editor"
     with pytest.raises(app.HTTPException):
         app._valid_role("root")
-    assert app._as_bool("false") is False
-    assert app._as_bool("true") is True
-    assert app._as_bool(0) is False
+    assert as_bool("false") is False
+    assert as_bool("true") is True
+    assert as_bool(0) is False
     with pytest.raises(app.HTTPException):
-        app._as_bool("maybe")
+        as_bool("maybe")
 
 
 def test_parse_archive_receipt_reads_last_marker():
