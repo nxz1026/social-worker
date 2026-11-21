@@ -27,6 +27,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -45,6 +46,7 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
+from PIL import Image
 
 import apikey as _apikey
 import keysafe as _keysafe
@@ -270,21 +272,35 @@ class ApiError(HTTPException):
     保持 Web 界面原有契约不变。
     """
 
-    def __init__(self, status: int, code: str, message: str, hint: str = ""):
+    def __init__(self, status: int, code: str, message: str, hint: str = "",
+                 *, retry_after: int | None = None):
         super().__init__(status_code=status, detail=message)
         self.code = code
         self.message = message
         self.hint = hint
+        # 限速类错误用：客户端按秒数退避，同时写 Retry-After 头
+        self.retry_after = retry_after
 
 
 @app.exception_handler(ApiError)
 async def api_error_handler(request: Request, exc: ApiError):
+    body: dict = {"error": {"code": exc.code, "message": exc.message,
+                            "hint": exc.hint}}
+    headers: dict[str, str] = {}
+    if exc.retry_after is not None:
+        body["retry_after"] = exc.retry_after
+        headers["Retry-After"] = str(exc.retry_after)
     if request.url.path.startswith("/api/sw/"):
-        return JSONResponse(status_code=exc.status_code, content={
-            "error": {"code": exc.code, "message": exc.message, "hint": exc.hint}})
-    # 非 v1 端点：沿用 FastAPI 默认形状，避免破坏现有 Web 前端
-    return JSONResponse(status_code=exc.status_code,
-                        content={"detail": exc.message})
+        return JSONResponse(status_code=exc.status_code, content=body,
+                            headers=headers)
+    # 非 v1 端点：沿用 FastAPI 默认形状，避免破坏现有 Web 前端；
+    # 限速时额外带上 error/retry_after，前端与 Agent 都能识别。
+    content: dict = {"detail": exc.message}
+    if exc.retry_after is not None:
+        content["error"] = body["error"]
+        content["retry_after"] = exc.retry_after
+    return JSONResponse(status_code=exc.status_code, content=content,
+                        headers=headers)
 
 
 # /api/sw/* 里由 FastAPI 抛出的普通 HTTPException（多为认证失败）也统一成错误码；
@@ -584,25 +600,6 @@ def _entry_md_path(e: dict) -> Path | None:
     rel = _normalize_rel(e.get("md") or e.get("md_path") or "")
     return (ROOT / rel) if rel else None
 
-def _normalize_rel(rel: str) -> str:
-    """台账路径归一成相对 ROOT 的 posix 形式；空值返回空串。"""
-    rel = str(rel or "").strip().replace("\\", "/")
-    if not rel:
-        return ""
-    p = Path(rel)
-    if p.is_absolute():
-        try:
-            return p.resolve().relative_to(ROOT.resolve()).as_posix()
-        except ValueError:
-            return ""
-    return posixpath.normpath(rel).lstrip("./")
-
-
-def _entry_md_path(e: dict) -> Path | None:
-    """台账条目的 md 路径；没有就返回 None。"""
-    rel = _normalize_rel(e.get("md") or e.get("md_path") or "")
-    return (ROOT / rel) if rel else None
-
 
 def _manifest_entry(token: str) -> dict | None:
     e = (_load_manifest().get("files") or {}).get(token)
@@ -724,12 +721,53 @@ def _audit_rows(date: str | None = None) -> list[dict]:
     return rows
 
 # ---------- 登录 ----------
+# 登录失败限速：内存计数，key = 用户名|客户端 IP。
+# 单机部署 + 多线程（uvicorn 线程池），用 Lock 保护；进程重启后清零可接受。
+_LOGIN_FAIL_WINDOW = 15 * 60          # 窗口 15 分钟
+_LOGIN_FAIL_MAX = 10                  # 同 key 窗口内失败 10 次后拒绝
+_LOGIN_FAILS: dict[str, list[float]] = {}
+_LOGIN_FAILS_LOCK = threading.Lock()
+
+
+def _client_ip(request: Request) -> str:
+    """取客户端 IP；拿不到时用空串，避免 None 拼进 key。"""
+    client = getattr(request, "client", None)
+    return str(getattr(client, "host", "") or "")
+
+
+def _prune_login_fails(now: float) -> None:
+    """清掉窗口外的失败时间戳，防止字典无限增长。调用方必须持锁。"""
+    cutoff = now - _LOGIN_FAIL_WINDOW
+    for key in list(_LOGIN_FAILS):
+        kept = [ts for ts in _LOGIN_FAILS[key] if ts > cutoff]
+        if kept:
+            _LOGIN_FAILS[key] = kept
+        else:
+            del _LOGIN_FAILS[key]
+
+
 @app.post("/api/login")
 def login(request: Request, body: dict, conn=Depends(db)):
     username = (body.get("username") or "").strip()
     password = body.get("password") or ""
     if not username or not password:
         raise HTTPException(400, "用户名或密码为空")
+    ip = _client_ip(request)
+    key = f"{username}|{ip}"
+    now = time.monotonic()
+    with _LOGIN_FAILS_LOCK:
+        _prune_login_fails(now)
+        recent = _LOGIN_FAILS.get(key, [])
+        if len(recent) >= _LOGIN_FAIL_MAX:
+            # 最早一次失败滚出窗口后才能重试，至少 1 秒，避免提示 0 秒
+            retry_after = max(1, int(_LOGIN_FAIL_WINDOW - (now - min(recent))) + 1)
+            raise ApiError(
+                429, "TOO_MANY_ATTEMPTS",
+                f"登录失败次数过多，请 {retry_after} 秒后再试",
+                f"{_LOGIN_FAIL_WINDOW // 60} 分钟内同一账号 + IP 失败 "
+                f"{_LOGIN_FAIL_MAX} 次会暂时锁定",
+                retry_after=retry_after)
+
     with conn.cursor() as cur:
         cur.execute(
             "SELECT id, password_hash, role, enabled FROM users WHERE username = %s",
@@ -737,12 +775,16 @@ def login(request: Request, body: dict, conn=Depends(db)):
         )
         row = cur.fetchone()
     if not row or not verify_pw(password, row[1]):
+        with _LOGIN_FAILS_LOCK:
+            _LOGIN_FAILS.setdefault(key, []).append(time.monotonic())
         raise HTTPException(401, "用户名或密码错误")
     if not row[3]:
         raise HTTPException(403, "账号已禁用")
-    token = create_session(conn, row[0], request.client.host,
-                           request.headers.get("user-agent", ""))
-    audit(conn, row[0], "login", ip=request.client.host)
+    with _LOGIN_FAILS_LOCK:
+        # 成功登录清空该 key 的失败记录，避免正常用户被历史失败拖累
+        _LOGIN_FAILS.pop(key, None)
+    token = create_session(conn, row[0], ip, request.headers.get("user-agent", ""))
+    audit(conn, row[0], "login", ip=ip)
     return {"token": token, "username": username, "role": row[2]}
 
 @app.get("/api/me")
@@ -3048,7 +3090,8 @@ def api_sw_capabilities():
             {"method": "POST", "path": "/api/sw/batch", "desc": "批量操作",
              "params": {"action": "check|generate|upload", "project": "可选",
                         "activities": "可选", "params": "动作参数"}},
-            {"method": "GET", "path": "/api/sw/tasks/{id}", "desc": "异步任务状态",
+            {"method": "GET", "path": "/api/sw/tasks/{id}",
+             "desc": "异步任务状态（未实现，返回 501）",
              "params": {}},
             {"method": "GET", "path": "/api/sw/search", "desc": "检索",
              "params": {"q": "关键词", "project": "可选", "limit": "默认 10"}},
@@ -3370,16 +3413,10 @@ def api_sw_batch(body: dict, request: Request, conn=Depends(db),
 
 @app.get("/api/sw/tasks/{task_id}")
 def api_sw_task(task_id: str, user=Depends(current_user)):
-    """异步任务状态（桩）。
-
-    飞书同步 / Cognee 入库后续接真正的任务表；先给 Agent 一个稳定契约，
-    避免以后改返回结构。
-    """
-    return {
-        "id": task_id,
-        "status": "done",
-        "result": {"note": "异步任务尚未接入，当前为同步完成的占位状态"},
-    }
+    """异步任务状态。当前尚未接入任务表。"""
+    raise ApiError(501, "TASKS_NOT_IMPLEMENTED",
+                   "异步任务尚未接入",
+                   "本机所有操作都是同步完成，无需轮询；此端点保留给未来长任务")
 
 
 @app.get("/api/sw/search")
@@ -3444,9 +3481,17 @@ def api_sw_search(q: str, project: str = "", limit: int = 10,
 # ---------- 活动照片批量上传（docs/照片上传协议.md） ----------
 _PHOTO_MAX_FILES = 200
 _PHOTO_MAX_BYTES = 50 * 1024 * 1024
-_PHOTO_MAX_TOTAL = 500 * 1024 * 1024
+_PHOTO_MAX_TOTAL_BYTES = 500 * 1024 * 1024   # 单次多文件上传整批上限
+# 单图像素上限（宽 × 高）：防「小文件解压出巨图」的解压炸弹
+_PHOTO_MAX_PIXELS = 80_000_000
 # 与 engine.photos.IMAGE_SUFFIXES 保持一致；这里单独写一份便于错误提示
 _PHOTO_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp"}
+# zip 上传预算：先看中央目录，再决定读不读，避免解压炸弹打爆内存/磁盘
+_ARCHIVE_MAX_BYTES = 1024 * 1024 * 1024           # 压缩包本身 1 GB
+_ARCHIVE_MAX_ENTRIES = 5000                        # 条目数上限
+_ARCHIVE_MAX_UNCOMPRESSED = 2 * 1024 * 1024 * 1024  # 解压后总量 2 GB
+_ARCHIVE_RATIO_LIMIT = 200                         # 单条压缩比上限
+_ARCHIVE_RATIO_MIN_BYTES = 10 * 1024 * 1024        # 只对 >10MB 的条目查压缩比
 
 
 def _photo_shot_date(raw: str, *, required: bool = True) -> str:
@@ -3466,8 +3511,29 @@ def _photo_shot_date(raw: str, *, required: bool = True) -> str:
     return text
 
 
+def _check_photo_pixels(name: str, data: bytes) -> None:
+    """只读图片头校验像素数，不解码整图。
+
+    ``Image.open`` 只解析头；随后立刻 ``verify()`` 并关闭，避免把整张图
+    decode 进内存（压缩比极高的小文件可以解出巨图，即解压炸弹）。
+    """
+    try:
+        with Image.open(io.BytesIO(data)) as img:
+            width, height = img.size
+            img.verify()
+    except Exception:
+        raise ApiError(400, "NOT_AN_IMAGE", f"图片无法解析：{name}",
+                       "文件可能损坏，或扩展名与实际格式不符")
+    if width * height > _PHOTO_MAX_PIXELS:
+        raise ApiError(
+            400, "IMAGE_TOO_LARGE",
+            f"图片像素过大：{name}（{width}×{height}，上限 "
+            f"{_PHOTO_MAX_PIXELS // 1_000_000} 百万像素）",
+            "先缩小图片再上传")
+
+
 def _photo_payloads(files: list[UploadFile]) -> list[tuple[str, bytes]]:
-    """把上传文件读成 [(原文件名, 字节)]，顺带做张数/扩展名/单张大小校验。"""
+    """把上传文件读成 [(原文件名, 字节)]，顺带做张数/扩展名/大小/像素校验。"""
     if not files:
         raise ApiError(400, "VALIDATION", "没有收到照片文件")
     if len(files) > _PHOTO_MAX_FILES:
@@ -3488,10 +3554,12 @@ def _photo_payloads(files: list[UploadFile]) -> list[tuple[str, bytes]]:
             raise ApiError(413, "FILE_TOO_LARGE",
                            f"单张超过 50 MB：{name}（{len(data) // 1024 // 1024} MB）")
         total += len(data)
-        if total > _PHOTO_MAX_TOTAL:
-            raise ApiError(413, "FILE_TOO_LARGE",
-                           "单次上传总量超过 500 MB",
+        if total > _PHOTO_MAX_TOTAL_BYTES:
+            raise ApiError(413, "PAYLOAD_TOO_LARGE",
+                           f"单次上传总量超过 "
+                           f"{_PHOTO_MAX_TOTAL_BYTES // 1024 // 1024} MB",
                            "分批上传，或打 zip 走 /api/sw/photos/upload-archive")
+        _check_photo_pixels(name, data)
         out.append((name, data))
     return out
 
@@ -3704,43 +3772,99 @@ def api_sw_photos_upload_archive(
                        f"只支持 zip：{fname or '（无文件名）'}",
                        "7z/rar 请先解压，或改用 /api/sw/photos/upload")
 
+    # 压缩包先落临时文件：边读边累计大小，避免把 1GB 一次性读进内存
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".zip")
+    tmp_path = Path(tmp.name)
     try:
-        zf = zipfile.ZipFile(io.BytesIO(archive.file.read()))
-    except (zipfile.BadZipFile, OSError) as exc:
-        raise ApiError(400, "ARCHIVE_UNSUPPORTED", f"压缩包无法读取：{exc}")
+        size = 0
+        while True:
+            chunk = archive.file.read(1 << 20)
+            if not chunk:
+                break
+            size += len(chunk)
+            if size > _ARCHIVE_MAX_BYTES:
+                raise ApiError(
+                    413, "PAYLOAD_TOO_LARGE",
+                    f"压缩包超过 {_ARCHIVE_MAX_BYTES // 1024 // 1024} MB",
+                    "请拆分后分批上传")
+            tmp.write(chunk)
+        tmp.close()
 
-    act_root = Path(_projects.PROJECTS_ROOT) / meta["name"] / "活动"
-    names = (sorted(p.name for p in act_root.iterdir() if p.is_dir())
-             if act_root.is_dir() else [])
+        try:
+            zf = zipfile.ZipFile(tmp_path)
+        except (zipfile.BadZipFile, OSError) as exc:
+            raise ApiError(400, "ARCHIVE_UNSUPPORTED", f"压缩包无法读取：{exc}")
 
-    groups: dict[str, list[tuple[str, bytes]]] = {}
-    unmatched: dict[str, int] = {}
-    total_images = 0
-    with zf:
-        for info in zf.infolist():
-            if info.is_dir():
-                continue
-            parts = [p for p in info.filename.replace("\\", "/").split("/") if p]
-            if not parts or parts[0] == "__MACOSX":
-                continue
-            leaf = parts[-1]
-            if leaf.startswith(".") or Path(leaf).suffix.lower() not in _PHOTO_EXTS:
-                continue
-            if info.file_size > _PHOTO_MAX_BYTES:
-                raise ApiError(413, "FILE_TOO_LARGE",
-                               f"单张超过 50 MB：{info.filename}")
-            total_images += 1
-            dirname = parts[0] if len(parts) > 1 else ""
-            matched = _match_activity_dir(dirname, names)
-            if not matched:
-                key = dirname or "（根目录）"
-                unmatched[key] = unmatched.get(key, 0) + 1
-                continue
-            data = zf.read(info)
-            if len(data) > _PHOTO_MAX_BYTES:      # 声明大小可能造假，读后再核一次
-                raise ApiError(413, "FILE_TOO_LARGE",
-                               f"单张超过 50 MB：{info.filename}")
-            groups.setdefault(matched, []).append((leaf, data))
+        act_root = Path(_projects.PROJECTS_ROOT) / meta["name"] / "活动"
+        names = (sorted(p.name for p in act_root.iterdir() if p.is_dir())
+                 if act_root.is_dir() else [])
+
+        groups: dict[str, list[tuple[str, bytes]]] = {}
+        unmatched: dict[str, int] = {}
+        total_images = 0
+        read_total = 0
+        with zf:
+            infos = zf.infolist()
+            # 预算检查必须挡在任何 zf.read() 之前：中央目录已给出每条的解压后大小
+            if len(infos) > _ARCHIVE_MAX_ENTRIES:
+                raise ApiError(
+                    400, "ARCHIVE_TOO_MANY_ENTRIES",
+                    f"压缩包条目过多：{len(infos)} 个，上限 {_ARCHIVE_MAX_ENTRIES}",
+                    "请按活动拆分压缩包")
+            declared = sum(max(0, info.file_size) for info in infos)
+            if declared > _ARCHIVE_MAX_UNCOMPRESSED:
+                raise ApiError(
+                    400, "ARCHIVE_TOO_LARGE",
+                    f"压缩包解压后约 {declared // 1024 // 1024} MB，"
+                    f"超过 {_ARCHIVE_MAX_UNCOMPRESSED // 1024 // 1024} MB",
+                    "请按活动拆分压缩包")
+            for info in infos:
+                # 单条压缩比异常 + 体积不小 → 典型解压炸弹特征，直接拒绝
+                if (info.file_size > _ARCHIVE_RATIO_MIN_BYTES
+                        and info.compress_size > 0
+                        and info.file_size / info.compress_size > _ARCHIVE_RATIO_LIMIT):
+                    raise ApiError(
+                        400, "ARCHIVE_SUSPICIOUS",
+                        f"压缩包条目异常：{info.filename}"
+                        f"（压缩比 {info.file_size // max(info.compress_size, 1)}:1）",
+                        "疑似压缩炸弹，请检查文件后重新打包")
+
+            for info in infos:
+                if info.is_dir():
+                    continue
+                parts = [p for p in info.filename.replace("\\", "/").split("/") if p]
+                if not parts or parts[0] == "__MACOSX":
+                    continue
+                leaf = parts[-1]
+                if leaf.startswith(".") or Path(leaf).suffix.lower() not in _PHOTO_EXTS:
+                    continue
+                if info.file_size > _PHOTO_MAX_BYTES:
+                    raise ApiError(413, "FILE_TOO_LARGE",
+                                   f"单张超过 50 MB：{info.filename}")
+                total_images += 1
+                dirname = parts[0] if len(parts) > 1 else ""
+                matched = _match_activity_dir(dirname, names)
+                if not matched:
+                    key = dirname or "（根目录）"
+                    unmatched[key] = unmatched.get(key, 0) + 1
+                    continue
+                data = zf.read(info)
+                if len(data) > _PHOTO_MAX_BYTES:      # 声明大小可能造假，读后再核一次
+                    raise ApiError(413, "FILE_TOO_LARGE",
+                                   f"单张超过 50 MB：{info.filename}")
+                # 实际字节也累计一遍：声明大小可能造假，读超预算立刻中止
+                read_total += len(data)
+                if read_total > _ARCHIVE_MAX_UNCOMPRESSED:
+                    raise ApiError(
+                        400, "ARCHIVE_TOO_LARGE",
+                        f"解压累计超过 "
+                        f"{_ARCHIVE_MAX_UNCOMPRESSED // 1024 // 1024} MB，已中止")
+                groups.setdefault(matched, []).append((leaf, data))
+    finally:
+        with contextlib.suppress(Exception):
+            tmp.close()
+        with contextlib.suppress(OSError):
+            tmp_path.unlink()
 
     if total_images == 0:
         raise ApiError(400, "ARCHIVE_EMPTY", "压缩包里没有图片")

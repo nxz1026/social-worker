@@ -1,10 +1,12 @@
 """engine P3：模板填充（docx / xlsx）。"""
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
 import openpyxl
+import pytest
 from docx import Document
 from docx.table import _Cell
 
@@ -13,9 +15,16 @@ sys.path.insert(0, str(REPO))
 
 from engine import activity, fill  # noqa: E402
 
-TEMPLATES = Path("/srv/social-work/templates/library")
+TEMPLATES = Path(os.environ.get("SOCIAL_WORK_TEMPLATES",
+                                "/srv/social-work/templates/library"))
 JUE_SUAN = TEMPLATES / "决算表.docx"
 BAO_XIAO = TEMPLATES / "报销单.xlsx"
+
+# 只给依赖真实模板的用例加 skip；用 tmp_path 自造文件的用例仍然要跑。
+requires_jue_suan = pytest.mark.skipif(
+    not JUE_SUAN.is_file(), reason=f"缺少真实模板 {JUE_SUAN}")
+requires_bao_xiao = pytest.mark.skipif(
+    not BAO_XIAO.is_file(), reason=f"缺少真实模板 {BAO_XIAO}")
 
 
 def _docx_text(path: Path) -> str:
@@ -35,6 +44,7 @@ def _docx_text(path: Path) -> str:
     return "\n".join(parts)
 
 
+@requires_jue_suan
 def test_scan_docx_placeholders():
     placeholders = fill.scan_placeholders(JUE_SUAN)
     assert "{{项目名称}}" in placeholders
@@ -42,12 +52,14 @@ def test_scan_docx_placeholders():
     assert placeholders == sorted(set(placeholders))
 
 
+@requires_bao_xiao
 def test_scan_xlsx_placeholders():
     placeholders = fill.scan_placeholders(BAO_XIAO)
     assert "{{费用归属部门}}" in placeholders
     assert "{{人民币大写}}" in placeholders
 
 
+@requires_jue_suan
 def test_render_docx_fills_values(tmp_path):
     dst = tmp_path / "决算表-已填.docx"
     data = {"项目名称": "测试项目", "活动名称": "测试活动",
@@ -63,6 +75,7 @@ def test_render_docx_fills_values(tmp_path):
     assert "{{项目名称}}" in _docx_text(JUE_SUAN)
 
 
+@requires_jue_suan
 def test_render_docx_missing_keeps_placeholder(tmp_path):
     dst = tmp_path / "决算表-缺字段.docx"
     result = fill.render_docx(JUE_SUAN, dst, {})
@@ -74,6 +87,7 @@ def test_render_docx_missing_keeps_placeholder(tmp_path):
     assert "{{项目名称}}" in _docx_text(dst)
 
 
+@requires_jue_suan
 def test_render_docx_none_and_empty_clears(tmp_path):
     dst = tmp_path / "决算表-清空.docx"
     result = fill.render_docx(JUE_SUAN, dst,
@@ -84,6 +98,7 @@ def test_render_docx_none_and_empty_clears(tmp_path):
     assert result["filled"] >= 2
 
 
+@requires_jue_suan
 def test_render_is_idempotent(tmp_path):
     first = tmp_path / "第一次.docx"
     second = tmp_path / "第二次.docx"
@@ -98,6 +113,7 @@ def test_render_is_idempotent(tmp_path):
     assert "测试项目" in _docx_text(second)
 
 
+@requires_bao_xiao
 def test_render_xlsx_keeps_style_and_formula(tmp_path):
     dst = tmp_path / "报销单-已填.xlsx"
     data = {"费用归属部门": "温江柳城", "填表日期": "2026年11月18日",
@@ -114,6 +130,7 @@ def test_render_xlsx_keeps_style_and_formula(tmp_path):
     wb.close()
 
 
+@requires_jue_suan
 def test_render_dispatches_by_suffix(tmp_path):
     dst = tmp_path / "out.docx"
     result = fill.render(JUE_SUAN, dst, {"项目名称": "测试项目"})
@@ -130,6 +147,7 @@ def _table_rows_text(path: Path, table_idx: int) -> list[list[str]]:
             for row in table.rows]
 
 
+@requires_jue_suan
 def test_render_docx_row_index_list_values(tmp_path):
     """带序号的占位符按列表逐行取值：第一行横幅/10，第二行 KT板/120。"""
     dst = tmp_path / "决算表-多行.docx"
@@ -151,6 +169,7 @@ def test_render_docx_row_index_list_values(tmp_path):
     assert result["filled"] > 0
 
 
+@requires_jue_suan
 def test_render_docx_row_index_out_of_range_blank(tmp_path):
     """列表比表格行数短时，超出部分填空，不抛错。"""
     dst = tmp_path / "决算表-短列表.docx"
@@ -164,6 +183,7 @@ def test_render_docx_row_index_out_of_range_blank(tmp_path):
     assert "物品名称_2" not in result["missing"]
 
 
+@requires_jue_suan
 def test_render_docx_indexed_key_wins_over_base(tmp_path):
     """精确的 字段_1 优先于无序号 key。"""
     dst = tmp_path / "决算表-精确key.docx"
@@ -174,6 +194,7 @@ def test_render_docx_indexed_key_wins_over_base(tmp_path):
     assert rows[2][1] == "通用"
 
 
+@requires_jue_suan
 def test_render_docx_without_index_key_still_fills(tmp_path):
     """无序号 key 兼容旧用法：所有数据行填同一个值。"""
     dst = tmp_path / "决算表-兼容.docx"
@@ -184,6 +205,7 @@ def test_render_docx_without_index_key_still_fills(tmp_path):
     assert "物品名称_1" not in result["missing"]
 
 
+@requires_bao_xiao
 def test_render_xlsx_row_index_list_values(tmp_path):
     """xlsx 同样按序号取列表值，超出长度填空。"""
     dst = tmp_path / "报销单-多行.xlsx"

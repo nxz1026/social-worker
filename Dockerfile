@@ -1,4 +1,8 @@
-FROM cognee/cognee:main
+# 上游镜像必须可复现（审计 C-12）：不要用 :main 浮动 tag。
+# 生产当前实际运行的 digest（2026-11-21 核实）：
+#   cognee/cognee@sha256:56e99ff6fbb406dd458746dcea102456cc6c6dbe3e6afa335371621aa239ff36
+# 上游未发布语义化 tag，只能钉 digest；升级时改这一行并记下日期。
+FROM cognee/cognee@sha256:56e99ff6fbb406dd458746dcea102456cc6c6dbe3e6afa335371621aa239ff36
 
 # 叠加：本地 OCR（发票等固定版式）+ Office 文档 loader（docx/xlsx/pptx/pdf）
 #

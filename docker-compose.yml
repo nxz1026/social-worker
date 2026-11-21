@@ -29,7 +29,7 @@ services:
 
   # Obsidian vault 同步：文件级双向，服务器端不需要跑 Obsidian
   syncthing:
-    image: syncthing/syncthing:latest
+    image: syncthing/syncthing:v2.1.7   # 固定版本（审计 C-12），升级前先验证同步兼容性
     container_name: social-work-syncthing
     restart: unless-stopped
     environment:

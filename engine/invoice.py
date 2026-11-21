@@ -324,6 +324,12 @@ def cross_check(act_dir: Path) -> dict:
     if unparsed:
         issues.append(f"{len(unparsed)} 张发票未能识别金额：{'、'.join(unparsed)}")
 
+    # 证据冲突：文件名与正文金额/票号对不上。金额可能仍相等（用的是文件名口径），
+    # 但证据本身矛盾，不能对外说「三表通过」——必须升级为总体不通过。
+    conflicts = [item for item in invoices if str(item.get("parse_error") or "").strip()]
+    for item in conflicts:
+        issues.append(f"证据冲突：{item['file']}——{item['parse_error']}")
+
     def _diff(left: float | None, right: float | None) -> float | None:
         if left is None or right is None:
             return None
@@ -336,14 +342,25 @@ def cross_check(act_dir: Path) -> dict:
         if value is not None and abs(value) > _EPS:
             issues.append(f"{label} 差 {value:+.2f} 元")
 
-    consistent = all(value is not None for value in (decision, reimburse, invoice_total)) \
+    # 两层结论分开：
+    #   amount_consistent —— 三个金额口径是否都取到且两两相等（纯算术）
+    #   evidence_valid    —— 每张纳入合计的票据证据是否自洽（无解析冲突）
+    # 最终 consistent 必须两者同时成立，避免「金额对上但票据矛盾」被判通过。
+    amount_consistent = (
+        all(value is not None for value in (decision, reimburse, invoice_total))
         and all(abs(value) <= _EPS for value in diff.values() if value is not None)
+        and not unparsed)
+    evidence_valid = not conflicts
+    consistent = amount_consistent and evidence_valid
 
     return {
         "决算": {"value": decision, "source": decision_src},
         "报销": {"value": reimburse, "source": reimburse_src},
         "发票": {"value": invoice_total, "count": len(invoices), "items": invoices},
         "consistent": consistent,
+        "amount_consistent": amount_consistent,
+        "evidence_valid": evidence_valid,
+        "conflicts": [{"file": it["file"], "reason": it["parse_error"]} for it in conflicts],
         "diff": diff,
         "issues": issues,
     }

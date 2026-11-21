@@ -14,6 +14,14 @@ from engine import activities, coding, projects  # noqa: E402
 HUADU_JILI = "花都社区激励资金项目"
 HUIMIN = "惠民社区保障资金项目"
 
+# 这两个用例读真实项目 yaml；测试机没有项目资料时跳过，不能 fail。
+requires_huadu_jili = pytest.mark.skipif(
+    not (projects.PROJECTS_ROOT / HUADU_JILI).is_dir(),
+    reason=f"缺少项目资料 {projects.PROJECTS_ROOT / HUADU_JILI}")
+requires_huimin = pytest.mark.skipif(
+    not (projects.PROJECTS_ROOT / HUIMIN).is_dir(),
+    reason=f"缺少项目资料 {projects.PROJECTS_ROOT / HUIMIN}")
+
 
 def test_make_code_sample():
     code = coding.make_code(year=2026, establish_month=8, act_type=1,
@@ -132,6 +140,7 @@ def test_next_serial_ignores_other_type_year_and_junk():
     assert coding.next_serial(codes, act_type=1, year=2026, act_year=2026) == 3
 
 
+@requires_huadu_jili
 def test_project_meta_huadu_jili():
     meta = projects.project_meta(HUADU_JILI)
     assert meta["name"] == HUADU_JILI
@@ -142,6 +151,7 @@ def test_project_meta_huadu_jili():
     assert meta["code"] == ""
 
 
+@requires_huimin
 def test_project_meta_huimin():
     meta = projects.project_meta(HUIMIN)
     assert meta["establish_month"] == 6

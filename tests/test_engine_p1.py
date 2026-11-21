@@ -15,6 +15,14 @@ HUADU_JILI = "花都社区激励资金项目"
 HUIMIN = "惠民社区保障资金项目"
 HUADU_BAOZHANG = "花都社区保障资金项目"
 
+# 这两个用例读真实项目 yaml；测试机没有项目资料时跳过，不能 fail。
+requires_huadu_jili = pytest.mark.skipif(
+    not (projects.PROJECTS_ROOT / HUADU_JILI).is_dir(),
+    reason=f"缺少项目资料 {projects.PROJECTS_ROOT / HUADU_JILI}")
+requires_huimin = pytest.mark.skipif(
+    not (projects.PROJECTS_ROOT / HUIMIN).is_dir(),
+    reason=f"缺少项目资料 {projects.PROJECTS_ROOT / HUIMIN}")
+
 
 def test_ordinal_basic():
     assert activities.ordinal(1) == "一"
@@ -30,6 +38,7 @@ def test_ordinal_tens_and_out_of_range():
     assert activities.ordinal(100) == "100"
 
 
+@requires_huadu_jili
 def test_plan_activities_huadu_jili():
     data = projects.load_project(HUADU_JILI)
     acts = activities.plan_activities(data)
@@ -43,6 +52,7 @@ def test_plan_activities_huadu_jili():
     assert acts[3]["activity_budget"] == round(4400 / 3, 2)
 
 
+@requires_huimin
 def test_plan_activities_huimin():
     data = projects.load_project(HUIMIN)
     acts = activities.plan_activities(data)

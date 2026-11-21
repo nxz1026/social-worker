@@ -11,18 +11,25 @@
 
 实现：
 - 有 ``cryptography`` 时用 AES-GCM（随机 nonce，密文自带认证标签）；
-- 没有时退化为「HMAC 校验 + base64 明文」，token 以 ``w1:`` 开头，明确标注弱加密。
+- 没有时默认 **拒绝写入**（fail closed）；只有显式设置环境变量
+  ``SOCIAL_WORK_ALLOW_WEAK_KEYSAFE=1`` 才退化为「HMAC 校验 + base64 明文」，
+  token 以 ``w1:`` 开头，明确标注弱加密。已有的 ``w1:`` token 仍可读取。
 """
 from __future__ import annotations
 
 import base64
 import hashlib
 import hmac
+import logging
 import os
 import secrets
 from pathlib import Path
 
+log = logging.getLogger(__name__)
+
 ENC_KEY_FILE = ".apikey-secret"      # 相对 ROOT，权限 0600
+# 允许弱加密的开关；默认未设置 = 禁止
+ALLOW_WEAK_ENV = "SOCIAL_WORK_ALLOW_WEAK_KEYSAFE"
 _KEY_LEN = 32
 _AES_PREFIX = "v1:"
 _WEAK_PREFIX = "w1:"
@@ -87,11 +94,18 @@ def _read_key(root) -> bytes | None:
     return data if _valid_key(data) else None
 
 
+def _weak_allowed() -> bool:
+    """只有显式设置 SOCIAL_WORK_ALLOW_WEAK_KEYSAFE=1/true/yes/on 才允许弱加密。"""
+    return os.environ.get(ALLOW_WEAK_ENV, "").strip().lower() in {
+        "1", "true", "yes", "on"}
+
+
 def encrypt(plain: str, root) -> str:
     """加密明文。空串返回空串。
 
     有 cryptography：AES-GCM，token = ``v1:`` + base64(nonce + ciphertext)。
-    无 cryptography：``w1:`` + base64(明文) + ``:`` + HMAC，弱加密，仅保证可校验。
+    无 cryptography：默认抛 RuntimeError（fail closed）；设置了
+    ``SOCIAL_WORK_ALLOW_WEAK_KEYSAFE`` 才写 ``w1:`` + base64(明文) + HMAC。
     """
     text = str(plain or "")
     if not text:
@@ -104,8 +118,16 @@ def encrypt(plain: str, root) -> str:
         return _AES_PREFIX + base64.urlsafe_b64encode(
             nonce + ciphertext).decode("ascii")
 
+    if not _weak_allowed():
+        raise RuntimeError(
+            "未安装 cryptography，且未设置 "
+            f"{ALLOW_WEAK_ENV}=1；拒绝用 base64 明文保存 API Key。"
+            "请安装 cryptography（pip install cryptography）后重试")
+
     # 弱兜底：base64 只是编码，任何能读文件的人都能直接看到明文；
     # HMAC 只能防止 token 被悄悄篡改，不能提供机密性。
+    log.warning("cryptography 不可用，API Key 以弱加密（base64 明文 + HMAC）"
+                "保存；生产环境请安装 cryptography")
     raw = base64.urlsafe_b64encode(text.encode("utf-8")).decode("ascii")
     mac = hmac.new(key, text.encode("utf-8"), hashlib.sha256).hexdigest()
     return _WEAK_PREFIX + raw + ":" + mac

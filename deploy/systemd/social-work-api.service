@@ -8,6 +8,8 @@ WorkingDirectory=/srv/social-work
 Environment=PATH=/home/ubuntu/.local/bin:/home/ubuntu/.nvm/versions/node/v24.22.2/bin:/usr/local/bin:/usr/bin:/bin
 Environment=HOME=/home/ubuntu
 Environment=SOCIAL_WORK_ROOT=/srv/social-work
+# 生产标记：settings.py 据此在 CORS 仍为 "*" 时告警（见 docs/服务器部署.md）
+Environment=SOCIAL_WORK_ENV=production
 EnvironmentFile=/srv/social-work/.env.service
 ExecStart=/usr/bin/python3 /srv/social-work/api/app.py
 Restart=on-failure

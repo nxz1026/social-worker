@@ -12,11 +12,14 @@
 """
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
 
 import yaml
+
+log = logging.getLogger(__name__)
 
 API_DIR = Path(__file__).resolve().parent
 REPO_ROOT = API_DIR.parent
@@ -110,11 +113,20 @@ def load(path: str | Path | None = None) -> Settings:
         raise RuntimeError(
             "未配置数据库连接：设置环境变量 SOCIALWORK_DB_DSN，或在 config/api.yaml 填 db.dsn")
 
+    cors_origins = [str(x) for x in (server.get("cors_origins") or ["*"])]
+    # 生产环境通配来源等于把 API 暴露给任意站点；只告警不阻断，避免上线即挂。
+    # 收敛方式见 docs/服务器部署.md「CORS 配置」。
+    if cors_origins == ["*"] and os.environ.get(
+            "SOCIAL_WORK_ENV", "").strip().lower() == "production":
+        log.warning(
+            "CORS 允许任意来源（*），生产环境请改为显式 allowlist：%s",
+            cfg_path or "内置默认值")
+
     return Settings(
         path=cfg_path,
         root=root,
         templates_dir=templates,
-        cors_origins=[str(x) for x in (server.get("cors_origins") or ["*"])],
+        cors_origins=cors_origins,
         timezone_offset_hours=int(server["timezone_offset_hours"]),
         token_ttl_hours=int(auth["token_ttl_hours"]),
         projects=[str(x) for x in (raw.get("projects") or DEFAULTS["projects"])],

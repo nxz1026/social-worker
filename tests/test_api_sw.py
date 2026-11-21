@@ -320,10 +320,12 @@ def test_batch_check(env):
     assert out["results"][0]["status"] == "ok"
 
 
-def test_sw_task_stub():
-    out = app.api_sw_task("t-1", ADMIN)
-    assert out["id"] == "t-1"
-    assert out["status"] == "done"
+def test_sw_task_stub_returns_501():
+    """审计 C-04：不再假装 done，明确回 501。"""
+    with pytest.raises(app.ApiError) as exc:
+        app.api_sw_task("t-1", ADMIN)
+    assert exc.value.status_code == 501
+    assert exc.value.code == "TASKS_NOT_IMPLEMENTED"
 
 
 # ---------------- 审计修复回归（2026-11-20） ----------------

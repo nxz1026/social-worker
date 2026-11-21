@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import shutil
 import subprocess
 import sys
@@ -20,7 +21,12 @@ from lxml import etree
 
 REPO = Path(__file__).resolve().parent.parent
 SCRIPTS = REPO / "scripts"
-TEMPLATES = Path("/srv/social-work/templates/library")
+TEMPLATES = Path(os.environ.get("SOCIAL_WORK_TEMPLATES",
+                                "/srv/social-work/templates/library"))
+
+# 整个文件都依赖真实模板资产；缺目录时全部跳过，不能 fail。
+pytestmark = pytest.mark.skipif(
+    not TEMPLATES.is_dir(), reason=f"缺少真实模板目录 {TEMPLATES}")
 
 sys.path.insert(0, str(SCRIPTS))
 import fix_template_layout as fix  # noqa: E402

@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -16,8 +17,10 @@ sys.path.insert(0, str(REPO))
 
 from engine import plan_parse  # noqa: E402
 
-# 真实计划书：只在部署环境存在，CI 上跳过
-REAL_ACT = Path("/srv/social-work/projects/惠民社区保障资金项目/活动/11-共治行动-第一期")
+# 真实计划书：只在部署环境存在，CI 上跳过；测试机可用 SOCIAL_WORK_PROJECTS 覆盖。
+PROJECTS = Path(os.environ.get("SOCIAL_WORK_PROJECTS",
+                               "/srv/social-work/projects"))
+REAL_ACT = PROJECTS / "惠民社区保障资金项目" / "活动" / "11-共治行动-第一期"
 
 
 def _write_docx(path: Path, tables) -> None:

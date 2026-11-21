@@ -1,6 +1,7 @@
 """engine.markdown：docx / xlsx 转 Markdown 冒烟测试。"""
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -11,7 +12,9 @@ sys.path.insert(0, str(REPO))
 
 from engine.markdown import docx_to_md, file_to_md, xlsx_to_md  # noqa: E402
 
-PROJECTS = Path("/srv/social-work/projects")
+# 项目资料默认在生产目录；测试机没有时用 SOCIAL_WORK_PROJECTS 指到别处。
+PROJECTS = Path(os.environ.get("SOCIAL_WORK_PROJECTS",
+                               "/srv/social-work/projects"))
 ACTIVITY = PROJECTS / "惠民社区保障资金项目" / "活动" / "11-共治行动-第一期"
 DOCX = ACTIVITY / "01-计划书-共治行动.docx"
 XLSX = ACTIVITY / "21-报销单.xlsx"

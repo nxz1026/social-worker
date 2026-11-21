@@ -1,0 +1,33 @@
+# social-worker 直接依赖（Python 3.14）
+#
+# 只列仓库代码直接 import 的包，版本按当前部署环境锁定（==）。
+# 安装：pip install -r requirements.txt
+#
+# 说明：
+#   - fastapi / uvicorn：API 服务与 ASGI 服务器
+#   - bcrypt：用户密码哈希
+#   - psycopg：PostgreSQL 访问（审计、用户、API Key）
+#   - python-docx / openpyxl / pillow：docx / xlsx / 图片处理
+#   - cryptography：API Key 明文加密（AES-GCM）
+#   - PyYAML：配置与台账（manifest.yaml）读写
+#   - python-multipart：FastAPI 文件上传表单
+#   - lxml：模板页眉/档案编号的 XML 修复与校验
+#   - pytest：测试
+#
+# 注意：OCR / PDF 转换依赖（rapidocr、docling、torchvision 等）体积大且
+#       只在 Docker 镜像内使用，见 Dockerfile，不放进本清单。
+
+fastapi==0.162.2
+uvicorn==0.54.0
+bcrypt==5.0.0
+psycopg==3.3.6
+python-docx==1.2.0
+openpyxl==3.1.5
+pillow==12.3.0
+cryptography==46.0.5
+PyYAML==6.0.3
+python-multipart==0.0.33
+lxml==6.1.3
+
+# 测试
+pytest==9.2.0

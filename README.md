@@ -25,7 +25,7 @@
 ```
 social-worker/
 ├── api/
-│   ├── app.py             FastAPI：53 个端点（Web 管理 + Agent 接口）
+│   ├── app.py             FastAPI 后端（端点数以 /openapi.json 为准）
 │   ├── apikey.py          API Key 认证（sk-sw- 前缀，sha256）
 │   ├── keysafe.py         Key 明文加密（AESGCM，密钥单独 0600 文件）
 │   ├── settings.py        配置加载
@@ -56,7 +56,7 @@ social-worker/
 ├── templates/library/     15 个模板，占位符统一 {{字段}} 格式
 ├── projects/              三个项目的资料
 ├── web/                   Web 管理界面（纯原生 JS）
-├── tests/                 456 个测试
+├── tests/                 pytest 用例（数量以 pytest 输出为准）
 ├── deploy.sh              同步到生产并重启
 └── docs/
     ├── API-使用说明.md     面向 Agent 的接口文档
@@ -109,6 +109,14 @@ social-worker/
 - **角色级**：`admin` / `editor` / `viewer`
 - **Agent 认证**：`Authorization: Bearer sk-sw-xxx`（长期有效，可吊销）
 
+## 安装
+
+```bash
+pip install -r requirements.txt
+```
+
+版本已按当前部署环境锁定；OCR / PDF 转换依赖（rapidocr、docling 等）体积较大，只在 Docker 镜像里安装，见 `Dockerfile`。
+
 ## 快速开始
 
 ```bash
@@ -124,12 +132,14 @@ curl -H "Authorization: Bearer sk-sw-xxx" https://<host>/sw-api/api/sw/capabilit
 
 ## 文档
 
-| 文档 | 内容 |
-|---|---|
-| [API-使用说明](docs/API-使用说明.md) | Agent 接口：认证、错误码、16 个端点、工作流 |
-| [照片上传协议](docs/照片上传协议.md) | 照片批量上传约定、三层防重复、压缩规格 |
-| [架构设计-v2](docs/架构设计-v2.md) | 多用户、权限矩阵、数据模型 |
-| [服务器部署](docs/服务器部署.md) | 服务清单、部署、数据库、同步、排障 |
+| 文档 | 性质 | 内容 |
+|---|---|---|
+| [API-使用说明](docs/API-使用说明.md) | 当前契约 | Agent 接口：认证、错误码、端点、工作流 |
+| [照片上传协议](docs/照片上传协议.md) | 当前契约 | 照片批量上传约定、三层防重复、压缩规格 |
+| [服务器部署](docs/服务器部署.md) | 当前契约 | 服务清单、部署、数据库、同步、排障 |
+| [架构设计-v2](docs/架构设计-v2.md) | 架构参考 | 多用户、权限矩阵、数据模型；含 2026-11-08/09 历史实施记录 |
+
+**端点数与测试数会随迭代变化**，以 `python3 scripts/stats.py` 与 `pytest` 输出为准。
 
 ## 环境要求
 
@@ -144,6 +154,6 @@ curl -H "Authorization: Bearer sk-sw-xxx" https://<host>/sw-api/api/sw/capabilit
 | 限制 | 说明 |
 |---|---|
 | 活动目录无删除 API | 只能删单个文件（移 `.trash`），不能删目录 |
-| `tasks` 端点是桩 | 无真实异步任务 |
+| `tasks` 端点返回 501 | 无真实异步任务，所有操作同步完成 |
 | 满意度分数需人工录 | 手写体不 OCR |
 | 旧项目键歧义 | `huadu` 可能指激励或保障，读旧台账按列表顺序 |
