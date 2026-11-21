@@ -220,6 +220,7 @@ def test_templates_returns_15(tmp_path, monkeypatch):
         suffix = ".xlsx" if seq % 3 == 0 else ".docx"
         (lib / f"模板{seq:02d}{suffix}").write_bytes(b"")
     monkeypatch.setattr(app, "ROOT", tmp_path)
+    monkeypatch.setattr("api.state.ROOT", tmp_path)
     monkeypatch.setattr(app._fill, "scan_placeholders",
                         lambda p: ["{{项目名称}}", "{{活动名称}}"])
 
@@ -235,6 +236,7 @@ def test_fill_writes_output(tmp_path, projects_root, monkeypatch):
     lib = _template_root(tmp_path)
     _docx_template(lib / "决算表.docx", [])
     monkeypatch.setattr(app, "ROOT", tmp_path)
+    monkeypatch.setattr("api.state.ROOT", tmp_path)
     act = _activity(projects_root, "惠民项目", "01-走访调研-第一期")
 
     out = app.api_activity_fill(
@@ -254,6 +256,7 @@ def test_fill_without_code_400(tmp_path, projects_root, monkeypatch):
     lib = _template_root(tmp_path)
     _docx_template(lib / "决算表.docx", [])
     monkeypatch.setattr(app, "ROOT", tmp_path)
+    monkeypatch.setattr("api.state.ROOT", tmp_path)
     act = _activity(projects_root, "惠民项目", "01-走访调研-第一期")
     (act / "activity.yaml").write_text("status: imported\n", encoding="utf-8")
 
@@ -286,6 +289,7 @@ def test_llm_fill_writes_output(tmp_path, projects_root, monkeypatch):
     lib = _template_root(tmp_path)
     _docx_template(lib / "简报.docx", ["导语"])
     monkeypatch.setattr(app, "ROOT", tmp_path)
+    monkeypatch.setattr("api.state.ROOT", tmp_path)
     act = _activity(projects_root, "惠民项目", "01-走访调研-第一期")
     monkeypatch.setattr(app._llm, "write",
                         lambda task, facts, style="": {"导语": "AI 写的导语"})
@@ -304,6 +308,7 @@ def test_llm_fill_writes_output(tmp_path, projects_root, monkeypatch):
 def test_template_name_traversal_400(tmp_path, projects_root, monkeypatch):
     _template_root(tmp_path)
     monkeypatch.setattr(app, "ROOT", tmp_path)
+    monkeypatch.setattr("api.state.ROOT", tmp_path)
     _activity(projects_root, "惠民项目", "01-走访调研-第一期")
     with pytest.raises(app.HTTPException) as exc:
         app.api_activity_fill("惠民项目", "01-走访调研-第一期",

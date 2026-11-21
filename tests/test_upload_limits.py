@@ -52,6 +52,7 @@ def env(tmp_path, monkeypatch):
         encoding="utf-8")
     monkeypatch.setattr(app._projects, "PROJECTS_ROOT", root)
     monkeypatch.setattr(app, "ROOT", tmp_path)
+    monkeypatch.setattr("api.state.ROOT", tmp_path)
     return root
 
 

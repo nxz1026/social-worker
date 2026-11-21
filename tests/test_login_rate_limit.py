@@ -18,6 +18,10 @@ os.environ.setdefault(
     "SOCIALWORK_DB_DSN", "host=127.0.0.1 port=5432 dbname=test user=test password=x")
 
 import app  # noqa: E402
+from api import auth as _auth  # noqa: E402
+from api.auth import api_login  # noqa: E402
+from api.state import _LOGIN_FAILS
+from api.state import _LOGIN_FAILS_LOCK
 from api.state import _LOGIN_FAIL_MAX  # noqa: E402
 
 
@@ -59,18 +63,18 @@ class FakeConn:
 
 @pytest.fixture(autouse=True)
 def _reset_state(monkeypatch):
-    with app._LOGIN_FAILS_LOCK:
-        app._LOGIN_FAILS.clear()
-    monkeypatch.setattr(app, "verify_pw", lambda pw, h: pw == "good")
-    monkeypatch.setattr(app, "create_session", lambda *a, **k: "tok-1")
-    monkeypatch.setattr(app, "audit", lambda *a, **k: None)
+    with _LOGIN_FAILS_LOCK:
+        _LOGIN_FAILS.clear()
+    monkeypatch.setattr(_auth, "verify_pw", lambda pw, h: pw == "good")
+    monkeypatch.setattr(_auth, "create_session", lambda *a, **k: "tok-1")
+    monkeypatch.setattr(_auth, "audit", lambda *a, **k: None)
     yield
-    with app._LOGIN_FAILS_LOCK:
-        app._LOGIN_FAILS.clear()
+    with _LOGIN_FAILS_LOCK:
+        _LOGIN_FAILS.clear()
 
 
 def _login(password: str, *, username: str = "admin", ip: str = "203.0.113.9"):
-    return app.login(Req(ip), {"username": username, "password": password},
+    return api_login(Req(ip), {"username": username, "password": password},
                      conn=FakeConn())
 
 

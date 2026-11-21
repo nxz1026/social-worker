@@ -21,6 +21,12 @@ os.environ.setdefault(
     "SOCIALWORK_DB_DSN", "host=127.0.0.1 port=5432 dbname=test user=test password=x")
 
 import app  # noqa: E402
+from api.admin import admin_create_user
+from api.admin import admin_delete_user
+from api.admin import admin_update_user
+from api.admin import admin_users
+from api.auth import api_list_keys
+from api.auth import api_sw_me
 
 HUIMIN = "惠民社区保障资金项目"
 JILI = "花都社区激励资金项目"
@@ -167,7 +173,7 @@ def _two_users():
 
 def test_admin_users_real_name_and_project_dict(projects_root):
     conn = FakeConn(_two_users(), {5: [ (HUIMIN, "readonly") ]})
-    out = app.admin_users(conn, ADMIN)
+    out = admin_users(conn, ADMIN)
     items = {i["username"]: i for i in out["items"]}
 
     assert items["admin"]["real_name"] == "聂聃"
@@ -181,7 +187,7 @@ def test_admin_users_real_name_and_project_dict(projects_root):
 
 def test_create_user_with_real_name_and_dict_projects(projects_root):
     conn = FakeConn(_two_users())
-    out = app.admin_create_user(
+    out = admin_create_user(
         {"username": "wang", "password": "pw", "real_name": "王五",
          "role": "editor",
          "projects": {HUIMIN: "write", JILI: "readonly"}},
@@ -196,7 +202,7 @@ def test_create_user_with_real_name_and_dict_projects(projects_root):
 
 def test_create_user_accepts_legacy_project_list(projects_root):
     conn = FakeConn(_two_users())
-    out = app.admin_create_user(
+    out = admin_create_user(
         {"username": "liu", "password": "pw", "role": "viewer",
          "projects": [HUIMIN]},
         Req(), conn, ADMIN)
@@ -205,7 +211,7 @@ def test_create_user_accepts_legacy_project_list(projects_root):
 
 def test_update_user_real_name_and_projects(projects_root):
     conn = FakeConn(_two_users(), {5: [(JILI, "write")]})
-    app.admin_update_user(
+    admin_update_user(
         5, {"real_name": "李四改", "projects": {HUIMIN: "readonly"}},
         Req(), conn, ADMIN)
 
@@ -217,7 +223,7 @@ def test_update_user_real_name_and_projects(projects_root):
 def test_update_user_rejects_bad_access(projects_root):
     conn = FakeConn(_two_users())
     with pytest.raises(app.HTTPException) as exc:
-        app.admin_update_user(5, {"projects": {HUIMIN: "owner"}}, Req(), conn, ADMIN)
+        admin_update_user(5, {"projects": {HUIMIN: "owner"}}, Req(), conn, ADMIN)
     assert exc.value.status_code == 400
 
 
@@ -225,7 +231,7 @@ def test_update_user_rejects_bad_access(projects_root):
 
 def test_delete_user_hard(projects_root):
     conn = FakeConn(_two_users())
-    out = app.admin_delete_user(5, Req(), conn, ADMIN)
+    out = admin_delete_user(5, Req(), conn, ADMIN)
     assert out["ok"] is True and out["removed"] is True
     assert [u[0] for u in conn.users] == [4]
 
@@ -233,7 +239,7 @@ def test_delete_user_hard(projects_root):
 def test_delete_self_rejected(projects_root):
     conn = FakeConn(_two_users())
     with pytest.raises(app.HTTPException) as exc:
-        app.admin_delete_user(4, Req(), conn, ADMIN)
+        admin_delete_user(4, Req(), conn, ADMIN)
     assert exc.value.status_code == 400
     assert "自己" in exc.value.detail
     assert [u[0] for u in conn.users] == [4, 5]
@@ -243,7 +249,7 @@ def test_delete_last_admin_rejected(projects_root):
     conn = FakeConn([(4, "admin", "聂聃", "admin", True, "2026-01-01")])
     caller = {"id": 9, "username": "other", "role": "admin", "projects": {}}
     with pytest.raises(app.HTTPException) as exc:
-        app.admin_delete_user(4, Req(), conn, caller)
+        admin_delete_user(4, Req(), conn, caller)
     assert exc.value.status_code == 400
     assert "最后一个 admin" in exc.value.detail
 
@@ -251,14 +257,14 @@ def test_delete_last_admin_rejected(projects_root):
 def test_delete_missing_user_404(projects_root):
     conn = FakeConn(_two_users())
     with pytest.raises(app.HTTPException) as exc:
-        app.admin_delete_user(99, Req(), conn, ADMIN)
+        admin_delete_user(99, Req(), conn, ADMIN)
     assert exc.value.status_code == 404
 
 
 # ---------------- /api/sw/me、/api/sw/keys ----------------
 
 def test_sw_me_uses_chinese_project_names():
-    out = app.api_sw_me(ADMIN)
+    out = api_sw_me(ADMIN)
     assert out["real_name"] == "聂聃"
     assert out["projects"] == {HUIMIN: "write", JILI: "write"}
     assert all("huimin" != key and "huadu" != key for key in out["projects"])
@@ -268,7 +274,7 @@ def test_sw_keys_include_real_name():
     now = datetime(2026, 11, 19, tzinfo=timezone.utc)
     row = (5, 4, "admin", "聂聃", "kratos-agent", "sk-sw-pnPz",
            None, None, now, now, None)
-    out = app.api_list_keys(FakeConn(key_rows=[row]), ADMIN)
+    out = api_list_keys(FakeConn(key_rows=[row]), ADMIN)
     assert out["items"][0]["real_name"] == "聂聃"
     assert out["items"][0]["user"] == "admin"
     assert out["items"][0]["revoked"] is False
@@ -279,13 +285,14 @@ def test_sw_keys_include_real_name():
 def test_sw_keys_return_decrypted_secret(tmp_path, monkeypatch):
     """新 Key 的 secret_enc 能解出完整明文。"""
     monkeypatch.setattr(app, "ROOT", tmp_path)
+    monkeypatch.setattr("api.state.ROOT", tmp_path)
     plain = "sk-sw-pnPzabcdefghijklmnopqrstuvwxyz0123456789"
     enc = app._keysafe.encrypt(plain, tmp_path)
     now = datetime(2026, 11, 19, tzinfo=timezone.utc)
     row = (6, 5, "editor", "李四", "web-签发", "sk-sw-pnPz",
            None, None, now, now, None, enc)
 
-    out = app.api_list_keys(FakeConn(key_rows=[row]), ADMIN)
+    out = api_list_keys(FakeConn(key_rows=[row]), ADMIN)
 
     assert out["items"][0]["secret"] == plain
 

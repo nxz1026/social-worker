@@ -48,6 +48,7 @@ def projects_root(tmp_path, monkeypatch):
         encoding="utf-8")
     monkeypatch.setattr(app._projects, "PROJECTS_ROOT", root)
     monkeypatch.setattr(app, "ROOT", tmp_path)
+    monkeypatch.setattr("api.state.ROOT", tmp_path)
     (tmp_path / "templates" / "library").mkdir(parents=True)
     return root
 

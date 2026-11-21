@@ -32,6 +32,10 @@ os.environ["SOCIALWORK_DB_DSN"] = (
 psycopg = pytest.importorskip("psycopg")
 
 import app  # noqa: E402
+from api.auth import create_session, get_user
+from api.auth import hash_pw
+from api.auth import verify_pw
+from api.deps import current_user
 from api.shared.paths import normalize_rel  # noqa: E402
 import apikey  # noqa: E402
 
@@ -50,28 +54,28 @@ def _db():
 # --------------------------------------------------------------------------
 
 def test_hash_pw_is_bcrypt_not_plaintext():
-    h = app.hash_pw("correct-horse")
+    h = hash_pw("correct-horse")
     assert h != "correct-horse"
     assert h.startswith("$2"), "bcrypt 哈希应以 $2 开头"
 
 
 def test_hash_pw_same_input_different_salt():
     """bcrypt 每次加盐，同密码两次哈希必然不同，但都能校验通过。"""
-    h1 = app.hash_pw("same-password")
-    h2 = app.hash_pw("same-password")
+    h1 = hash_pw("same-password")
+    h2 = hash_pw("same-password")
     assert h1 != h2
-    assert app.verify_pw("same-password", h1)
-    assert app.verify_pw("same-password", h2)
+    assert verify_pw("same-password", h1)
+    assert verify_pw("same-password", h2)
 
 
 def test_check_pw_rejects_wrong_password():
-    h = app.hash_pw("right")
-    assert not app.verify_pw("wrong", h)
+    h = hash_pw("right")
+    assert not verify_pw("wrong", h)
 
 
 def test_check_pw_bad_hash_returns_false():
     """损坏的哈希不能让整个登录流程抛 500。"""
-    assert app.verify_pw("x", "not-a-bcrypt-hash") is False
+    assert verify_pw("x", "not-a-bcrypt-hash") is False
 
 
 # --------------------------------------------------------------------------
@@ -88,10 +92,10 @@ def test_create_session_and_get_user_roundtrip():
             pytest.skip("库里没有可用用户")
         uid, username, role = row
 
-        token = app.create_session(conn, uid, "127.0.0.1", "pytest")
+        token = create_session(conn, uid, "127.0.0.1", "pytest")
         assert token and len(token) >= 32, "session token 应足够长"
 
-        user = app.get_user(conn, token)
+        user = get_user(conn, token)
         assert user is not None, "刚创建的 session 必须能查到用户"
         assert user["id"] == uid
         assert user["username"] == username
@@ -108,7 +112,7 @@ def test_create_session_and_get_user_roundtrip():
 def test_get_user_rejects_unknown_token():
     conn = _db()
     try:
-        assert app.get_user(conn, "definitely-not-a-real-token") is None
+        assert get_user(conn, "definitely-not-a-real-token") is None
     finally:
         conn.close()
 
@@ -129,7 +133,7 @@ def test_get_user_rejects_expired_session():
                 "VALUES(%s, %s, now() - interval '1 hour')", (row[0], token))
         conn.commit()
         try:
-            assert app.get_user(conn, token) is None, "过期 session 必须不认"
+            assert get_user(conn, token) is None, "过期 session 必须不认"
         finally:
             with conn.cursor() as cur:
                 cur.execute("DELETE FROM sessions WHERE token = %s", (token,))
@@ -162,14 +166,14 @@ def test_invalid_api_key_does_not_fall_back_to_session(monkeypatch):
             row = cur.fetchone()
         if not row:
             pytest.skip("库里没有可用用户")
-        good_token = app.create_session(conn, row[0], "127.0.0.1", "pytest")
+        good_token = create_session(conn, row[0], "127.0.0.1", "pytest")
 
         req = FakeReq({
             "authorization": "Bearer sk-sw-this-is-not-valid-at-all",
             "x-token": good_token,          # 合法的 session 也在场
         })
         with pytest.raises(HTTPException) as exc:
-            app.current_user(req, conn)
+            current_user(req, conn)
         assert exc.value.status_code == 401, "无效 Key + 合法 session 必须 401"
 
         with conn.cursor() as cur:

@@ -14,6 +14,8 @@ os.environ.setdefault(
     "SOCIALWORK_DB_DSN", "host=127.0.0.1 port=5432 dbname=test user=test password=x")
 
 import app  # noqa: E402
+from api.admin import valid_role
+from api.deps import scopes_of
 from api.shared.audit import safe_detail  # noqa: E402
 from api.shared.parse import as_bool  # noqa: E402
 
@@ -24,13 +26,13 @@ def _user(projects=None, role="editor"):
 
 
 def test_scopes_of_zero_projects_is_empty():
-    assert app.scopes_of(_user({})) == []
-    assert app.scopes_of(_user({"huadu": "write"})) == ["huadu"]
+    assert scopes_of(_user({})) == []
+    assert scopes_of(_user({"huadu": "write"})) == ["huadu"]
 
 
 def test_scopes_of_rejects_foreign_project():
     with pytest.raises(app.HTTPException) as exc:
-        app.scopes_of(_user({"huimin": "write"}), "huadu")
+        scopes_of(_user({"huimin": "write"}), "huadu")
     assert exc.value.status_code == 403
 
 
@@ -88,9 +90,9 @@ def test_safe_detail_redacts_secrets_and_case_text():
 
 
 def test_role_and_bool_parsing():
-    assert app._valid_role("editor") == "editor"
+    assert valid_role("editor") == "editor"
     with pytest.raises(app.HTTPException):
-        app._valid_role("root")
+        valid_role("root")
     assert as_bool("false") is False
     assert as_bool("true") is True
     assert as_bool(0) is False

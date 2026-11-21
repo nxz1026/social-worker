@@ -23,6 +23,12 @@ os.environ.setdefault(
     "SOCIALWORK_DB_DSN", "host=127.0.0.1 port=5432 dbname=test user=test password=x")
 
 import app  # noqa: E402
+from api.admin import admin_update_user
+from api.auth import api_sw_me
+from api.deps import can_write, project_access
+from api.deps import check_project
+from api.deps import current_user
+from api.deps import require_admin
 from api.shared.paths import safe_rel_path  # noqa: E402
 import apikey  # noqa: E402
 
@@ -126,6 +132,7 @@ def env(tmp_path, monkeypatch):
     brief.save(str(lib / "简报.docx"))
     monkeypatch.setattr(app._projects, "PROJECTS_ROOT", root)
     monkeypatch.setattr(app, "ROOT", tmp_path)
+    monkeypatch.setattr("api.state.ROOT", tmp_path)
     return root
 
 
@@ -138,13 +145,13 @@ def _key_row(*, revoked=None, expires=None, user_id=1, username="admin",
 
 def test_no_auth_401():
     with pytest.raises(app.HTTPException) as exc:
-        app.current_user(Req(), FakeConn())
+        current_user(Req(), FakeConn())
     assert exc.value.status_code == 401
 
 
 def test_wrong_key_401():
     with pytest.raises(app.HTTPException) as exc:
-        app.current_user(Req({"authorization": "Bearer sk-sw-not-a-real-key"}),
+        current_user(Req({"authorization": "Bearer sk-sw-not-a-real-key"}),
                          FakeConn(key_row=None))
     assert exc.value.status_code == 401
 
@@ -152,7 +159,7 @@ def test_wrong_key_401():
 def test_revoked_key_401():
     row = _key_row(revoked=datetime.now(timezone.utc))
     with pytest.raises(app.HTTPException) as exc:
-        app.current_user(Req({"authorization": "Bearer sk-sw-revoked"}),
+        current_user(Req({"authorization": "Bearer sk-sw-revoked"}),
                          FakeConn(key_row=row))
     assert exc.value.status_code == 401
 
@@ -160,7 +167,7 @@ def test_revoked_key_401():
 def test_expired_key_401():
     row = _key_row(expires=datetime.now(timezone.utc) - timedelta(days=1))
     with pytest.raises(app.HTTPException) as exc:
-        app.current_user(Req({"x-api-key": "sk-sw-expired"}),
+        current_user(Req({"x-api-key": "sk-sw-expired"}),
                          FakeConn(key_row=row))
     assert exc.value.status_code == 401
 
@@ -169,7 +176,7 @@ def test_valid_key_returns_user_with_project_dict():
     row = _key_row(expires=None)
     conn = FakeConn(key_row=row, user_row=(1, "admin", "admin", True),
                     projects=())
-    user = app.current_user(Req({"authorization": "Bearer sk-sw-valid"}), conn)
+    user = current_user(Req({"authorization": "Bearer sk-sw-valid"}), conn)
     assert user["username"] == "admin"
     assert user["auth_type"] == "api_key"
     assert isinstance(user["projects"], dict)
@@ -228,21 +235,21 @@ def test_project_name_and_short_match_each_other(env):
     by_name = {"id": 6, "username": "b", "role": "editor",
                "projects": {"惠民项目": "readonly"}}
     # 存 short，传目录名
-    assert app.can_write(by_short, "惠民项目") is True
+    assert can_write(by_short, "惠民项目") is True
     # 存目录名，传 short
-    assert app._project_access(by_name, "惠民社区保障资金项目") == "readonly"
+    assert project_access(by_name, "惠民社区保障资金项目") == "readonly"
     # 旧英文别名不再兜底
     legacy = {"id": 7, "username": "c", "role": "editor",
               "projects": {"huimin": "write"}}
-    assert app.can_write(legacy, "惠民项目") is False
+    assert can_write(legacy, "惠民项目") is False
 
 
 def test_can_write_and_check_project(env):
-    assert app.can_write(READONLY_EDITOR, "惠民项目") is False
-    assert app.can_write(EDITOR, "惠民项目") is True
-    assert app.can_write(ADMIN, "任意项目") is True
+    assert can_write(READONLY_EDITOR, "惠民项目") is False
+    assert can_write(EDITOR, "惠民项目") is True
+    assert can_write(ADMIN, "任意项目") is True
     with pytest.raises(app.ApiError) as exc:
-        app.check_project(READONLY_EDITOR, "惠民项目", write=True)
+        check_project(READONLY_EDITOR, "惠民项目", write=True)
     assert exc.value.code == "READONLY"
 
 
@@ -307,7 +314,7 @@ def test_run_template_not_found(env):
 
 
 def test_sw_me_shape():
-    out = app.api_sw_me(ADMIN)
+    out = api_sw_me(ADMIN)
     assert out["auth_type"] == "api_key"
     assert out["projects"]["huimin"] == "write"
 
@@ -357,14 +364,14 @@ def test_require_admin_blocks_api_key():
     keyed = {"id": 4, "username": "admin", "role": "admin",
              "auth_type": "api_key", "projects": {}}
     with pytest.raises(HTTPException) as exc:
-        app.require_admin(keyed)
+        require_admin(keyed)
     assert exc.value.status_code == 403
     assert "API Key" in str(exc.value.detail)
 
     # Web 会话仍可用
     session_user = {"id": 4, "username": "admin", "role": "admin",
                     "auth_type": "session", "projects": {}}
-    assert app.require_admin(session_user) is session_user
+    assert require_admin(session_user) is session_user
 
 
 def test_admin_cannot_disable_self():
@@ -388,12 +395,12 @@ def test_admin_cannot_disable_self():
         req = _fake_request()
 
         with pytest.raises(HTTPException) as exc:
-            app.admin_update_user(uid, {"enabled": False}, req, conn, admin_user)
+            admin_update_user(uid, {"enabled": False}, req, conn, admin_user)
         assert exc.value.status_code == 400
         assert "不能禁用自己" in str(exc.value.detail)
 
         with pytest.raises(HTTPException) as exc2:
-            app.admin_update_user(uid, {"role": "viewer"}, req, conn, admin_user)
+            admin_update_user(uid, {"role": "viewer"}, req, conn, admin_user)
         assert exc2.value.status_code == 400
         assert "管理员角色" in str(exc2.value.detail)
 
