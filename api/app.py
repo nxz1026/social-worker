@@ -302,26 +302,9 @@ def _manifest_lock():
         fcntl.flock(fd, fcntl.LOCK_UN)
         os.close(fd)
 
-def _update_manifest(mutator):
-    """锁内读-改-写台账。"""
-    try:
-        with _manifest_lock():
-            data = _load_manifest()
-            out = mutator(data)
-            _save_manifest(data)
-            return out
-    except ManifestCorrupt as exc:
-        raise HTTPException(500, f"台账损坏，请先修复：{exc}")
-
-def _entry_md_path(e: dict) -> Path | None:
-    """台账条目的 md 路径；没有就返回 None。"""
-    rel = normalize_rel(e.get("md") or e.get("md_path") or "", root=ROOT)
-    return (ROOT / rel) if rel else None
 
 
-def _manifest_entry(token: str) -> dict | None:
-    e = (_load_manifest().get("files") or {}).get(token)
-    return e if isinstance(e, dict) else None
+
 
 def _cognee_key() -> str:
     p = ROOT / ".cognee-key"
@@ -335,42 +318,8 @@ def _cognee_get(path: str, key: str, timeout: float = 6.0):
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
-def _dataset_for(project: str) -> str:
-    try:
-        cfg = yaml.safe_load((ROOT / "config" / "config.yaml").read_text(encoding="utf-8")) or {}
-        return str((cfg.get("datasets") or {}).get(project, project))
-    except Exception:
-        return project
 
-def _dataset_entries(dataset: str) -> list[dict] | None:
-    """Cognee 数据集条目；取不到返回 None（状态 unknown，不是「没索引」）。"""
-    key = _cognee_key()
-    if not key:
-        return None
-    now = time.time()
-    cached = _COGNEE_CACHE.get(dataset)
-    if cached and now - cached[0] < _COGNEE_TTL:
-        return cached[1]
-    try:
-        datasets = _cognee_get("/api/v1/datasets", key)
-        if not isinstance(datasets, list):
-            return None
-        ds = next((d for d in datasets
-                   if isinstance(d, dict) and str(d.get("name")) == dataset), None)
-        if not ds or not ds.get("id"):
-            return None
-        data = _cognee_get(f"/api/v1/datasets/{ds['id']}/data", key)
-        if isinstance(data, dict):
-            data = data.get("data") or data.get("items") or []
-        if not isinstance(data, list):
-            return None
-        _COGNEE_CACHE[dataset] = (now, data)
-        return data
-    except Exception:
-        return None
 
-def _feishu_template() -> str:
-    return status_mod.load_feishu_url_template(ROOT / "feishu-flow.yaml")
 
 def _roster(project: str = "") -> dict[str, str]:
     # 部署根目录是 entities.yaml；仓库里是 config/entities.yaml（模板）

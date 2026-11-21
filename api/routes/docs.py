@@ -118,13 +118,6 @@ def _load_manifest() -> dict:
     data.setdefault("files", {})
     return data
 
-def _save_manifest(manifest: dict) -> None:
-    p = _manifest_file()
-    p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_suffix(".tmp")
-    tmp.write_text(yaml.safe_dump(manifest, allow_unicode=True, sort_keys=True),
-                   encoding="utf-8")
-    tmp.replace(p)
 
 def _entry_md_path(e: dict) -> Path | None:
     """台账条目的 md 路径；没有就返回 None。"""
