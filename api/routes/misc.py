@@ -145,16 +145,19 @@ def generate(body: dict, request: Request, user=Depends(current_user),
     tpl_key = TYPE_MAP.get(doc_type)
     if not tpl_key:
         raise HTTPException(400, f"不支持的文书类型：{doc_type}")
+    # 授权判断放在任何文件 I/O 之前：零项目用户必须稳定拿到 403，
+    # 而不是因模板缺失等因素先撞 500（审计 N-01）。
+    project = (body.get("project") or "").strip()
+    datasets = scopes_of(user, project)
+    if not datasets:
+        raise HTTPException(403, "当前账号没有可用的项目")
+
     tpl_path = TEMPLATES_DIR / f"{tpl_key}.md"
     if not tpl_path.is_file():
         raise HTTPException(500, f"模板缺失：{tpl_path}")
     template = tpl_path.read_text(encoding="utf-8")
 
-    # 检索素材：显式 project 优先，否则合并全部授权项目；零项目直接拒绝
-    project = (body.get("project") or "").strip()
-    datasets = scopes_of(user, project)
-    if not datasets:
-        raise HTTPException(403, "当前账号没有可用的项目")
+    # 检索素材：显式 project 优先，否则合并全部授权项目
     search_out = ""
     if context:
         _, search_out, _ = search_datasets(context, datasets, qtype="CHUNKS")

@@ -166,3 +166,20 @@ def test_archive_normal_package_passes(env):
     assert out["ok"] is True
     assert out["matched"] == {ACT: 3}
     assert out["total_saved"] == 3
+
+
+def test_archive_rejects_huge_pixel_small_file(env):
+    """zip 里的小体积巨图必须被像素闸门挡住（审计 C-03 残余）。
+
+    90M 像素 PNG 压缩后只有几十 KB，字节预算拦不住；必须走 _check_photo_pixels。
+    这条覆盖 zip 分支，与直接上传路径共用同一套闸门。
+    """
+    img = Image.new("L", (9000, 9000), 0)
+    buf = io.BytesIO()
+    img.save(buf, "PNG")
+    png = buf.getvalue()
+    assert len(png) < 200 * 1024, "样本必须是小体积巨图，否则测不到像素闸门"
+
+    with pytest.raises(app.ApiError) as exc:
+        _archive(_zip_bytes({f"{ACT}/bomb.png": png}))
+    assert exc.value.code == "IMAGE_TOO_LARGE"

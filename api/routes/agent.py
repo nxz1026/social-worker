@@ -864,6 +864,9 @@ def api_sw_photos_upload_archive(
                         400, "ARCHIVE_TOO_LARGE",
                         f"解压累计超过 "
                         f"{_ARCHIVE_MAX_UNCOMPRESSED // 1024 // 1024} MB，已中止")
+                # 与直接上传走同一套像素闸门：小体积巨图（解压炸弹）必须在这里挡住，
+                # 否则 zip 分支会成为绕过路径。
+                _check_photo_pixels(leaf, data)
                 groups.setdefault(matched, []).append((leaf, data))
     finally:
         with contextlib.suppress(Exception):

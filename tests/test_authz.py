@@ -69,8 +69,21 @@ def test_search_zero_projects_403(monkeypatch):
 
 
 def test_generate_zero_projects_403(tmp_path, monkeypatch):
+    """零项目用户必须先拿到 403，不能因为模板缺失等原因先撞 500（审计 N-01）。"""
     (tmp_path / "case-record.md").write_text("模板", encoding="utf-8")
-    monkeypatch.setattr(app, "TEMPLATES_DIR", tmp_path)
+    # generate 已搬到 api/routes/misc，patch 要打在它实际读取的模块上
+    monkeypatch.setattr(_misc, "TEMPLATES_DIR", tmp_path)
+    with pytest.raises(app.HTTPException) as exc:
+        generate({"type": "个案记录", "context": "x"}, None, _user({}), None)
+    assert exc.value.status_code == 403
+
+
+def test_generate_zero_projects_403_without_template(monkeypatch):
+    """模板目录不存在时，零项目用户仍应稳定 403 而不是 500。
+
+    这对应干净环境（模板未入库）下的失败路径。
+    """
+    monkeypatch.setattr(_misc, "TEMPLATES_DIR", Path("/nonexistent/templates"))
     with pytest.raises(app.HTTPException) as exc:
         generate({"type": "个案记录", "context": "x"}, None, _user({}), None)
     assert exc.value.status_code == 403
