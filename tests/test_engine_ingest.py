@@ -35,7 +35,7 @@ def _make_docx(path: Path, text: str) -> None:
 
 
 @pytest.mark.skipif(not (REAL_DOCX_DIR / "00-目录.docx").is_file(),
-                    reason="真实样本 /tmp/act4/共治行动第一期 不存在")
+                    reason=f"真实活动目录不存在：{REAL_DOCX_DIR}")
 def test_read_activity_code_from_real_docx():
     assert ingest.read_activity_code(REAL_DOCX_DIR) == "CDYJR2026008-C-1110002"
 
