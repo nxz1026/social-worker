@@ -244,6 +244,35 @@ curl -X POST -H "x-token: $TOK" -H "Content-Type: application/json" \
   传活动目录内已存在的图片/PDF（不传表示人工确认、扫描件后补）；`clear: true` 撤销该序号记录。
 - 权限：项目 write（admin/editor）。记录写进 `activity.yaml` 的 `reviews` 字段，并记 `audit_log`。
 
+### 4.3.2 回收站：列出与恢复
+
+删除活动内文件时不会真删，而是移到 `<活动目录>/.trash/<时间戳>/<原相对路径>`。
+
+```bash
+# 列出回收站
+curl -H "x-token: $TOK" \
+  "https://<host>/sw-api/api/projects/<p>/activities/<a>/trash"
+
+# 恢复一个文件
+curl -X POST -H "x-token: $TOK" -H "Content-Type: application/json" \
+  -d '{"trash":".trash/20261121-120000/01-计划书.docx"}' \
+  "https://<host>/sw-api/api/projects/<p>/activities/<a>/trash/restore"
+```
+
+列表返回：
+
+```json
+{"items":[{"trash":".trash/20261121-120000/01-计划书.docx",
+           "original":"01-计划书.docx","deleted_at":"20261121-120000",
+           "size":464913,"mtime":"2026-11-21T20:00:00+08:00"}]}
+```
+
+- `trash` 字段可直接回传给恢复接口，不用自己拼路径。
+- 恢复时原位置已有同名文件 → **409**，不静默覆盖，需先改名或删除。
+- 只能恢复 `.trash/` 下的文件；越界路径（`..`、绝对路径）返回 400。
+- 恢复成功后时间戳目录若已空会自动清掉。
+- 权限：列出需项目读权限；恢复需项目 write。
+
 ### 4.4 检索
 
 ```bash
@@ -369,6 +398,34 @@ curl -X POST -H "Authorization: Bearer sk-sw-xxx" -H "Content-Type: application/
 | 项目编号、活动名称 | `activity.yaml` |
 | 归档人 | 当前用户的 `real_name` |
 | 年月日、填表日期 | 当天 |
+
+## 5.5 材料生成与维护（活动级）
+
+以下端点都在 `/api/projects/{p}/activities/{a}/` 下，`{p}`/`{a}` 为 URL 编码的项目名与活动目录名。
+除标注外均需项目 write 权限。
+
+| 端点 | 说明 |
+|---|---|
+| `POST .../fill` | 模板填充：`{"template":"决算表","data":{...}}` → 写盘，返回 `{path,filled,missing}` |
+| `POST .../llm` | LLM 生成，**只返回不落盘**：`{"task":"summary","style":"务实"}` |
+| `POST .../llm-fill` | LLM 生成后合并进模板并落盘 |
+| `POST .../captions` | 生成图注；`picked` 为空时程序按文件名挑图 |
+| `POST .../captions/fill` | 把图注填进模板 `{{图注_N}}` |
+| `POST .../readme` | 重生成单个活动的索引 md；内容没变返回 `written=false` |
+| `GET  .../download?path=` | 下载活动内文件；`path` 相对活动目录，越界 → 400 |
+| `POST .../invoice/report` | 生成发票明细表，返回 `{path,count,total}` |
+| `GET  .../satisfaction` | 读 `scores.json`（读权限即可） |
+| `PUT  .../satisfaction` | 写回分数：`{"scores":[{"file","score","satisfied"}]}` |
+| `POST .../satisfaction/list` | 扫问卷照片生成/更新 `scores.json`（保留已录分数） |
+| `POST .../satisfaction/fill` | 把分数统计填进汇总表模板 |
+| `GET  .../photos` | 列照片：文件名/大小/mtime/缩略图/是否程序默认选中 |
+
+### 5.5.1 LLM 端点的两个形态
+
+- `.../llm` 用来**预览**：生成结果直接返回，用户看过再决定落不落盘。
+- `.../llm-fill` 直接写盘。两者都用同一个 `engine.llm.write()`。
+
+真实调一次约 30~130 秒（含多轮文风重写），**调用方超时至少设 180 秒**。
 
 ## 6. 照片上传
 
@@ -588,6 +645,57 @@ python3 scripts/verify_assets.py
 
 **注意**：仓库 `/home/ubuntu/DSH/social-worker` 是开发目录，生产服务跑 `/srv/social-work` 副本。
 **改代码不同步就没生效**——必须跑 `deploy.sh`。
+
+## 11.5 管理与系统端点
+
+### 11.5.1 认证
+
+| 端点 | 说明 |
+|---|---|
+| `POST /api/login` | `{"username","password"}` → `{token, user}`。连续 11 次失败 → 429 |
+| `POST /api/logout` | 吊销当前 session |
+| `GET  /api/me` | 当前用户与项目权限 |
+
+### 11.5.2 用户管理（仅 admin）
+
+| 端点 | 说明 |
+|---|---|
+| `GET  /api/admin/users` | 用户列表（含 `real_name`、`projects` 字典） |
+| `POST /api/admin/users` | 建用户：`{username,password,role,real_name,projects}` |
+| `PATCH /api/admin/users/{uid}` | 改 role / 项目 / 启用状态 |
+| `DELETE /api/admin/users/{uid}` | 删用户 |
+| `DELETE /api/admin/users/{uid}/sessions` | 踢掉该用户全部会话 |
+| `GET  /api/admin/audit` | 审计日志查询 |
+
+**API Key 不能访问 `/api/admin/*`**（403，错误信息含「API Key」），必须用 session。
+
+### 11.5.3 文档归档（/api/docs）
+
+| 端点 | 说明 |
+|---|---|
+| `GET  /api/docs` | 文档列表，可按项目/类别/关键词过滤 |
+| `POST /api/docs` | 上传归档（multipart）。同内容幂等返回原 token；**跨项目不泄露** |
+| `GET  /api/docs/{token}` | 文档详情与 Markdown 正文 |
+| `PATCH /api/docs/{token}` | 改分类 / 项目 / 备注 |
+| `DELETE /api/docs/{token}?purge=true` | 下架（默认进回收站）或彻底删除 |
+| `GET  /api/docs/{token}/source` | 下载原件 |
+| `GET  /api/docs/health` | 各项目归档健康度 |
+
+**归档是同步执行**：上传后直接返回最终 `status`（`done` / `pending`）。
+大文件要走飞书上传，实测 30KB 约 10 秒、7MB 约 140 秒，**客户端超时建议 300 秒**。
+
+### 11.5.4 系统维护（仅 admin）
+
+| 端点 | 说明 |
+|---|---|
+| `GET  /api/dashboard` | 仪表盘：项目/活动数、完整性、最近活动 |
+| `GET  /api/templates` | 模板清单（名称 / 类型 / 占位符） |
+| `POST /api/readme/refresh` | 全量重写所有活动索引 md。**有全局副作用**，耗时长 |
+| `POST /api/sync/feishu` | 启动飞书镜像后台任务，返回 `{started:true}` |
+| `POST /api/cognee/index` | 启动 Cognee 入库后台任务，返回 `{started:true}` |
+| `GET  /api/cognee/datasets` | Cognee 数据集列表 |
+
+后三个是**后台任务**：端点只受理并返回 `started`，进度与结果看服务日志。
 
 ## 12. 已知限制
 
