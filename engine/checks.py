@@ -17,7 +17,10 @@
 """
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+import yaml
 
 from .ingest import read_activity_yaml
 
@@ -50,6 +53,12 @@ ANY_FILE_EXT = MEDIA_EXT | {".pdf", ".docx", ".xlsx", ".doc", ".txt", ".md", ".7
 NA_MARK = "不适用"
 
 STATUS_TEXT = {"ok": "齐", "partial": "待补", "missing": "缺", "na": "不适用"}
+
+# 核对记录时间统一用东八区（与 activity.yaml 的 imported_at 一致）
+CST = timezone(timedelta(hours=8))
+
+# activity.yaml 里签字扫描件允许的后缀（与 SIGNED_EXT 对齐）
+SCAN_EXTS = SIGNED_EXT | MEDIA_EXT
 
 
 def _prefixes(item: dict) -> list[str]:
@@ -281,6 +290,145 @@ def check(dir_path: Path) -> dict:
         "na_count": na_count,
         "complete": partial_count == 0 and missing_count == 0,
     }
+
+
+def read_reviews(act_dir: Path) -> dict[str, dict]:
+    """读 activity.yaml 的 reviews 字段，返回 {序号字符串: 记录}。缺失/格式错返回 {}。"""
+    try:
+        data = read_activity_yaml(act_dir)
+    except ValueError:
+        return {}
+    raw = data.get("reviews")
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, dict] = {}
+    for key, value in raw.items():
+        if isinstance(value, dict):
+            out[str(key)] = value
+    return out
+
+
+def merge_review_status(result: dict, reviews: dict) -> dict:
+    """把 reviews 合并进 check() 的返回。
+
+    每个 item 增加：
+      review: {"reviewed_by":..., "reviewed_at":..., "reviewed_note":...} | None
+      signed: bool
+    result 顶层增加：
+      reviewed_count  —— 已核对项数
+      signed_count    —— 已签字项数
+      deliverable     —— ok+partial 覆盖全部「必需项」且全部必需项都已核对
+    """
+    items = list(result.get("items") or [])
+    required: list[dict] = []
+    reviewed_count = 0
+    signed_count = 0
+    for item in items:
+        rec = reviews.get(str(item.get("no")))
+        is_required = item.get("status") != "na"
+        if is_required:
+            required.append(item)
+        if isinstance(rec, dict):
+            item["review"] = {
+                "reviewed_by": str(rec.get("reviewed_by") or ""),
+                "reviewed_at": str(rec.get("reviewed_at") or ""),
+                "reviewed_note": str(rec.get("reviewed_note") or ""),
+            }
+            reviewed_count += 1
+            if rec.get("signed"):
+                item["signed"] = True
+                signed_count += 1
+            else:
+                item["signed"] = False
+        else:
+            item["review"] = None
+            item["signed"] = False
+
+    covered = sum(1 for it in required
+                  if it.get("status") in ("ok", "partial"))
+    deliverable = (len(required) > 0 and covered == len(required)
+                   and reviewed_count >= len(required))
+    result["items"] = items
+    result["reviewed_count"] = reviewed_count
+    result["signed_count"] = signed_count
+    result["deliverable"] = deliverable
+    return result
+
+
+def _resolve_scan(act_dir: Path, scan: str) -> Path:
+    """校验 scan：活动目录内的图片文件，越界/不存在一律 ValueError。"""
+    base = Path(act_dir).resolve()
+    rel = str(scan or "").strip().replace("\\", "/")
+    if not rel or rel.startswith("/") or any(seg == ".." for seg in rel.split("/")):
+        raise ValueError(f"扫描件路径非法：{scan}")
+    path = (base / rel).resolve()
+    if base not in path.parents:
+        raise ValueError(f"扫描件必须在活动目录内：{scan}")
+    if not path.is_file():
+        raise ValueError(f"扫描件不存在：{scan}")
+    if path.suffix.lower() not in SCAN_EXTS:
+        raise ValueError(
+            f"扫描件只能是图片/PDF：{path.suffix.lower() or '无后缀'}")
+    return path
+
+
+def save_review(act_dir: Path, item_no: int, *,
+                reviewed_by: str, note: str = "",
+                signed: bool = False, scan: str = "",
+                clear: bool = False) -> dict:
+    """写/清 activity.yaml 的 reviews[序号]，原子写并保留其余字段。
+
+    - item_no 必须在 CHECKLIST 里（含第 15 项），否则 ValueError
+    - scan 传了就必须是活动目录内已存在的图片/PDF，否则 ValueError
+    - signed=True 不要求 scan（人工点击确认，扫描件后补）
+    - clear=True 删掉该序号的记录
+    """
+    from .ingest import ACTIVITY_YAML
+
+    act = Path(act_dir)
+    valid_nos = {item["no"] for item in CHECKLIST} | {OTHER_ITEM["no"]}
+    try:
+        no = int(item_no)
+    except (TypeError, ValueError):
+        raise ValueError(f"核对序号非法：{item_no}")
+    if no not in valid_nos:
+        raise ValueError(f"核对序号超出范围 1-{OTHER_ITEM['no']}：{no}")
+
+    data = read_activity_yaml(act)
+    raw = data.get("reviews")
+    reviews = {str(k): v for k, v in raw.items()
+               if isinstance(v, dict)} if isinstance(raw, dict) else {}
+
+    if clear:
+        reviews.pop(str(no), None)
+    else:
+        scan_rel = ""
+        if str(scan or "").strip():
+            scan_rel = _resolve_scan(act, scan).relative_to(act.resolve()).as_posix()
+        now = datetime.now(CST).isoformat(timespec="seconds")
+        record = {
+            "reviewed_by": str(reviewed_by or "").strip(),
+            "reviewed_at": now,
+            "reviewed_note": str(note or "").strip(),
+            "signed": bool(signed),
+        }
+        if signed:
+            record["signed_at"] = now
+        if scan_rel:
+            record["scan"] = scan_rel
+        reviews[str(no)] = record
+
+    if reviews:
+        data["reviews"] = {k: reviews[k] for k in sorted(reviews, key=int)}
+    else:
+        data.pop("reviews", None)
+
+    path = act / ACTIVITY_YAML
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(yaml.safe_dump(data, allow_unicode=True, sort_keys=False),
+                   encoding="utf-8")
+    tmp.replace(path)
+    return reviews.get(str(no), {})
 
 
 def _cell(text: str) -> str:

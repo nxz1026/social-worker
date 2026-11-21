@@ -229,6 +229,21 @@ curl -H "Authorization: Bearer sk-sw-xxx" \
 **15 项核对状态**：`ok` 齐 / `partial` 待补（如只有未签字 docx）/ `missing` 缺 / `na` 不适用。
 `complete` 要求 `partial_count == 0` 且 `missing_count == 0`。
 
+核对结果里每项还带 `review`（谁核对 / 何时 / 备注，未核对为 `null`）与 `signed`；
+顶层带 `reviewed_count`、`signed_count`、`deliverable`（必需项既齐全又全部核对过才为 `true`）。
+
+### 4.3.1 标记核对 / 签字
+
+```bash
+curl -X POST -H "x-token: $TOK" -H "Content-Type: application/json" \
+  -d '{"item":1,"note":"金额已核对","signed":false,"scan":""}' \
+  "https://<host>/sw-api/api/projects/惠民社区保障资金项目/activities/11-共治行动-第一期/review"
+```
+
+- `item`：材料序号 1–15；`note` 备注可选；`signed` 是否已签字；`scan` 可选，
+  传活动目录内已存在的图片/PDF（不传表示人工确认、扫描件后补）；`clear: true` 撤销该序号记录。
+- 权限：项目 write（admin/editor）。记录写进 `activity.yaml` 的 `reviews` 字段，并记 `audit_log`。
+
 ### 4.4 检索
 
 ```bash

@@ -352,6 +352,10 @@ td.nowrap, th.nowrap { white-space: nowrap; }
 .check-item .body { flex: 1; min-width: 0; }
 .check-item .name { font-size: 13px; }
 .check-item .detail { font-size: 11.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.check-item .review { display: block; margin-top: 3px; }
+.check-item.reviewed { background: #f6fbf8; }
+.check-item.reviewed:hover { background: #eff8f3; }
+.check-item .ops { display: flex; gap: 6px; flex: none; flex-wrap: wrap; justify-content: flex-end; }
 .check-sum { padding: 10px 12px; background: #fbfcfe; border-top: 1px solid var(--line); font-size: 12.5px; color: var(--muted); }
 
 .files-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }

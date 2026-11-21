@@ -649,6 +649,7 @@ async function pageActivity(name, dirname, params) {
           <span class="muted">15 项 · ✓ 已齐 ◐ 待补 ✗ 缺 — 不适用</span></div>
         <div id="checkList">${renderChecklistHtml(check)}</div>
         <div class="check-sum" id="checkSum">${checkSummary(check)}</div>
+        <div class="check-sum" id="reviewSum">${reviewSummary(check)}</div>
       </div>
       <div class="card">
         <div class="files-head">
@@ -664,9 +665,10 @@ async function pageActivity(name, dirname, params) {
       </div>
     </div>`;
 
-  // 点清单项后按前缀过滤文件
+  // 点清单项后按前缀过滤文件（按钮点击不触发，避免误切换过滤）
   els('#checkList .check-item').forEach(node => {
-    node.addEventListener('click', () => {
+    node.addEventListener('click', ev => {
+      if (ev.target.closest('button')) return;
       const no = Number(node.dataset.no);
       actCtx.selected = actCtx.selected === no ? 0 : no;
       els('#checkList .check-item').forEach(x => x.classList.toggle('active', Number(x.dataset.no) === actCtx.selected));
@@ -675,22 +677,140 @@ async function pageActivity(name, dirname, params) {
   });
 }
 
+function reviewText(it) {
+  if (!it.review) return '';
+  const date = String(it.review.reviewed_at || '').slice(0, 10);
+  const by = it.review.reviewed_by || '—';
+  return it.signed ? `✓✓ 已签字（${esc(by)} ${esc(date)}）`
+                   : `✓ ${esc(by)} ${esc(date)}`;
+}
+
 function renderChecklistHtml(check) {
   const marks = { ok: '✓', partial: '◐', missing: '✗', na: '—' };
   const labels = { ok: '已齐', partial: '待补（有未签字文档，缺签字扫描件）', missing: '缺', na: '不适用' };
-  return (check.items || []).map(it => `<div class="check-item" data-no="${it.no}">
+  const write = canWrite();
+  return (check.items || []).map(it => {
+    const reviewed = !!it.review;
+    const review = reviewed
+      ? `<span class="badge ${it.signed ? 'ok' : 'muted'}">${reviewText(it)}</span>`
+      : '<span class="badge muted">未核对</span>';
+    const ops = write ? `<span class="ops">
+        <button class="btn sm" data-act="rev-review" data-no="${it.no}">${reviewed ? '改核对' : '核对'}</button>
+        <button class="btn sm" data-act="rev-sign" data-no="${it.no}" ${it.signed ? 'disabled' : ''}>签字</button>
+        ${reviewed ? `<button class="btn sm danger" data-act="rev-clear" data-no="${it.no}">撤销</button>` : ''}
+      </span>` : '';
+    return `<div class="check-item ${reviewed ? 'reviewed' : ''}" data-no="${it.no}">
     <span class="no">${it.no}</span>
     <span class="mark ${esc(it.status)}" title="${esc(labels[it.status] || '')}">${marks[it.status] || '—'}</span>
     <span class="body">
       <span class="name">${esc(it.name)}</span>
       <span class="detail" title="${esc(it.detail || '')}">${esc(it.detail || '')}</span>
+      <span class="review">${review}${it.review && it.review.reviewed_note ? ` <span class="muted">${esc(it.review.reviewed_note)}</span>` : ''}</span>
     </span>
-  </div>`).join('');
+    ${ops}
+  </div>`;
+  }).join('');
+}
+
+/* 活动目录内的图片/PDF，给「签字扫描件」下拉用；拿不到就留空 */
+async function collectActivityScans(base, rel = '', depth = 0, acc = []) {
+  const entries = await api(base + '/files' + (rel ? '?sub=' + enc(rel) : ''));
+  for (const e of entries) {
+    const path = rel ? `${rel}/${e.name}` : e.name;
+    if (e.is_dir) {
+      if (depth < 2) await collectActivityScans(base, path, depth + 1, acc);
+    } else if (/\.(jpe?g|png|gif|bmp|webp|pdf)$/i.test(e.name)) {
+      acc.push(path);
+    }
+  }
+  return acc;
+}
+
+/* item_no → 材料名，弹窗标题用 */
+function checkItemName(check, no) {
+  const it = (check.items || []).find(x => Number(x.no) === Number(no));
+  return it ? `${it.no} · ${it.name}` : `第 ${no} 项`;
+}
+
+async function openReviewModal(no, mode) {
+  if (!actCtx) return;
+  if (!canWrite()) { toast('需 editor/admin 权限', 'warn'); return; }
+  const { projectName, dirname } = actCtx;
+  const base = `/projects/${enc(projectName)}/activities/${enc(dirname)}`;
+  const name = checkItemName(actCtx.detail.check, no);
+  const it = (actCtx.detail.check.items || []).find(x => Number(x.no) === Number(no)) || {};
+  let scans = [];
+  try { scans = await collectActivityScans(base); } catch (e) { /* ignore */ }
+  const scanOpts = ['<option value="">不上传扫描件（人工确认，扫描件后补）</option>']
+    .concat(scans.map(p => `<option value="${esc(p)}"${it.scan === p ? ' selected' : ''}>${esc(p)}</option>`))
+    .join('');
+  openModal(`${mode === 'sign' ? '签字确认' : '核对确认'}：${esc(name)}`, `
+    <div class="form-grid">
+      <label class="field full"><span>备注（可选）</span>
+        <textarea id="revNote" placeholder="例如：金额与人数已核对">${esc(it.review && it.review.reviewed_note || '')}</textarea></label>
+      <label class="field full"><span>扫描件（可选，仅图片 / PDF）</span>
+        <select id="revScan">${scanOpts}</select></label>
+    </div>
+    <div class="hint" style="margin-top:8px">
+      签字不强制扫描件：现场点击确认即记为已签字，扫描件可后补。
+    </div>
+    <div id="revMsg" style="margin-top:10px"></div>
+  `, `<button class="btn" data-close-modal>取消</button>
+     <button class="btn primary" data-act="rev-submit"
+             data-no="${no}" data-mode="${mode}">确认</button>`);
+}
+
+async function submitReview(node) {
+  if (!actCtx) return;
+  const no = node.dataset.no;
+  const mode = node.dataset.mode;
+  const body = {
+    item: Number(no),
+    note: el('#revNote').value.trim(),
+    signed: mode === 'sign',
+    scan: el('#revScan').value,
+  };
+  node.disabled = true;
+  el('#revMsg').innerHTML = '<span class="muted">提交中…</span>';
+  try {
+    await api(`/projects/${enc(actCtx.projectName)}/activities/${enc(actCtx.dirname)}/review`, {
+      method: 'POST', body,
+    });
+    closeModal();
+    toast(mode === 'sign' ? `已标记第 ${no} 项为已签字` : `已核对第 ${no} 项`, 'ok');
+    await recheckActivity();
+  } catch (e) {
+    el('#revMsg').innerHTML = `<div class="notice">保存失败：${esc(e.message)}</div>`;
+    node.disabled = false;
+  }
+}
+
+async function clearReview(no) {
+  if (!actCtx) return;
+  if (!confirm(`撤销第 ${no} 项的核对记录？`)) return;
+  try {
+    await api(`/projects/${enc(actCtx.projectName)}/activities/${enc(actCtx.dirname)}/review`, {
+      method: 'POST', body: { item: Number(no), clear: true },
+    });
+    toast(`已撤销第 ${no} 项`, 'ok');
+    await recheckActivity();
+  } catch (e) {
+    toast('撤销失败：' + e.message, 'err');
+  }
 }
 
 function checkSummary(check) {
   const verdict = check.complete ? '<span class="badge ok">完整</span>' : '<span class="badge warn">未完整</span>';
   return `齐 ${check.ok_count} 项 · 待补 ${check.partial_count || 0} 项 · 缺 ${check.missing_count} 项 · 不适用 ${check.na_count} 项 ${verdict}`;
+}
+
+function reviewSummary(check) {
+  const required = (check.items || []).filter(it => it.status !== 'na');
+  const done = required.filter(it => it.review).length;
+  const signed = (check.items || []).filter(it => it.signed).length;
+  const deliv = check.deliverable ? '<span class="badge ok">可交付</span>'
+                                 : '<span class="badge muted">未齐备</span>';
+  return `已核对 ${done}/${required.length} · 已签字 ${signed} ${deliv}`;
 }
 
 function renderFileRows(entries, sub, check) {
@@ -790,7 +910,8 @@ async function recheckActivity() {
   if (list) {
     list.innerHTML = renderChecklistHtml(check);
     els('#checkList .check-item').forEach(node => {
-      node.addEventListener('click', () => {
+      node.addEventListener('click', ev => {
+        if (ev.target.closest('button')) return;
         const no = Number(node.dataset.no);
         actCtx.selected = actCtx.selected === no ? 0 : no;
         els('#checkList .check-item').forEach(x => x.classList.toggle('active', Number(x.dataset.no) === actCtx.selected));
@@ -800,6 +921,8 @@ async function recheckActivity() {
   }
   const sum = el('#checkSum');
   if (sum) sum.innerHTML = checkSummary(check);
+  const rsum = el('#reviewSum');
+  if (rsum) rsum.innerHTML = reviewSummary(check);
   const partial = Number(check.partial_count || 0);
   const missing = Number(check.missing_count || 0);
   if (check.complete) {
@@ -2457,6 +2580,10 @@ document.addEventListener('click', async e => {
     if (act === 'download') { e.preventDefault(); await downloadActivityFile(node.dataset.path); return; }
     if (act === 'del-file') { await deleteActivityFile(node.dataset.path); return; }
     if (act === 'do-check') { await recheckActivity(); return; }
+    if (act === 'rev-review') { await openReviewModal(node.dataset.no, 'review'); return; }
+    if (act === 'rev-sign') { await openReviewModal(node.dataset.no, 'sign'); return; }
+    if (act === 'rev-clear') { await clearReview(node.dataset.no); return; }
+    if (act === 'rev-submit') { await submitReview(node); return; }
     if (act === 'refresh-act') { await refreshActivity(); return; }
     if (act === 'sync-feishu') {
       if (!actCtx) return;

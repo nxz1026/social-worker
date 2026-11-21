@@ -93,5 +93,6 @@ def api_activity_detail(name: str, dirname: str, user=Depends(current_user)):
         "status": str(act.get("status") or ""),
         "files": files,
         "dirs": dirs,
-        "check": _checks.check(act_dir),
+        "check": _checks.merge_review_status(_checks.check(act_dir),
+                                            _checks.read_reviews(act_dir)),
     }

@@ -40,7 +40,8 @@ def api_check_activity(name: str, dirname: str, user=Depends(current_user)):
         raise HTTPException(400, str(exc))
     if not act_dir.is_dir():
         raise HTTPException(404, f"活动目录不存在：{dirname}")
-    return _checks.check(act_dir)
+    return _checks.merge_review_status(_checks.check(act_dir),
+                                       _checks.read_reviews(act_dir))
 
 
 @router.post("/api/projects/{name}/activities/{dirname}/readme")
@@ -90,6 +91,56 @@ def api_set_na(name: str, dirname: str, body: dict,
     tmp.write_text(text, encoding="utf-8")
     tmp.replace(path)
     return {"ok": True, "not_applicable": sorted(nos)}
+
+
+@router.post("/api/projects/{name}/activities/{dirname}/review")
+def api_set_review(name: str, dirname: str, body: dict, request: Request,
+                   user=Depends(require_write), conn=Depends(db)):
+    """标记某个材料序号为已核对 / 已签字，或撤销。
+
+    body: {"item": 1, "note": "...", "signed": false, "scan": "", "clear": false}
+    """
+    require_write(user)
+    act_dir, _meta = activity_meta_or_404(name, dirname, user, write=True)
+    if not isinstance(body, dict):
+        raise HTTPException(400, "body 必须是对象")
+    raw_item = body.get("item")
+    if isinstance(raw_item, bool):
+        raise HTTPException(400, f"核对序号非法：{raw_item}")
+    try:
+        item_no = int(raw_item)
+    except (TypeError, ValueError):
+        raise HTTPException(400, f"核对序号非法：{raw_item}")
+    valid = {it["no"] for it in _checks.CHECKLIST} | {_checks.OTHER_ITEM["no"]}
+    if item_no not in valid:
+        raise HTTPException(400, f"核对序号超出范围 1-{_checks.OTHER_ITEM['no']}：{item_no}")
+
+    scan = body.get("scan") or ""
+    clear = bool(body.get("clear", False))
+    try:
+        record = _checks.save_review(
+            act_dir, item_no,
+            reviewed_by=str(user.get("real_name") or user.get("username") or ""),
+            note=str(body.get("note") or ""),
+            signed=bool(body.get("signed", False)),
+            scan=str(scan),
+            clear=clear,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+
+    _audit_mod.audit(conn, user["id"], "review_material", project=name,
+                     target=str(item_no),
+                     detail={"activity": dirname, "clear": clear,
+                             "signed": bool(body.get("signed", False)),
+                             "scan": str(scan) or None},
+                     ip=request.client.host)
+    # 索引跟着核对记录走；写失败不影响主流程
+    try:
+        _readme.write_activity_readme(name, dirname)
+    except Exception:
+        pass
+    return {"ok": True, "item": item_no, "record": record}
 
 
 @router.post("/api/projects/{name}/activities/{dirname}/fill")
