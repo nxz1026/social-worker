@@ -43,6 +43,7 @@ class FakeConn:
 @pytest.fixture(autouse=True)
 def _silent_audit(monkeypatch):
     monkeypatch.setattr(app, "audit", lambda *a, **k: None)
+    monkeypatch.setattr("api.shared.audit.audit", lambda *a, **k: None)
 
 
 @pytest.fixture

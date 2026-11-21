@@ -42,6 +42,7 @@ class _Req:
 def _silent_audit(monkeypatch):
     """审计落库不在本工单范围，统一替成空操作。"""
     monkeypatch.setattr(app, "audit", lambda *a, **k: None)
+    monkeypatch.setattr("api.shared.audit.audit", lambda *a, **k: None)
 
 
 @pytest.fixture

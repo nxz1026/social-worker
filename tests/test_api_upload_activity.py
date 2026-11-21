@@ -32,6 +32,7 @@ VIEWER = {"id": 3, "username": "viewer", "role": "viewer", "projects": {"huimin"
 def _silent_audit(monkeypatch):
     """审计不在本工单范围，统一替成空操作。"""
     monkeypatch.setattr(app, "audit", lambda *a, **k: None)
+    monkeypatch.setattr("api.shared.audit.audit", lambda *a, **k: None)
 
 
 @pytest.fixture

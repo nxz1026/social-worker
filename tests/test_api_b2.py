@@ -34,6 +34,7 @@ ACT = "11-共治行动-第一期"
 def _silent_audit(monkeypatch):
     """本工单的端点不写审计，这里只是兜底，防止别的依赖落库。"""
     monkeypatch.setattr(app, "audit", lambda *a, **k: None)
+    monkeypatch.setattr("api.shared.audit.audit", lambda *a, **k: None)
 
 
 @pytest.fixture
