@@ -32,7 +32,14 @@ def normalize_rel(rel: str, *, root: Path | None = None) -> str:
             return p.resolve().relative_to(base.resolve()).as_posix()
         except ValueError:
             return ""
-    return posixpath.normpath(rel).lstrip("./")
+    # 不能用 lstrip("./")：那是字符集剥离，会把 .trash/ 这类点开头的目录
+    # 剥成 trash/（回收站恢复因此找不到文件，审计 PR-06）。
+    # 这里显式处理：normpath 归一后，丢掉所有指向父级的 ".." 段，
+    # 效果与原 lstrip 一致（"../../etc/passwd" → "etc/passwd"），
+    # 但不会误伤 .trash 这种正常目录名。
+    normed = posixpath.normpath(rel)
+    segments = [seg for seg in normed.split("/") if seg not in ("", ".", "..")]
+    return "/".join(segments)
 
 
 def safe_rel_path(base: Path, rel: str, *, allow_empty: bool = False) -> Path:

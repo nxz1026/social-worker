@@ -433,3 +433,87 @@ def api_sat_fill(name: str, dirname: str, user=Depends(require_write)):
     return {**stats,
             "path": dst.relative_to(act_dir.resolve()).as_posix(),
             "filled": result["filled"], "missing": result["missing"]}
+
+
+@router.get("/api/projects/{name}/activities/{dirname}/trash")
+def api_activity_trash_list(name: str, dirname: str,
+                            user=Depends(current_user)):
+    """列活动回收站：.trash/<时间戳>/<原相对路径> 下的所有文件。
+
+    界面此前只说「已移入回收站，可在磁盘恢复」，普通用户没有入口（审计 PR-06）。
+    """
+    act_dir, _meta = activity_meta_or_404(name, dirname, user, write=False)
+    base = act_dir / ".trash"
+    if not base.is_dir():
+        return {"items": []}
+    items = []
+    for p in base.rglob("*"):
+        if not p.is_file():
+            continue
+        rel = p.relative_to(base)
+        parts = rel.parts
+        if len(parts) < 2:
+            continue                     # 时间戳目录下必须有实际文件
+        stamp, orig = parts[0], "/".join(parts[1:])
+        try:
+            st = p.stat()
+        except OSError:
+            continue
+        items.append({
+            # 带 .trash/ 前缀，恢复端点直接拿这个值回传，不用调用方拼
+            "trash": (Path(".trash") / rel).as_posix(),
+            "original": orig,
+            "deleted_at": stamp,
+            "size": st.st_size,
+            "mtime": datetime.fromtimestamp(st.st_mtime, TZ).isoformat(),
+        })
+    items.sort(key=lambda x: x["deleted_at"], reverse=True)
+    return {"items": items}
+
+
+@router.post("/api/projects/{name}/activities/{dirname}/trash/restore")
+def api_activity_trash_restore(name: str, dirname: str, body: dict,
+                               request: Request, user=Depends(require_write),
+                               conn=Depends(db)):
+    """从回收站恢复一个文件到原位置。
+
+    body: {"trash": ".trash/20261121-120000/01-计划书.docx"}
+    原位置已有同名文件时拒绝（返回 409），不静默覆盖。
+    """
+    require_write(user)
+    act_dir, _meta = activity_meta_or_404(name, dirname, user, write=True)
+    raw = str(body.get("trash") or "").strip()
+    if not raw:
+        raise HTTPException(400, "缺 trash 路径")
+    src = safe_rel_path(act_dir, raw)
+    base = (act_dir / ".trash").resolve()
+    try:
+        src.relative_to(base)
+    except ValueError:
+        raise HTTPException(400, "只能恢复 .trash 目录里的文件")
+    if not src.is_file():
+        raise HTTPException(404, f"回收站里没有该文件：{raw}")
+
+    rel = src.relative_to(base)
+    if len(rel.parts) < 2:
+        raise HTTPException(400, "回收站路径格式不对")
+    original = "/".join(rel.parts[1:])
+    dest = safe_rel_path(act_dir, original)
+    if dest.exists():
+        raise HTTPException(409, f"原位置已有同名文件，请先改名或删除：{original}")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(src), str(dest))
+
+    # 时间戳目录空了就顺手清掉，避免回收站里堆空壳
+    stamp_dir = base / rel.parts[0]
+    try:
+        if stamp_dir.is_dir() and not any(stamp_dir.iterdir()):
+            stamp_dir.rmdir()
+    except OSError:
+        pass
+
+    _audit_mod.audit(conn, user["id"], "restore_activity_file", project=name,
+                     target=original,
+                     detail={"activity": dirname, "from_trash": raw},
+                     ip=request.client.host)
+    return {"ok": True, "path": original}

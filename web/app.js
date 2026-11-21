@@ -9,7 +9,23 @@
 
 const API = '/sw-api/api';
 const CATS = ['发票票据', '项目计划', '项目执行', '日常工作佐证', '政策文件', '其他'];
-const STATUS_TEXT = { imported: '已入库', generated: '已生成' };
+/* 活动状态词典：与后端 activity.yaml 的 status 取值保持一致。
+ * 此前只映射 imported/generated，reviewed/signed/edited 会落进兜底的
+ * 「新目录」，把已审核、已签字的材料显示成没开始处理（审计 PR-04）。*/
+const STATUS_TEXT = {
+  imported: '已入库',
+  generated: '已生成',
+  edited: '人工修改',
+  reviewed: '已核对',
+  signed: '已签字',
+};
+const STATUS_CLASS = {
+  imported: 'info',
+  generated: 'ok',
+  edited: 'warn',
+  reviewed: 'ok',
+  signed: 'ok',
+};
 // 15 项核对 → 文件前缀（仅用于点清单项时过滤右侧文件，判定仍以后端 check 为准）
 const CHECK_PREFIX = {
   1: ['01-'], 2: ['02-'], 3: ['03-'], 4: ['05-'], 5: ['06-'],
@@ -254,9 +270,13 @@ function closeModal() {
 
 /* ---------------- 通用片段 ---------------- */
 function statusBadge(status) {
-  const text = STATUS_TEXT[status] || '';
-  if (!text) return '<span class="badge muted">新目录</span>';
-  const cls = status === 'generated' ? 'ok' : 'info';
+  const raw = String(status ?? '').trim();
+  // 空状态：活动目录刚建，确实还没处理
+  if (!raw) return '<span class="badge muted">新目录</span>';
+  const text = STATUS_TEXT[raw];
+  // 未知状态照实显示原值，不伪装成有业务含义的「新目录」
+  if (!text) return `<span class="badge muted">未知状态（${esc(raw)}）</span>`;
+  const cls = STATUS_CLASS[raw] || 'info';
   return `<span class="badge ${cls}">${esc(text)}</span>`;
 }
 
