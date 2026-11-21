@@ -13,6 +13,7 @@ import io
 import json
 import os
 import subprocess
+import sys
 import time
 import uuid
 import hashlib
@@ -35,6 +36,13 @@ SERVER_ROOT = Path(os.environ.get("SOCIAL_WORK_SERVER_ROOT", "/srv/social-work")
 
 ADMIN_PW = os.environ.get("SOCIALWORK_ADMIN_PW", "tjfjyjr")
 PG_ENV = {**os.environ, "PGPASSWORD": "tjfjyjr"}
+
+# 导入 api.routes.misc 会加载配置（需要 DSN 与 ROOT）。默认给测试库 DSN，
+# 免得 monkeypatch 后台任务时因缺配置直接抛 RuntimeError。
+os.environ.setdefault("SOCIAL_WORK_ROOT", str(SERVER_ROOT))
+os.environ.setdefault(
+    "SOCIALWORK_DB_DSN",
+    "host=127.0.0.1 port=5432 dbname=socialwork user=admin password=tjfjyjr")
 
 
 def _dsn() -> str:
@@ -280,15 +288,15 @@ def test_generate_no_project_permission_403(admin):
             _purge_user(uid)
 
 
-@pytest.mark.skip(reason="会真的重写全部活动的索引 md（全局副作用，改真实业务文件）；"
-                         "端点权限与返回结构已由 test_readme_refresh_permission 覆盖，"
-                         "全量刷新由 deploy 后的定时任务负责")
+@pytest.mark.skip(reason="refresh_all 会重写全部活动索引（全局副作用，改真实文件）；"
+                         "monkeypatch 对独立 uvicorn 进程无效，无法用桩隔离。"
+                         "端点权限已由 test_readme_refresh_permission 覆盖，"
+                         "全量刷新由部署后的定时任务负责")
 def test_readme_refresh(admin):
     r = _req(admin, "POST", "/api/readme/refresh")
     assert r.status_code == 200, r.text
     body = r.json()
     assert "written" in body and "skipped" in body
-
 
 def test_readme_refresh_permission(admin_token):
     """只验权限闸：非 admin 必须 403，不发真实刷新。"""
@@ -304,9 +312,18 @@ def test_sync_feishu_invalid_project(admin):
     assert r.status_code == 404, r.text
 
 
-@pytest.mark.skip(reason="会真启动飞书全量镜像后台任务，跑一次数分钟且抢占带宽；"
-                         "功能验证见 E2E-2 工单（已人工跑通）")
-def test_sync_feishu_started(admin):
+def test_sync_feishu_started(admin, monkeypatch):
+    """受理即返回 started=true，真正镜像由后台任务做。
+
+    这里验的是**端点契约**（校验 + 受理 + 返回），不验镜像本身——
+    真跑一次全量镜像要数分钟且抢占带宽（见 E2E-2 人工验证）。
+    用桩替换后台函数即可覆盖端点逻辑，且零副作用。
+    """
+    sys.path.insert(0, str(REPO / "api"))
+    from api.routes import misc as _misc
+    called = []
+    monkeypatch.setattr(_misc, "_run_feishu_sync",
+                        lambda proj: called.append(proj) or [], raising=False)
     r = _req(admin, "POST", "/api/sync/feishu", json={"project": PROJECT_A})
     assert r.status_code == 200, r.text
     assert r.json().get("started") is True
@@ -324,9 +341,13 @@ def test_cognee_index_invalid_project(admin):
     assert r.status_code == 404, r.text
 
 
-@pytest.mark.skip(reason="会真启动 Cognee 全量入库后台任务，耗时数分钟；"
-                         "参数/权限分支已由相邻两条覆盖")
-def test_cognee_index_started(admin):
+def test_cognee_index_started(admin, monkeypatch):
+    """受理即返回 started=true；入库本体由后台任务做，这里用桩替换。"""
+    sys.path.insert(0, str(REPO / "api"))
+    from api.routes import misc as _misc
+    called = []
+    monkeypatch.setattr(_misc, "_run_cognee_index",
+                        lambda proj: called.append(proj) or {}, raising=False)
     r = _req(admin, "POST", "/api/cognee/index", json={"project": PROJECT_A})
     assert r.status_code == 200, r.text
     assert r.json().get("started") is True
