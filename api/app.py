@@ -63,6 +63,10 @@ from api.errors import ApiError  # noqa: E402
 from api.shared.audit import audit  # noqa: E402
 from api.shared.delivery import sw_delivery  # noqa: E402
 from api.shared.parse import as_bool  # noqa: E402
+from api.shared.domain import (  # noqa: E402
+    activity_meta_or_404, activity_require_code, activity_sub_dir,
+    activity_upload_filename, activity_yaml_data, find_template, project_allowed,
+    project_meta_or_404, project_year, script, template_library)
 from api.shared.paths import (  # noqa: E402
     fill_output, force_flag, normalize_rel, safe_rel_path)
 from api.state import (  # noqa: E402
@@ -699,17 +703,11 @@ def generate(body: dict, request: Request, user=Depends(current_user),
     return {"ok": True, "content": content, "truncated": finish == "length",
             "finish_reason": finish}
 # ---------- 项目/活动 ----------
-def _project_allowed(user, item: dict) -> bool:
-    """admin 看全部；其余账号按 user_projects 授权（项目名 / short 均可命中）。"""
-    if user["role"] == "admin":
-        return True
-    return project_access(user, str(item.get("name") or "")) is not None
-
 
 @app.get("/api/projects")
 def api_list_projects(user=Depends(current_user)):
     """列全部项目。admin 看到全部；editor/viewer 按授权项目过滤。"""
-    items = [p for p in _projects.list_projects() if _project_allowed(user, p)]
+    items = [p for p in _projects.list_projects() if project_allowed(user, p)]
     return {"total": len(items), "items": items}
 
 
@@ -719,7 +717,7 @@ def api_get_project(name: str, user=Depends(current_user)):
     item = next((p for p in _projects.list_projects() if p["name"] == name), None)
     if item is None or not item.get("has_config"):
         raise HTTPException(404, f"项目不存在：{name}")
-    if not _project_allowed(user, item):
+    if not project_allowed(user, item):
         raise HTTPException(403, f"无项目 {name} 权限")
     return item
 
@@ -749,39 +747,6 @@ def api_list_activities(name: str, user=Depends(current_user)):
     }
 
 # ---------- engine P2：编号生成 / 活动目录 ----------
-def _project_meta_or_404(name: str) -> dict:
-    """取项目元数据：目录 / yaml 缺失按 404，yaml 损坏按 400。"""
-    try:
-        meta = _projects.project_meta(name)
-    except FileNotFoundError:
-        raise HTTPException(404, f"项目不存在：{name}")
-    except ValueError as exc:
-        raise HTTPException(400, str(exc))
-    if not meta["has_config"]:
-        raise HTTPException(404, f"项目没有 yaml：{name}")
-    return meta
-
-
-
-def _existing_codes(meta: dict) -> list[str]:
-    """本项目已有编号：project.code + 以编号命名的活动目录（解析不了的自动跳过）。"""
-    codes = [meta["code"]] if meta.get("code") else []
-    project_dir = Path(_projects.PROJECTS_ROOT) / meta["name"]
-    codes.extend(_activities.activity_dirs(project_dir).keys())
-    return codes
-
-
-def _project_year(name: str) -> int:
-    """立项年份取 project.period.start 的年份，缺失时退回当前年。"""
-    try:
-        data = _projects.load_project(name)
-    except (FileNotFoundError, ValueError):
-        return datetime.now(TZ).year
-    period = data.get("period") if isinstance(data.get("period"), dict) else {}
-    start = str(period.get("start") or "")
-    if len(start) >= 4 and start[:4].isdigit():
-        return int(start[:4])
-    return datetime.now(TZ).year
 
 
 def _act_year(act_month: int, act_year: int | None = None) -> int:
@@ -799,7 +764,7 @@ def api_project_code(name: str, act_type: int, act_month: int,
                      act_year: int = 0, serial: int = 0,
                      user=Depends(current_user)):
     """生成一个项目编号。act_year=0 表示取当前年；serial=0 表示自动取下一个流水号。"""
-    meta = _project_meta_or_404(name)
+    meta = project_meta_or_404(name)
     if user["role"] != "admin" and meta["short"] not in scopes_of(user):
         raise HTTPException(403, f"无项目 {name} 权限")
     establish_month = meta["establish_month"]
@@ -808,7 +773,7 @@ def api_project_code(name: str, act_type: int, act_month: int,
     act_types = meta["act_types"]
     if act_types and act_type not in set(act_types.values()):
         raise HTTPException(400, f"活动类型号 {act_type} 不在项目配置里")
-    year = _project_year(name)
+    year = project_year(name)
     act_year = _act_year(act_month, act_year or None)
     if not serial:
         serial = _coding.next_serial(_existing_codes(meta), act_type=act_type,
@@ -826,7 +791,7 @@ def api_project_code(name: str, act_type: int, act_month: int,
 @app.post("/api/projects/{name}/activities/split")
 def api_split_activities(name: str, body: dict, user=Depends(current_user)):
     """按 indicators 建活动目录。body: {"dry_run": true/false}，默认只预演。"""
-    meta = _project_meta_or_404(name)
+    meta = project_meta_or_404(name)
     require_project_write(user, meta)
     try:
         data = _projects.load_project(name)
@@ -859,7 +824,7 @@ def api_split_activities(name: str, body: dict, user=Depends(current_user)):
 def api_rename_activity(name: str, dirname: str, body: dict,
                         user=Depends(current_user)):
     """重命名活动目录。body: {"new_name": "..."}。"""
-    meta = _project_meta_or_404(name)
+    meta = project_meta_or_404(name)
     require_project_write(user, meta)
     new_name = str(body.get("new_name") or "").strip()
     if not new_name:
@@ -897,7 +862,7 @@ def api_check_activity(name: str, dirname: str, user=Depends(current_user)):
 def api_regen_readme(name: str, dirname: str, user=Depends(require_write)):
     """手动重生成单个活动的 README。内容没变时 written=False。"""
     require_write(user)
-    _activity_meta_or_404(name, dirname, user, write=True)
+    activity_meta_or_404(name, dirname, user, write=True)
     try:
         written = _readme.write_activity_readme(name, dirname)
     except FileNotFoundError:
@@ -919,7 +884,7 @@ def api_refresh_all_readme(user=Depends(require_admin)):
 @app.get("/api/projects/{name}/check")
 def api_check_project(name: str, user=Depends(current_user)):
     """项目级 19 项核对：依据《项目管理目录.docx》，扫四个资料子目录。"""
-    meta = _project_meta_or_404(name)
+    meta = project_meta_or_404(name)
     if user["role"] != "admin" and meta["short"] not in scopes_of(user):
         raise HTTPException(403, f"无项目 {name} 权限")
     return _project_checks.check_project(Path(_projects.PROJECTS_ROOT) / name)
@@ -932,7 +897,7 @@ def api_set_na(name: str, dirname: str, body: dict,
 
     只改 activity.yaml 的 not_applicable 字段，其余字段原样保留。
     """
-    act_dir, _meta = _activity_meta_or_404(name, dirname, user, write=True)
+    act_dir, _meta = activity_meta_or_404(name, dirname, user, write=True)
     raw = body.get("not_applicable") if isinstance(body, dict) else None
     if not isinstance(raw, list):
         raise HTTPException(400, "not_applicable 必须是数组")
@@ -984,66 +949,6 @@ def _run_feishu_sync(project: str) -> list[dict]:
 def _run_cognee_index(project: str) -> dict:
     """后台任务：Cognee 入库。单独成函数，测试可 monkeypatch。"""
     return _load_script("index_cognee").run(ROOT, project)
-
-
-def _script(name: str):
-    """加载并缓存 scripts/<name>.py，同一进程内只 exec 一次。"""
-    module = _SCRIPT_CACHE.get(name)
-    if module is None:
-        module = _load_script(name)
-        _SCRIPT_CACHE[name] = module
-    return module
-
-
-def _template_library() -> Path:
-    """模板库目录：<ROOT>/templates/library（唯一模板来源）。"""
-    return ROOT / "templates" / "library"
-
-
-def _find_template(name: str) -> Path:
-    """按模板名（不含扩展名）在模板库里找 docx/xlsx。
-
-    名字非法（带路径分隔符 / 通配符 / ..）→ 400；找不到 → 404。
-    """
-    raw = str(name or "").strip()
-    if (not raw or "/" in raw or "\\" in raw or ".." in raw
-            or any(ch in raw for ch in "*?[]")):
-        raise HTTPException(400, f"模板名非法：{raw}")
-    lib = _template_library()
-    hits = sorted(p for p in lib.glob(f"{raw}.*")
-                  if p.is_file() and p.suffix.lower() in (".docx", ".xlsx"))
-    if not hits:
-        raise HTTPException(404, f"模板不存在：{raw}")
-    return hits[0]
-
-
-def _activity_meta_or_404(name: str, dirname: str, user, write: bool = False):
-    """定位活动目录并校验权限，返回 (活动目录, 项目元数据)。
-
-    读：admin 或项目在授权范围内；写：admin/editor 且项目在授权范围内。
-    活动目录不存在 → 404，目录名非法 → 400。
-    """
-    meta = _project_meta_or_404(name)
-    if write:
-        require_project_write(user, meta)
-    elif user["role"] != "admin" and meta["short"] not in scopes_of(user):
-        raise HTTPException(403, f"无项目 {name} 权限")
-    try:
-        act_dir = _projects.activity_dir(name, dirname)
-    except ValueError as exc:
-        raise HTTPException(400, str(exc))
-    if not act_dir.is_dir():
-        raise HTTPException(404, f"活动目录不存在：{dirname}")
-    return act_dir, meta
-
-
-def _activity_yaml_data(act_dir: Path) -> dict:
-    """读 activity.yaml；解析失败按空 dict 处理，详情页不因此 500。"""
-    try:
-        return _ingest.read_activity_yaml(act_dir)
-    except ValueError:
-        return {}
-
 
 def _count_files(directory: Path) -> int:
     """目录下（递归）文件数，跳过隐藏目录（.trash 等）。"""
@@ -1160,8 +1065,8 @@ def api_update_project(name: str, body: dict, request: Request,
 @app.get("/api/projects/{name}/activities/{dirname}")
 def api_activity_detail(name: str, dirname: str, user=Depends(current_user)):
     """活动详情：编号 / 状态 / 顶层文件 / 子目录文件数 / 15 项核对。"""
-    act_dir, _meta = _activity_meta_or_404(name, dirname, user)
-    act = _activity_yaml_data(act_dir)
+    act_dir, _meta = activity_meta_or_404(name, dirname, user)
+    act = activity_yaml_data(act_dir)
 
     files: list[dict] = []
     dirs: list[dict] = []
@@ -1187,75 +1092,12 @@ def api_activity_detail(name: str, dirname: str, user=Depends(current_user)):
 def api_activity_files(name: str, dirname: str, sub: str = "",
                        user=Depends(current_user)):
     """列活动目录（或 sub 子目录）下的一级条目，按名称排序。"""
-    act_dir, _meta = _activity_meta_or_404(name, dirname, user)
+    act_dir, _meta = activity_meta_or_404(name, dirname, user)
     base = safe_rel_path(act_dir, sub, allow_empty=True)
     if not base.is_dir():
         raise HTTPException(404, f"目录不存在：{sub}")
     return [_file_item(p) for p in sorted(base.iterdir(), key=lambda x: x.name)
             if not p.name.startswith(".")]
-
-
-# 活动目录上传：允许的扩展名（与文档库一致，另加压缩包）
-_ACTIVITY_UPLOAD_EXTS = {
-    ".docx", ".xlsx", ".doc", ".xls", ".pdf",
-    ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp",
-    ".txt", ".md", ".zip", ".7z",
-}
-# 文件名里不允许出现的字符（路径分隔符与 Windows 保留字符）
-_ACTIVITY_BAD_NAME_CHARS = set('/\\:*?"<>|')
-_ACTIVITY_NAME_MAX = 120
-
-
-def _activity_sub_dir(act_dir: Path, sub: str) -> Path:
-    """把 sub 解析成活动目录内的目标子目录，逐级校验必须已存在。
-
-    sub 为空表示活动根目录；多级用 `/` 分隔（如 13-其他佐证/知识库规范命名照片）。
-    含 `..`、`.`、空段、反斜杠、绝对路径、空字节一律 400；任一级不存在也 400。
-    """
-    raw = str(sub or "").strip()
-    base = act_dir.resolve()
-    if not raw:
-        return base
-    if "\x00" in raw:
-        raise HTTPException(400, "子目录路径含空字节")
-    if "\\" in raw:
-        raise HTTPException(400, "子目录路径不能包含反斜杠")
-    if raw.startswith("/") or Path(raw).is_absolute():
-        raise HTTPException(400, "子目录必须是相对路径")
-    parts = raw.split("/")
-    if any(part in ("", ".", "..") for part in parts):
-        raise HTTPException(400, "子目录路径非法（不能包含 ..、. 或空段）")
-    cur = act_dir
-    for part in parts:
-        cur = cur / part
-        if not cur.is_dir():
-            raise HTTPException(400, f"子目录不存在：{part}")
-    path = cur.resolve()
-    try:
-        path.relative_to(base)
-    except ValueError:
-        raise HTTPException(400, "子目录越界")
-    return path
-
-
-def _activity_upload_filename(filename: str) -> str:
-    """校验上传文件名：扩展名、长度、隐藏文件、非法字符。返回原文件名。"""
-    raw = str(filename or "")
-    if not raw.strip():
-        raise HTTPException(400, "缺文件名")
-    if raw.startswith("."):
-        raise HTTPException(400, "不允许上传隐藏文件（文件名不能以 . 开头）")
-    if len(raw) > _ACTIVITY_NAME_MAX:
-        raise HTTPException(400, f"文件名超过 {_ACTIVITY_NAME_MAX} 字符")
-    if any(ord(ch) < 32 or ord(ch) == 127 for ch in raw):
-        raise HTTPException(400, "文件名含控制字符")
-    if any(ch in _ACTIVITY_BAD_NAME_CHARS for ch in raw):
-        raise HTTPException(400, '文件名不能包含 / \\ : * ? " < > |')
-    ext = Path(raw).suffix.lower()
-    if ext not in _ACTIVITY_UPLOAD_EXTS:
-        raise HTTPException(400, f"不允许的扩展名：{ext or '（无扩展名）'}")
-    return raw
-
 
 def _check_activity_code_owner(name: str, act_dir: Path) -> None:
     """activity.yaml 有 code 时，编号前缀必须属于本项目。
@@ -1266,7 +1108,7 @@ def _check_activity_code_owner(name: str, act_dir: Path) -> None:
     因此再并入「同项目其他活动」的既有前缀作为事实来源。
     两边都对不上，说明活动目录是从别的项目混进来的，直接 400。
     """
-    code = str(_activity_yaml_data(act_dir).get("code") or "").strip()
+    code = str(activity_yaml_data(act_dir).get("code") or "").strip()
     if not code:
         return
     m = re.match(r"^([A-Za-z0-9]+)-[cC]-", code)
@@ -1277,12 +1119,12 @@ def _check_activity_code_owner(name: str, act_dir: Path) -> None:
     expected: set[str] = set()
     month = _projects.project_meta(name).get("establish_month")
     if month:
-        expected.add(f"{_coding.ORG_PREFIX}{_project_year(name)}{int(month):03d}".upper())
+        expected.add(f"{_coding.ORG_PREFIX}{project_year(name)}{int(month):03d}".upper())
     project_dir = Path(_projects.PROJECTS_ROOT) / name
     for other_name, other_dir in _activities.activity_dirs(project_dir).items():
         if other_name == act_dir.name:
             continue
-        other_code = str(_activity_yaml_data(other_dir).get("code") or "").strip()
+        other_code = str(activity_yaml_data(other_dir).get("code") or "").strip()
         om = re.match(r"^([A-Za-z0-9]+)-[cC]-", other_code)
         if om:
             expected.add(om.group(1).upper())
@@ -1328,9 +1170,9 @@ def api_activity_upload(
     已齐时，仍返回 200，但附带 warning 提醒会重复。
     """
     require_write(user)
-    act_dir, _meta = _activity_meta_or_404(name, dirname, user, write=True)
-    target_dir = _activity_sub_dir(act_dir, sub)
-    filename = _activity_upload_filename(file.filename or "")
+    act_dir, _meta = activity_meta_or_404(name, dirname, user, write=True)
+    target_dir = activity_sub_dir(act_dir, sub)
+    filename = activity_upload_filename(file.filename or "")
     _check_activity_code_owner(name, act_dir)
     # 先按上传前的磁盘状态判断是否重复，落盘后该前缀必然已齐
     warning = _activity_numbering_warning(act_dir, filename)
@@ -1378,7 +1220,7 @@ def api_activity_upload(
 def api_activity_download(name: str, dirname: str, path: str,
                           user=Depends(current_user)):
     """下载活动内文件。path 相对活动目录，越界 → 400。"""
-    act_dir, _meta = _activity_meta_or_404(name, dirname, user)
+    act_dir, _meta = activity_meta_or_404(name, dirname, user)
     target = safe_rel_path(act_dir, path)
     if not target.is_file():
         raise HTTPException(404, f"文件不存在：{path}")
@@ -1391,7 +1233,7 @@ def api_activity_delete_file(name: str, dirname: str, body: dict, request: Reque
                              user=Depends(require_write), conn=Depends(db)):
     """删除活动内文件：移到 <活动目录>/.trash/<时间戳>/ 下，不真删。"""
     require_write(user)
-    act_dir, _meta = _activity_meta_or_404(name, dirname, user, write=True)
+    act_dir, _meta = activity_meta_or_404(name, dirname, user, write=True)
     target = safe_rel_path(act_dir, body.get("path"))
     if not target.is_file():
         raise HTTPException(404, f"文件不存在：{body.get('path')}")
@@ -1420,7 +1262,7 @@ def api_activity_delete_file(name: str, dirname: str, body: dict, request: Reque
 @app.get("/api/templates")
 def api_templates(user=Depends(current_user)):
     """列模板库里的 docx/xlsx 及占位符。"""
-    lib = _template_library()
+    lib = template_library()
     out: list[dict] = []
     if not lib.is_dir():
         return out
@@ -1437,23 +1279,15 @@ def api_templates(user=Depends(current_user)):
                     "placeholders": placeholders})
     return out
 
-
-def _activity_require_code(act_dir: Path) -> None:
-    """模板填充前置条件：activity.yaml 必须有 code。"""
-    code = str(_activity_yaml_data(act_dir).get("code") or "").strip()
-    if not code:
-        raise HTTPException(400, "activity.yaml 缺 code，无法生成材料")
-
-
 @app.post("/api/projects/{name}/activities/{dirname}/fill")
 def api_activity_fill(name: str, dirname: str, body: dict, request: Request,
                       user=Depends(require_write), conn=Depends(db)):
     """模板填充：build_data → 合并 data → render → 写到活动目录。"""
     require_write(user)
-    act_dir, _meta = _activity_meta_or_404(name, dirname, user, write=True)
-    _activity_require_code(act_dir)
+    act_dir, _meta = activity_meta_or_404(name, dirname, user, write=True)
+    activity_require_code(act_dir)
 
-    tpl = _find_template(body.get("template"))
+    tpl = find_template(body.get("template"))
     extra = body.get("data") or {}
     if not isinstance(extra, dict):
         raise HTTPException(400, "data 必须是对象")
@@ -1478,7 +1312,7 @@ def api_activity_llm(name: str, dirname: str, body: dict, request: Request,
                      user=Depends(require_write), conn=Depends(db)):
     """LLM 生成：提取 facts → llm.write()，结果直接返回，不落盘。"""
     require_write(user)
-    act_dir, _meta = _activity_meta_or_404(name, dirname, user, write=True)
+    act_dir, _meta = activity_meta_or_404(name, dirname, user, write=True)
 
     task = str(body.get("task") or "").strip()
     if not task:
@@ -1502,12 +1336,12 @@ def api_activity_llm_fill(name: str, dirname: str, body: dict, request: Request,
                           user=Depends(require_write), conn=Depends(db)):
     """LLM 生成 + 落盘：llm.write() → 合并进 build_data() → fill.render()。"""
     require_write(user)
-    act_dir, _meta = _activity_meta_or_404(name, dirname, user, write=True)
+    act_dir, _meta = activity_meta_or_404(name, dirname, user, write=True)
 
     task = str(body.get("task") or "").strip()
     if not task:
         raise HTTPException(400, "缺 task")
-    tpl = _find_template(body.get("template"))
+    tpl = find_template(body.get("template"))
     style = str(body.get("style") or "")
     dst = fill_output(act_dir, body, tpl)
 
@@ -1573,7 +1407,7 @@ def _photo_thumb(path: Path) -> str:
 def api_invoice_scan(name: str, dirname: str, user=Depends(require_write)):
     """扫发票 + 三表校验，返回 engine.invoice.cross_check() 的结果。"""
     require_write(user)
-    act_dir, _meta = _activity_meta_or_404(name, dirname, user, write=True)
+    act_dir, _meta = activity_meta_or_404(name, dirname, user, write=True)
     return _invoice.cross_check(act_dir)
 
 
@@ -1582,17 +1416,17 @@ def api_invoice_report(name: str, dirname: str, body: dict,
                        user=Depends(require_write)):
     """生成发票明细表，返回 {path, count, total}。"""
     require_write(user)
-    act_dir, _meta = _activity_meta_or_404(name, dirname, user, write=True)
+    act_dir, _meta = activity_meta_or_404(name, dirname, user, write=True)
 
     items = _invoice.scan_invoices(act_dir)
-    report = _script("invoice_report")
+    report = script("invoice_report")
     out_rel = str(body.get("output")
                   or f"{_invoice.INVOICE_SUBDIR}/{report.DETAIL_NAME}").strip()
     dst = safe_rel_path(act_dir, out_rel)
     if not dst.suffix:
         dst = dst.with_name(dst.name + ".xlsx")
 
-    template = _template_library() / "发票明细表.xlsx"
+    template = template_library() / "发票明细表.xlsx"
     if not template.is_file():
         raise HTTPException(400, f"发票明细表模板不存在：{template}")
     report.DETAIL_TEMPLATE = template
@@ -1614,7 +1448,7 @@ def api_activity_photos(name: str, dirname: str, sub: str = _caption.PHOTO_SUBDI
 
     缩略图是 data URI（认证只走 x-token header，`<img src>` 带不了 header）。
     """
-    act_dir, _meta = _activity_meta_or_404(name, dirname, user)
+    act_dir, _meta = activity_meta_or_404(name, dirname, user)
     folder = safe_rel_path(act_dir, sub)
     if not folder.is_dir():
         return []
@@ -1647,7 +1481,7 @@ def api_activity_captions(name: str, dirname: str, body: dict,
                           user=Depends(require_write)):
     """生成图注：picked 为空时由程序按文件名挑图。"""
     require_write(user)
-    act_dir, _meta = _activity_meta_or_404(name, dirname, user, write=True)
+    act_dir, _meta = activity_meta_or_404(name, dirname, user, write=True)
 
     sub = str(body.get("sub") or _caption.PHOTO_SUBDIR).strip()
     style = str(body.get("style") or "")
@@ -1681,7 +1515,7 @@ def api_captions_fill(name: str, dirname: str, body: dict,
                       user=Depends(require_write)):
     """把图注填进模板的 {{图注_N}}，返回 {path, filled, missing}。"""
     require_write(user)
-    act_dir, _meta = _activity_meta_or_404(name, dirname, user, write=True)
+    act_dir, _meta = activity_meta_or_404(name, dirname, user, write=True)
 
     raw = body.get("captions")
     if not isinstance(raw, list) or not raw:
@@ -1693,7 +1527,7 @@ def api_captions_fill(name: str, dirname: str, body: dict,
     if not captions:
         raise HTTPException(400, "captions 里没有有效图注")
 
-    tpl = _find_template(body.get("template"))
+    tpl = find_template(body.get("template"))
     dst = fill_output(act_dir, body, tpl)
     try:
         result = _fill.render(tpl, dst, _caption.as_fill_data(captions))
@@ -1708,16 +1542,16 @@ def api_captions_fill(name: str, dirname: str, body: dict,
 def api_sat_list(name: str, dirname: str, user=Depends(require_write)):
     """扫问卷照片，生成/更新 scores.json（保留已录分数）。"""
     require_write(user)
-    act_dir, _meta = _activity_meta_or_404(name, dirname, user, write=True)
-    entries, _path = _script("satisfaction").write_scores(act_dir)
+    act_dir, _meta = activity_meta_or_404(name, dirname, user, write=True)
+    entries, _path = script("satisfaction").write_scores(act_dir)
     return entries
 
 
 @app.get("/api/projects/{name}/activities/{dirname}/satisfaction")
 def api_sat_get(name: str, dirname: str, user=Depends(current_user)):
     """读 scores.json；没有文件返回空列表。"""
-    act_dir, _meta = _activity_meta_or_404(name, dirname, user)
-    return _script("satisfaction").load_scores(act_dir)
+    act_dir, _meta = activity_meta_or_404(name, dirname, user)
+    return script("satisfaction").load_scores(act_dir)
 
 
 @app.put("/api/projects/{name}/activities/{dirname}/satisfaction")
@@ -1725,7 +1559,7 @@ def api_sat_put(name: str, dirname: str, body: dict,
                 user=Depends(require_write)):
     """写回 scores.json：body.scores = [{file, score, satisfied}]。"""
     require_write(user)
-    act_dir, _meta = _activity_meta_or_404(name, dirname, user, write=True)
+    act_dir, _meta = activity_meta_or_404(name, dirname, user, write=True)
 
     scores = body.get("scores")
     if not isinstance(scores, list):
@@ -1745,7 +1579,7 @@ def api_sat_put(name: str, dirname: str, body: dict,
         entries.append({"file": file, "score": score,
                         "satisfied": flag if isinstance(flag, bool) else None})
 
-    path = _script("satisfaction").scores_path(act_dir)
+    path = script("satisfaction").scores_path(act_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(entries, ensure_ascii=False, indent=2) + "\n",
                     encoding="utf-8")
@@ -1757,9 +1591,9 @@ def api_sat_put(name: str, dirname: str, body: dict,
 def api_sat_fill(name: str, dirname: str, user=Depends(require_write)):
     """统计并填 05-满意度测评汇总表，返回统计结果 + 落盘路径。"""
     require_write(user)
-    act_dir, _meta = _activity_meta_or_404(name, dirname, user, write=True)
+    act_dir, _meta = activity_meta_or_404(name, dirname, user, write=True)
 
-    sat = _script("satisfaction")
+    sat = script("satisfaction")
     entries = sat.load_scores(act_dir)
     if not entries:
         raise HTTPException(400, "没有 scores.json，先点「扫描问卷」生成清单")
@@ -1767,7 +1601,7 @@ def api_sat_fill(name: str, dirname: str, user=Depends(require_write)):
     if not stats["份数"]:
         raise HTTPException(400, "一份分数都没录，无法统计")
 
-    template = _template_library() / "满意度测评汇总表.docx"
+    template = template_library() / "满意度测评汇总表.docx"
     if not template.is_file():
         raise HTTPException(400, f"满意度汇总表模板不存在：{template}")
     sat.SUMMARY_TEMPLATE = template
@@ -1875,7 +1709,7 @@ _SW_TASK_TEMPLATE = {
 def _sw_project_meta(project: str) -> dict:
     """取项目元数据；项目不存在统一成机器可读错误。"""
     try:
-        return _project_meta_or_404(project)
+        return project_meta_or_404(project)
     except HTTPException as exc:
         if exc.status_code == 404:
             raise ApiError(404, "PROJECT_NOT_FOUND", f"项目不存在：{project}",
@@ -1903,7 +1737,7 @@ def _sw_activity_dir(project: str, activity: str, user, *, write: bool) -> tuple
 
 def _sw_template(name: str) -> Path:
     try:
-        return _find_template(name)
+        return find_template(name)
     except HTTPException as exc:
         if exc.status_code == 404:
             raise ApiError(404, "TEMPLATE_NOT_FOUND", str(exc.detail),
@@ -1965,7 +1799,7 @@ def _sw_run_impl(body: dict, request: Request, conn, user) -> dict:
 
     # 生成材料的前置条件：活动必须有编号
     try:
-        _activity_require_code(act_dir)
+        activity_require_code(act_dir)
     except HTTPException as exc:
         raise ApiError(400, "CODE_MISSING", str(exc.detail),
                        "先在 activity.yaml 配置 code，或调 PATCH 活动接口补编号")
@@ -2102,7 +1936,7 @@ def api_sw_projects(user=Depends(current_user)):
     """列当前 Key / 账号可见的项目，并标出 access。"""
     items = []
     for item in _projects.list_projects():
-        if not _project_allowed(user, item):
+        if not project_allowed(user, item):
             continue
         access = "write" if can_write(user, item["name"]) else "readonly"
         items.append({**item, "access": access})
@@ -2157,7 +1991,7 @@ def _sw_batch_projects(body: dict, user) -> list[dict]:
         meta = _sw_project_meta(project)
         check_project(user, meta["name"])
         return [meta]
-    return [it for it in items if _project_allowed(user, it)]
+    return [it for it in items if project_allowed(user, it)]
 
 
 @app.post("/api/sw/batch")
@@ -2193,7 +2027,7 @@ def api_sw_batch(body: dict, request: Request, conn=Depends(db),
                     # 但缺编号时 generate 必然失败，调用方据 check 无法预判。
                     issues = list(check.get("issues") or [])
                     try:
-                        _activity_require_code(act_dir)
+                        activity_require_code(act_dir)
                     except HTTPException:
                         issues.append({
                             "code": "CODE_MISSING",
@@ -2216,12 +2050,12 @@ def api_sw_batch(body: dict, request: Request, conn=Depends(db),
                     files = params.get("files") or []
                     if not isinstance(files, list) or not files:
                         raise ApiError(400, "VALIDATION", "upload 需要 params.files")
-                    sub = _activity_sub_dir(act_dir, str(params.get("sub") or ""))
+                    sub = activity_sub_dir(act_dir, str(params.get("sub") or ""))
                     written = []
                     for item in files:
                         if not isinstance(item, dict):
                             raise ApiError(400, "VALIDATION", "files 的每一项必须是对象")
-                        filename = _activity_upload_filename(item.get("name"))
+                        filename = activity_upload_filename(item.get("name"))
                         content = base64.b64decode(str(item.get("content_base64") or ""))
                         dest = sub / filename
                         if dest.exists():
@@ -2444,7 +2278,7 @@ def api_sw_project_file_upload(
     check_project(user, meta["name"], write=True)
     name = _sw_project_meta(meta["name"])  # 归一后重取，拿真实目录名
     project_dir = _projects._project_dir(name["name"])
-    filename = _activity_upload_filename(file.filename or "")
+    filename = activity_upload_filename(file.filename or "")
 
     root = project_dir
     # 命中清单项 → 落 报告/；否则落 其他/
@@ -2729,7 +2563,7 @@ def api_dashboard(user=Depends(current_user)):
     recent: list[dict] = []
 
     for item in _projects.list_projects():
-        if not _project_allowed(user, item):
+        if not project_allowed(user, item):
             continue
         name = str(item.get("name") or "")
         act_root = Path(_projects.PROJECTS_ROOT) / name / "活动"
@@ -2748,7 +2582,7 @@ def api_dashboard(user=Depends(current_user)):
             recent.append({
                 "project": name,
                 "activity": act_dir.name,
-                "status": str(_activity_yaml_data(act_dir).get("status") or ""),
+                "status": str(activity_yaml_data(act_dir).get("status") or ""),
                 "mtime": datetime.fromtimestamp(
                     _activity_mtime(act_dir), TZ).isoformat(),
             })

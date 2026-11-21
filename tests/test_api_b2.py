@@ -347,7 +347,8 @@ def test_sat_fill_writes_summary(projects_root, monkeypatch):
     table.cell(1, 1).text = "{{总得分}}"
     doc.save(str(lib / "满意度测评汇总表.docx"))
 
-    sat = app._script("satisfaction")
+    from api.shared.domain import script
+    sat = script("satisfaction")
     monkeypatch.setattr(sat, "_facts", lambda act_dir: {
         "项目名称": "惠民项目", "活动名称": "共治行动（第一期）",
         "活动时间": "2026年11月10日", "活动地点": "民乐北巷",

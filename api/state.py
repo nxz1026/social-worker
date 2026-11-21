@@ -12,6 +12,11 @@ from pathlib import Path
 # 配置本身仍由 settings.py 负责加载，这里只做派生，不新增配置读取逻辑。
 from .settings import SETTINGS
 
+# 测试会用 monkeypatch.setattr("api.state.ROOT", tmp) 造隔离根目录；
+# 绑定到本模块的函数在调用时才读 ROOT，才跟得上替换。
+def _root() -> Path:
+    return ROOT
+
 ROOT = SETTINGS.root
 SCRIPTS = ROOT / "scripts"
 # engine 是仓库根下的包，不在 scripts 里
