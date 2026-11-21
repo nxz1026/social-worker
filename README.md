@@ -25,11 +25,30 @@
 ```
 social-worker/
 ├── api/
-│   ├── app.py             FastAPI 后端（端点数以 /openapi.json 为准）
+│   ├── app.py             FastAPI 实例、CORS、异常处理、路由挂载（554 行）
+│   ├── deps.py            认证依赖与权限校验（current_user / require_admin / check_project）
+│   ├── auth.py            账号、会话、登录限速、API Key 管理
+│   ├── admin.py           用户 CRUD、踢会话、审计查看（仅 admin）
+│   ├── state.py           配置派生常量 + 进程内缓存
+│   ├── errors.py          ApiError（机器可读错误码）
 │   ├── apikey.py          API Key 认证（sk-sw- 前缀，sha256）
 │   ├── keysafe.py         Key 明文加密（AESGCM，密钥单独 0600 文件）
 │   ├── settings.py        配置加载
-│   └── status.py          文档状态推导
+│   ├── status.py          文档状态推导
+│   ├── shared/            跨域共用的纯逻辑
+│   │   ├── paths.py       路径归一、越界防护、生成件覆盖保护
+│   │   ├── domain.py      项目/活动定位、编号、模板解析
+│   │   ├── audit.py       审计写入与脱敏
+│   │   ├── delivery.py    交付完整性判断
+│   │   └── parse.py       布尔解析
+│   └── routes/            按业务域拆分的端点
+│       ├── projects.py    项目 CRUD、活动清单、核对、编号
+│       ├── activities.py  按指标建目录、改名、详情
+│       ├── materials.py   核对、索引、模板填充、LLM 生成、图注
+│       ├── assets.py      附件、上传下载、发票、照片、满意度
+│       ├── agent.py       /api/sw/* Agent 接口
+│       ├── docs.py        /api/docs/* 文档归档与检索
+│       └── misc.py        检索、生成、模板、飞书同步、Cognee、仪表盘
 ├── engine/                业务逻辑，不依赖 FastAPI
 │   ├── projects.py        项目主数据读写
 │   ├── activities.py      按 indicators 拆活动、建目录
