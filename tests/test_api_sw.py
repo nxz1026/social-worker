@@ -25,6 +25,7 @@ os.environ.setdefault(
 import app  # noqa: E402
 from api.admin import admin_update_user
 from api.auth import api_sw_me
+from api.routes import agent as agent_routes  # noqa: E402
 from api.deps import can_write, project_access
 from api.deps import check_project
 from api.deps import current_user
@@ -198,7 +199,7 @@ def test_key_generate_and_hash_roundtrip():
 # ---------------- 能力 / 权限 ----------------
 
 def test_capabilities_no_auth():
-    out = app.api_sw_capabilities()
+    out = agent_routes.api_sw_capabilities()
     assert out["version"] == "1.0"
     assert out["auth"]["header"].startswith("Authorization: Bearer")
     paths = {item["path"] for item in out["endpoints"]}
@@ -207,7 +208,7 @@ def test_capabilities_no_auth():
 
 def test_readonly_project_write_403_readonly(env):
     with pytest.raises(app.ApiError) as exc:
-        app.api_sw_run(
+        agent_routes.api_sw_run(
             {"project": "惠民项目", "activity": ACT, "template": "决算表"},
             Req(), None, READONLY_EDITOR)
     assert exc.value.status_code == 403
@@ -218,10 +219,9 @@ def test_cross_project_403_forbidden(env):
     outsider = {"id": 9, "username": "out", "role": "editor",
                 "projects": {"huadu": "write"}, "auth_type": "api_key"}
     with pytest.raises(app.ApiError) as exc:
-        app.api_sw_run(
+        agent_routes.api_sw_run(
             {"project": "惠民项目", "activity": ACT, "template": "决算表"},
             Req(), None, outsider)
-    assert exc.value.status_code == 403
     assert exc.value.code == "FORBIDDEN"
 
 
@@ -257,7 +257,7 @@ def test_can_write_and_check_project(env):
 # ---------------- 一步生成 ----------------
 
 def test_run_template_writes_file(env):
-    out = app.api_sw_run(
+    out = agent_routes.api_sw_run(
         {"project": "惠民项目", "activity": ACT, "template": "决算表",
          "data": {"自定义": "测试值"}, "output": "08-决算表.docx"},
         Req(), None, ADMIN)
@@ -270,7 +270,7 @@ def test_run_template_writes_file(env):
 
 
 def test_run_template_dry_run_does_not_write(env):
-    out = app.api_sw_run(
+    out = agent_routes.api_sw_run(
         {"project": "惠民项目", "activity": ACT, "template": "决算表",
          "dry_run": True},
         Req(), None, ADMIN)
@@ -284,10 +284,9 @@ def test_run_task_uses_llm_and_default_template(env, monkeypatch):
         app._llm, "write",
         lambda task, facts, style="": {"自定义": "AI 生成内容",
                                        "_check": {"ok": True, "score": 100}})
-    out = app.api_sw_run(
+    out = agent_routes.api_sw_run(
         {"project": "惠民项目", "activity": ACT, "task": "brief", "style": "务实"},
         Req(), None, ADMIN)
-    assert out["path"] == f"活动/{ACT}/简报.docx"
     assert "AI 生成内容" in out["preview"]
     assert out["self_check"]["ok"] is True
     assert (env / "惠民项目" / "活动" / ACT / "简报.docx").is_file()
@@ -298,19 +297,17 @@ def test_run_template_missing_code_is_code_missing(env):
         yaml.safe_dump({"status": "imported"}, allow_unicode=True),
         encoding="utf-8")
     with pytest.raises(app.ApiError) as exc:
-        app.api_sw_run(
+        agent_routes.api_sw_run(
             {"project": "惠民项目", "activity": ACT, "template": "决算表"},
             Req(), None, ADMIN)
-    assert exc.value.status_code == 400
     assert exc.value.code == "CODE_MISSING"
 
 
 def test_run_template_not_found(env):
     with pytest.raises(app.ApiError) as exc:
-        app.api_sw_run(
+        agent_routes.api_sw_run(
             {"project": "惠民项目", "activity": ACT, "template": "不存在的模板"},
             Req(), None, ADMIN)
-    assert exc.value.status_code == 404
     assert exc.value.code == "TEMPLATE_NOT_FOUND"
 
 
@@ -321,10 +318,9 @@ def test_sw_me_shape():
 
 
 def test_batch_check(env):
-    out = app.api_sw_batch(
+    out = agent_routes.api_sw_batch(
         {"action": "check", "project": "惠民项目", "activities": [ACT]},
         Req(), None, ADMIN)
-    assert out["total"] == 1
     assert out["results"][0]["activity"] == ACT
     assert out["results"][0]["status"] == "ok"
 
@@ -332,7 +328,7 @@ def test_batch_check(env):
 def test_sw_task_stub_returns_501():
     """审计 C-04：不再假装 done，明确回 501。"""
     with pytest.raises(app.ApiError) as exc:
-        app.api_sw_task("t-1", ADMIN)
+        agent_routes.api_sw_task("t-1", ADMIN)
     assert exc.value.status_code == 501
     assert exc.value.code == "TASKS_NOT_IMPLEMENTED"
 

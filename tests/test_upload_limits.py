@@ -23,6 +23,7 @@ os.environ.setdefault(
     "SOCIALWORK_DB_DSN", "host=127.0.0.1 port=5432 dbname=test user=test password=x")
 
 import app  # noqa: E402
+from api.routes import agent as agent_routes  # noqa: E402
 from api.state import _ARCHIVE_MAX_ENTRIES  # noqa: E402
 
 PROJECT = "惠民社区保障资金项目"
@@ -68,7 +69,7 @@ def _file(name: str, data: bytes) -> UploadFile:
 
 
 def _upload(files, **kw):
-    return app.api_sw_photos_upload(
+    return agent_routes.api_sw_photos_upload(
         project=kw.pop("project", PROJECT), activity=kw.pop("activity", ACT),
         shot_date=kw.pop("shot_date", "2026-11-10"),
         scene=kw.pop("scene", ""), note=kw.pop("note", ""),
@@ -78,7 +79,7 @@ def _upload(files, **kw):
 
 
 def _archive(data: bytes, name="现场照片.zip", **kw):
-    return app.api_sw_photos_upload_archive(
+    return agent_routes.api_sw_photos_upload_archive(
         project=kw.pop("project", PROJECT), archive=_file(name, data),
         shot_date=kw.pop("shot_date", "2026-11-10"),
         allow_duplicate=kw.pop("allow_duplicate", False),
@@ -97,7 +98,7 @@ def _zip_bytes(entries: dict[str, bytes]) -> bytes:
 
 def test_photo_total_bytes_413(env, monkeypatch):
     """整批总量超限 → 413 PAYLOAD_TOO_LARGE（单张仍在上限内）。"""
-    monkeypatch.setattr(app, "_PHOTO_MAX_TOTAL_BYTES", 500)
+    monkeypatch.setattr(agent_routes, "_PHOTO_MAX_TOTAL_BYTES", 500)
     with pytest.raises(app.ApiError) as exc:
         _upload([_file("a.jpg", _jpeg(size=(10, 10), color=(1, 1, 1))),
                  _file("b.jpg", _jpeg(size=(10, 10), color=(2, 2, 2)))])
@@ -107,7 +108,7 @@ def test_photo_total_bytes_413(env, monkeypatch):
 
 def test_photo_pixels_400(env, monkeypatch):
     """像素超上限 → 400 IMAGE_TOO_LARGE（防解压炸弹）。"""
-    monkeypatch.setattr(app, "_PHOTO_MAX_PIXELS", 100)
+    monkeypatch.setattr(agent_routes, "_PHOTO_MAX_PIXELS", 100)
     with pytest.raises(app.ApiError) as exc:
         _upload([_file("a.jpg", _jpeg(size=(1200, 800)))])
     assert exc.value.status_code == 400
@@ -118,7 +119,7 @@ def test_photo_pixels_400(env, monkeypatch):
 
 def test_archive_compressed_size_413(env, monkeypatch):
     """压缩包本身超 1GB 预算 → 413（用缩小后的常量验证逻辑）。"""
-    monkeypatch.setattr(app, "_ARCHIVE_MAX_BYTES", 100)
+    monkeypatch.setattr(agent_routes, "_ARCHIVE_MAX_BYTES", 100)
     with pytest.raises(app.ApiError) as exc:
         _archive(_zip_bytes({f"{ACT}/a.jpg": _jpeg(size=(10, 10))}))
     assert exc.value.status_code == 413
@@ -135,7 +136,7 @@ def test_archive_too_many_entries_400(env):
 
 def test_archive_uncompressed_budget_400(env, monkeypatch):
     """解压后总量超预算 → 400 ARCHIVE_TOO_LARGE（预算挡在 read 之前）。"""
-    monkeypatch.setattr(app, "_ARCHIVE_MAX_UNCOMPRESSED", 1000)
+    monkeypatch.setattr(agent_routes, "_ARCHIVE_MAX_UNCOMPRESSED", 1000)
     with pytest.raises(app.ApiError) as exc:
         _archive(_zip_bytes({
             f"{ACT}/a.jpg": b"\0" * 600,

@@ -25,6 +25,7 @@ os.environ.setdefault(
     "SOCIALWORK_DB_DSN", "host=127.0.0.1 port=5432 dbname=test user=test password=x")
 
 import app  # noqa: E402
+from api.routes import agent as agent_routes  # noqa: E402
 from engine import photos as P  # noqa: E402
 
 PROJECT = "惠民社区保障资金项目"
@@ -74,7 +75,7 @@ def _file(name: str, data: bytes) -> UploadFile:
 def _upload(files, *, project=PROJECT, activity=ACT, shot_date="2026-11-10",
             scene="", note="", allow_duplicate=False, compress=True,
             user=ADMIN):
-    return app.api_sw_photos_upload(
+    return agent_routes.api_sw_photos_upload(
         project=project, activity=activity, shot_date=shot_date, scene=scene,
         note=note, allow_duplicate=allow_duplicate, compress=compress,
         files=files, user=user, conn=FakeConn())
@@ -96,7 +97,7 @@ def test_precheck_reports_new_and_duplicated(env):
     digest = hashlib.sha256(data).hexdigest()
     other = hashlib.sha256(b"other").hexdigest()
 
-    out = app.api_sw_photos_precheck(
+    out = agent_routes.api_sw_photos_precheck(
         {"project": PROJECT, "activity": ACT, "hashes": [digest, other]},
         user=ADMIN)
     assert out["new"] == 1
@@ -106,7 +107,7 @@ def test_precheck_reports_new_and_duplicated(env):
 
 def test_precheck_unknown_activity_404(env):
     with pytest.raises(app.ApiError) as exc:
-        app.api_sw_photos_precheck(
+        agent_routes.api_sw_photos_precheck(
             {"project": PROJECT, "activity": "99-不存在", "hashes": []},
             user=ADMIN)
     assert exc.value.status_code == 404
@@ -191,7 +192,7 @@ def test_upload_allow_duplicate_bypasses_409(env):
 # ---------------- zip 上传 ----------------
 
 def _archive(data: bytes, name="现场照片.zip", **kw):
-    return app.api_sw_photos_upload_archive(
+    return agent_routes.api_sw_photos_upload_archive(
         project=kw.pop("project", PROJECT), archive=_file(name, data),
         shot_date=kw.pop("shot_date", "2026-11-10"),
         allow_duplicate=kw.pop("allow_duplicate", False),
