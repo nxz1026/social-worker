@@ -35,6 +35,15 @@ def root(tmp_path, monkeypatch):
                        allow_unicode=True, sort_keys=False),
         encoding="utf-8")
     monkeypatch.setattr(app._projects, "PROJECTS_ROOT", base)
+    # api_refresh_all_readme → engine.readme.refresh_all 读的是 projects.PROJECTS_ROOT，
+    # 而 app._projects 与 engine.projects 是同一个模块对象；上面那行已生效。
+    # 但 api.routes.misc 里可能持有自己的引用，一并覆盖以策安全。
+    try:
+        from api.routes import misc as _misc
+        if hasattr(_misc, "_projects"):
+            monkeypatch.setattr(_misc._projects, "PROJECTS_ROOT", base)
+    except Exception:
+        pass
     return base
 
 

@@ -30,7 +30,10 @@ import yaml
 # ---------- 服务端真实数据 ----------
 BASE = os.environ.get("SW_TEST_BASE_URL", "http://127.0.0.1:8001").rstrip("/")
 PROJECT = "惠民社区保障资金项目"
-ACTIVITY = "11-共治行动-第一期"
+# 写在测试专用活动里：真实业务活动不能被测试写脏（2026-11-21 实测污染过
+# 141 张测试照片 + 39 条批次记录）。目录由 tests/conftest_make_test_activity.py 之外
+# 的部署步骤创建，不存在时相关用例会 skip。
+ACTIVITY = os.environ.get("SOCIAL_WORK_TEST_ACTIVITY", "99-测试专用-第一期")
 PROJ_SEG = urllib.parse.quote(PROJECT, safe="")
 ACT_SEG = urllib.parse.quote(ACTIVITY, safe="")
 PROJ_URL = f"/api/projects/{PROJ_SEG}"
@@ -297,7 +300,13 @@ def test_split_dry_run_ok(api):
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["dry_run"] is True
-    assert ACTIVITY in body["would_skip"]
+    # split 只按项目 indicators 计划建目录，测试活动不在计划内，因此不出现在
+    # would_create / would_skip 里 —— 这是正确语义，不是缺陷。
+    # 这里验证分组结构本身：预演不落盘，两组都是列表。
+    assert isinstance(body.get("would_create"), list)
+    assert isinstance(body.get("would_skip"), list)
+    # 计划内的目录都已存在时，would_create 应为空（本项目的实际状态）
+    assert body["would_skip"], "计划内目录应至少有一个已存在"
 
 
 def test_split_viewer_403(temp_users):

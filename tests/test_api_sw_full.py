@@ -33,7 +33,10 @@ from PIL import Image
 # ---------- 服务端真实数据 ----------
 BASE = os.environ.get("SW_TEST_BASE_URL", "http://127.0.0.1:8001").rstrip("/")
 PROJECT = "惠民社区保障资金项目"          # 有编号的活动在这里
-ACTIVITY = "11-共治行动-第一期"            # code 已配，可生成材料
+# 写在测试专用活动里：真实业务活动不能被测试写脏（2026-11-21 实测污染过
+# 141 张测试照片 + 39 条批次记录）。目录由 tests/conftest_make_test_activity.py 之外
+# 的部署步骤创建，不存在时相关用例会 skip。
+ACTIVITY = os.environ.get("SOCIAL_WORK_TEST_ACTIVITY", "99-测试专用-第一期")            # code 已配，可生成材料
 TIMEOUT = 180                            # LLM 任务约 70s，留足余量
 
 PROJECTS_ROOT = Path(os.environ.get(
@@ -41,27 +44,15 @@ PROJECTS_ROOT = Path(os.environ.get(
 ACT_DIR = PROJECTS_ROOT / PROJECT / "活动" / ACTIVITY
 PROJ_DIR = PROJECTS_ROOT / PROJECT
 
-# ---------------- 安全闸：不在真实活动上做写操作 ----------------
-def _is_real_business_activity() -> bool:
-    """真实业务活动判定：目录里存在微信原始命名的照片，或 activity.yaml 有 code。
-
-    这些 E2E 测试会往活动目录写照片、附件、生成件。设计上应该在**临时目录**
-    里跑；但当前实现依赖 /srv/social-work 的真实项目结构（有 code、有 15 项）。
-    为防止污染生产数据（2026-11-21 实测污染了 141 张测试照片 + 39 条批次记录），
-    这里加硬闸：检测到真实业务活动时，写操作用例直接 skip。
-    """
-    if not ACT_DIR.is_dir():
-        return False
-    if (ACT_DIR / "activity.yaml").is_file():
-        return True
-    return any(p.name.startswith("微信图片") for p in ACT_DIR.iterdir())
-
-
-REAL_ACTIVITY = _is_real_business_activity()
+# ---------------- 安全闸：写操作只落在测试专用活动 ----------------
+# 测试活动由部署步骤创建（project/活动/99-测试专用-第一期），名字里带「测试专用」。
+# 写操作用例（传照片、传附件、生成文件）一律打到这里；万一 ACTIVITY 被改回真实
+# 活动，宁可 skip 也不污染生产（2026-11-21 实测污染过 141 张照片 + 39 条批次）。
+_IS_TEST_ACTIVITY = ("测试" in ACTIVITY) or bool(os.environ.get("SOCIAL_WORK_TEST_ACTIVITY"))
 _skip_write = pytest.mark.skipif(
-    REAL_ACTIVITY,
-    reason=("目标是真实业务活动目录，跳过写操作以免污染生产数据；"
-            "请设 SOCIAL_WORK_TEST_ACTIVITY 指向临时活动目录再跑"))
+    not _IS_TEST_ACTIVITY,
+    reason=("ACTIVITY 不是测试专用活动，跳过写操作以免污染生产数据；"
+            "设 SOCIAL_WORK_TEST_ACTIVITY 指向测试活动目录再跑"))
 
 
 # 本文件产生的所有磁盘痕迹统一前缀，清理只认这个前缀
@@ -782,7 +773,7 @@ def test_photos_upload_bad_shot_date(api: Api):
 def test_photos_archive_happy_path(api: Api):
     """真实 zip：一级目录 = 活动目录名（前缀匹配），落盘张数与返回一致。
 
-    前缀匹配单独验：'11' 能落到 '11-共治行动-第一期'。
+    前缀匹配单独验：只写序号前缀（如 '99'）也能落到同名活动目录。
     """
     entries = {
         f"{ACTIVITY}/{MARK}a.jpg": _jpeg(color=(1, 1, 1)),
@@ -805,8 +796,9 @@ def test_photos_archive_happy_path(api: Api):
     after = _act_snapshot()
     assert sum(1 for k in after if k not in before) == 3
 
-    # 前缀目录名：'11' 匹配到 '11-共治行动-第一期'
-    prefix_files, _ = _zip({"11/__swfullp.jpg": _jpeg(color=(4, 4, 4))})
+    # 前缀目录名：只给序号前缀，服务端按前缀匹配到完整活动目录名
+    _seq = ACTIVITY.split("-")[0]
+    prefix_files, _ = _zip({f"{_seq}/__swfullp.jpg": _jpeg(color=(4, 4, 4))})
     # 换一个日期：同一用例内第二次上传，同日期会被 L3 判成重复批次
     prefix_day = (datetime.now() - timedelta(days=2)).strftime("%Y-%m-%d")
     pre = api.post("/api/sw/photos/upload-archive", data={

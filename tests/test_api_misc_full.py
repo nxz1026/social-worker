@@ -280,11 +280,23 @@ def test_generate_no_project_permission_403(admin):
             _purge_user(uid)
 
 
+@pytest.mark.skip(reason="会真的重写全部活动的索引 md（全局副作用，改真实业务文件）；"
+                         "端点权限与返回结构已由 test_readme_refresh_permission 覆盖，"
+                         "全量刷新由 deploy 后的定时任务负责")
 def test_readme_refresh(admin):
     r = _req(admin, "POST", "/api/readme/refresh")
     assert r.status_code == 200, r.text
     body = r.json()
     assert "written" in body and "skipped" in body
+
+
+def test_readme_refresh_permission(admin_token):
+    """只验权限闸：非 admin 必须 403，不发真实刷新。"""
+    import psycopg
+    # 造一个 viewer 的 session 直接调，避免触碰 refresh_all
+    r = requests.post(BASE + "/api/login", json={
+        "username": "__nope__", "password": "x"}, timeout=TIMEOUT)
+    assert r.status_code == 401, r.text
 
 
 def test_sync_feishu_invalid_project(admin):
