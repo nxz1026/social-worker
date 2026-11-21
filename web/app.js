@@ -403,6 +403,15 @@ async function pageDashboard() {
 /* ============================================================
  * 2. 项目概览
  * ============================================================ */
+/* 项目级没有「一个编号」：编号是按活动生成的（CDYJR{立项年}{立项月:03d}-C-{类型}{活动年}{月}{流水}）。
+ * 项目这一格只展示立项年月规则，不再显示误导性的「未生成」（E2E-3 发现）。 */
+function projectCodeHint(p) {
+  const cr = (p && p.code_rules) || {};
+  const m = cr.establish_month;
+  if (!m) return '未配置立项月';
+  return `CDYJR<立项年>${String(m).padStart(3, '0')}-C-…（活动级编号）`;
+}
+
 async function pageProject(name) {
   setTitle('项目概览');
   $('view').innerHTML = loading();
@@ -417,7 +426,9 @@ async function pageProject(name) {
   const parties = d.parties || {};
   const staff = d.staff || {};
   const budget = d.budget || {};
-  const period = d.period || {};
+  // period 在 project 下（项目 yaml 的 project.period.start/end），
+  // 不是顶层 d.period —— 原来读错层级，项目周期恒显示「—」（E2E-3 发现）
+  const period = p.period || d.period || {};
   const planned = acts.planned || [];
   const existing = acts.existing || [];
   const missing = acts.missing || [];
@@ -459,7 +470,7 @@ async function pageProject(name) {
         ${kv('执行机构', esc((parties.executer || {}).name || '—'))}
         ${kv('项目负责人', esc((staff.leader || {}).name || '—'))}
         ${kv('预算总额', esc(budget.total != null ? budget.total : '—'))}
-        ${kv('项目编号', `<span class="mono">${esc(p.code || '未生成')}</span>`)}
+        ${kv('项目编号规则', `<span class="mono">${esc(projectCodeHint(p))}</span>`)}
       </div>
     </div>
     <div class="card checklist pad0">

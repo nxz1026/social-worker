@@ -1,6 +1,14 @@
-# 飞书收件箱工作流配置模板
-# 用法：复制成 config/feishu-flow.yaml 并填真实 folder token。
+# 飞书归档配置模板
+# 用法：复制成 <SOCIAL_WORK_ROOT>/feishu-flow.yaml 并填真实 folder token。
 # 真配置已在 .gitignore 里，不要提交。
+#
+# ⚠️ 位置很重要：scan-inbox.py 读的是 ROOT / "feishu-flow.yaml"，
+#    即 /srv/social-work/feishu-flow.yaml，**不是 config/ 下**。
+#    放错位置会报 "parent node not exist"（2026-11-21 踩过）。
+#
+# 定位（用户 2026-11-21 定）：飞书只用来**备份源文件**，目录不必与类别
+# 一一对照，做到「项目级隔离」即可 —— 只要 md 顶部的「> 原件」链接能回到源文件。
+# 因此每个项目只配一个 folder（项目根），文件直接推进去。
 #
 # token 取法：飞书云盘对应文件夹的 URL 末尾一段
 #   https://<tenant>.feishu.cn/drive/folder/<folder_token>

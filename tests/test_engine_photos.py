@@ -50,7 +50,9 @@ def _photo_dir(act: Path) -> Path:
 def test_compress_jpeg_resizes_max_edge():
     data, w, h = P.compress_image(_jpeg_bytes((3000, 2000)))
     assert max(w, h) == P.MAX_EDGE
-    assert w == P.MAX_EDGE and h == 1707
+    # 高按等比缩放，不写死数字（MAX_EDGE 会随省空间策略调整）
+    assert w == P.MAX_EDGE
+    assert h == round(P.MAX_EDGE * 2000 / 3000)
     assert data[:2] == b"\xff\xd8"          # JPEG SOI
 
 
@@ -67,8 +69,13 @@ def test_compress_png_alpha_flattened_to_white():
             img.putpixel((x, y), (255, 0, 0, 0))   # 左上透明
     buf = BytesIO()
     img.save(buf, "PNG")
-    data, w, h = P.compress_image(buf.getvalue())
+    src = buf.getvalue()
+    data, w, h = P.compress_image(src)
     assert (w, h) == (300, 200)
+    if data == src:
+        # 小图重编码反而变大时保留原件（变大保护），此时不经过 RGB 转换
+        assert Image.open(BytesIO(data)).mode == "RGBA"
+        return
     with Image.open(BytesIO(data)) as out:
         assert out.mode == "RGB"
         assert out.getpixel((10, 10)) == (255, 255, 255)

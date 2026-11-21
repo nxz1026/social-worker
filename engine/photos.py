@@ -28,8 +28,13 @@ from PIL import Image
 PHOTO_DIRS = {"10-物资照片资料", "11-活动照片资料", "12-发票"}
 # 默认照片子目录：上传端点固定落到这里
 PHOTO_SUBDIR = "11-活动照片资料"
-MAX_EDGE = 2560          # 原件压缩后的最大边
-QUALITY = 95
+# 压缩目标：优先省空间（用户 2026-11-21 定）。
+# 微信导出的图普遍是「大尺寸 + 低质量」（4096×3072 才 569KB），
+# 用 q=95 重编码反而膨胀到 216%；实测 1920/q80 能压到 57%，
+# 屏幕上看与原件无明显差别。
+# compress_image 仍有「压完变大就保留原件」的兜底。
+MAX_EDGE = 1920          # 原件压缩后的最大边
+QUALITY = 80
 PICK_COUNT = 8           # 精选张数
 PICK_EDGE = 1600
 CONTACT_SHEET_COLS = 3
@@ -96,7 +101,15 @@ def compress_image(src: bytes | Path, max_edge: int = MAX_EDGE,
         rgb.save(out, format="JPEG", quality=int(quality), optimize=True)
     except Exception as exc:
         raise ValueError(f"图片编码失败：{exc}") from exc
-    return out.getvalue(), rgb.width, rgb.height
+    encoded = out.getvalue()
+
+    # 压缩后反而变大时保留原图：微信导出的图常是「大尺寸 + 低质量」，
+    # 例如 4096×3072 只有 569KB，用 q=95 重编码会膨胀到 1228KB（216%）。
+    # 这种情况压缩没有收益，原图质量也更好。
+    if len(encoded) >= len(data):
+        with Image.open(BytesIO(data)) as orig:
+            return data, orig.width, orig.height
+    return encoded, rgb.width, rgb.height
 
 
 def sha256_of(data: bytes) -> str:

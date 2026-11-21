@@ -40,6 +40,66 @@ def _legacy_project_name(value: str) -> str:
     from api.app import _legacy_project_name as _fn
     return _fn(value)
 
+
+def _legacy_project_key(project: str) -> str:
+    """中文项目名 → 归档脚本认的 key（huimin / huadu）。
+
+    archive.py / scan-inbox.py 的 projects 字典只认 config/feishu-flow.yaml
+    里定义的 key；API 传的是中文全名，直接传给脚本会 KeyError（E2E-2 实测）。
+    这里按 project_aliases.yaml 的关键词做反查：项目名里命中哪组关键词，
+    就归到那个 key。查不到时原样返回，脚本那边会走自己的兜底。
+    """
+    raw = str(project or "").strip()
+    if not raw:
+        return ""
+    from api.app import _cached_project_aliases as _aliases
+    try:
+        aliases = _aliases() or {}
+    except Exception:
+        return raw
+
+    # 先按项目全名前缀精确匹配：两个花都项目的**全名**本身就能区分
+    # （花都社区激励资金项目 / 花都社区保障资金项目），比关键词更准。
+    # 用 feishu-flow.yaml 里 label + 项目根名做对照。
+    try:
+        from api.state import SETTINGS as _S
+        _cfgp = Path(_S.root) / "config" / "feishu-flow.yaml"
+        flow = (yaml.safe_load(_cfgp.read_text(encoding="utf-8"))
+                if _cfgp.is_file() else {}) or {}
+        projs = (flow.get("projects") or {})
+    except Exception:
+        projs = {}
+    # label 形如「花都激励」「花都保障」「惠民」，项目全名形如
+    # 「花都社区激励资金项目」。共同汉字前缀去掉后，剩下的特征词
+    # （激励 / 保障 / 惠民）直接在全名里找。
+    for key, meta in projs.items():
+        label = str((meta or {}).get("label") or "")
+        if not label or label == "花都":
+            continue
+        # 去掉与项目全名重合的前缀字，剩下的就是特征词
+        core = label
+        for ch in label:
+            if ch in raw and len(core) > 1 and core[0] == ch:
+                core = core[1:]
+            else:
+                break
+        if core and core in raw:
+            return str(key)
+
+    # 打分而非先到先得：两个「花都」项目共用「花都」这个泛词，
+    # 谁排在前面谁通吃。改成「命中词越长、命中词越多，分越高」——
+    # 具体词（矛盾纠纷 / 花小帮 / 微格 / 精服善治）自然压过泛词（花都）。
+    best_key, best_score = None, 0
+    for key, words in aliases.items():
+        score = 0
+        for w in (words or []):
+            w = str(w or "")
+            if w and w in raw:
+                score += len(w)
+        if score > best_score:
+            best_key, best_score = str(key), score
+    return best_key or raw
+
 def _flow() -> dict:
     """读取飞书流程配置。
 
@@ -429,7 +489,8 @@ def upload_doc(
         cmd = ["python3", str(SCRIPTS / "archive.py"), "--file", tmp_path, "--json",
                "--no-cognify", "--only-self", "--scan-timeout", str(_scan_timeout())]
         if project:
-            cmd += ["--project", project]
+            # 归档脚本只认 feishu-flow.yaml 的 key（huimin/huadu），传中文名会 KeyError
+            cmd += ["--project", _legacy_project_key(project)]
         if category:
             cmd += ["--category", category]
         rc, out, err, timed_out = run_archive(cmd, _archive_timeout())

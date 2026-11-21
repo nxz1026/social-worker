@@ -729,7 +729,16 @@ def archive_one(src: Path, token: str, digest: str, decision: dict, cfg: dict,
 
     # 飞书归档：飞书来源 +move（原文件搬过去）；本地来源 +upload（飞书侧没有对应条目）
     if project:
-        dest_folder = cfg["category_folders"][projects[project]["label"]][category]
+        # 目标目录：优先用项目根（folder），做到「项目级隔离」即可 ——
+        # 用户 2026-11-21 定：飞书只用来备份源文件，目录不必与类别一一对照，
+        # 只要能从 md 找到源文件。旧配置的 category_folders[类别] 结构
+        # 在 11-18 项目重构后已不存在，退而求其次才用它。
+        _proj = projects[project]
+        dest_folder = (_proj.get("folder")
+                       or (cfg.get("category_folders", {}).get(_proj["label"], {})
+                           .get(category)))
+        if not dest_folder:
+            raise RuntimeError(f"飞书目标目录未配置：项目 {project}")
         try:
             if is_local:
                 ft = upload_to_archive(str(dest.relative_to(ROOT)), dest_folder)
