@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 
 import psycopg
 
-from settings import SETTINGS
+from api.settings import SETTINGS
 
 KEY_PREFIX = "sk-sw-"
 # 明文前 12 位（含 sk-sw-）落库，便于后台辨认是哪把钥匙，但不泄露剩余随机串

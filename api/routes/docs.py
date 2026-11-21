@@ -22,7 +22,7 @@ from fastapi.responses import FileResponse, JSONResponse
 
 import status as status_mod
 
-from settings import SETTINGS
+from api.settings import SETTINGS
 
 from api.deps import (check_project, current_user, db, project_access,
                       require_admin, require_write, scopes_of)

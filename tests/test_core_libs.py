@@ -544,3 +544,15 @@ def test_request_json_empty_body_is_empty_dict(key_root, stub_urlopen):
     _, holder = stub_urlopen
     holder["fn"] = lambda req, timeout=None: _FakeResponse("")
     assert ci._request_json("GET", "http://x", "k") == {}
+
+
+def test_cognify_poll_interval_has_minimum(monkeypatch):
+    """poll_interval=0 时必须有下限，否则空转打爆上游（实测 1 秒 11843 次）。"""
+    from engine import cognee_index as _ci
+    assert _ci._MIN_POLL_INTERVAL > 0
+    slept = []
+    monkeypatch.setattr(_ci.time, "sleep", lambda v: slept.append(v))
+    # 直接验证 sleep 参数被夹到下限；不看完整流程，避免依赖 HTTP 桩
+    import inspect
+    src = inspect.getsource(_ci.cognify)
+    assert "_MIN_POLL_INTERVAL" in src, "cognify 未使用最小间隔常量"

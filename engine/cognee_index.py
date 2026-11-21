@@ -172,8 +172,13 @@ def add_text(root: Path, dataset: str, text: str, filename: str) -> str:
     return str(data_ids[0])
 
 
+# 轮询最小间隔（秒）。poll_interval=0 时 time.sleep(0) 空转，实测 1 秒内
+# 发了 11843 次 processing-status 请求，会把 Cognee 打挂。
+_MIN_POLL_INTERVAL = 0.5
+
+
 def cognify(root: Path, dataset: str, *, timeout: int = 1800,
-            poll_interval: int = 10) -> bool:
+            poll_interval: float = 10) -> bool:
     """POST /api/v1/cognify，带 datasets 参数。成功后返回 True。
 
     这个接口很慢（几分钟），超时设 1800 秒。服务端建图是阻塞式的，
@@ -229,4 +234,4 @@ def cognify(root: Path, dataset: str, *, timeout: int = 1800,
         if isinstance(state, str) and ("ERROR" in state or "FAILED" in state):
             raise _fail("POST /api/v1/cognify", f"数据集状态 {state}")
 
-        time.sleep(poll_interval)
+        time.sleep(max(float(poll_interval), _MIN_POLL_INTERVAL))

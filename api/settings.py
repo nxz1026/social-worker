@@ -91,11 +91,45 @@ def load(path: str | Path | None = None) -> Settings:
     raw: dict = {}
     if cfg_path is not None and cfg_path.is_file():
         raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+        # 顶层必须是映射；原来是列表时报 AttributeError: 'list' object has no
+        # attribute 'get'，看不出是配置问题。
+        if not isinstance(raw, dict):
+            raise ValueError(
+                f"配置文件顶层必须是键值映射（YAML mapping），实际是 "
+                f"{type(raw).__name__}：{cfg_path}")
     elif path or os.environ.get("SOCIALWORK_API_CONFIG"):
         raise FileNotFoundError(f"配置文件不存在：{cfg_path}")
 
     def section(name: str) -> dict:
-        return {**DEFAULTS[name], **(raw.get(name) or {})}
+        got = raw.get(name) or {}
+        if not isinstance(got, dict):
+            raise ValueError(
+                f"配置项 {name} 必须是键值映射，实际是 {type(got).__name__}：{cfg_path}")
+        return {**DEFAULTS[name], **got}
+
+    def str_list(value, field: str) -> list[str]:
+        """把配置里的列表字段规整成 list[str]。
+
+        原来是 [str(x) for x in value]：YAML 里误写成字符串时会被**逐字符拆开**
+        （"https://a.com" → ['h','t','t',...,'m']），导致 CORS 静默失效。
+        """
+        if value is None:
+            return []
+        if isinstance(value, str):
+            raise ValueError(
+                f"配置项 {field} 必须是列表，实际是字符串 {value!r}：{cfg_path}")
+        if not isinstance(value, (list, tuple)):
+            raise ValueError(
+                f"配置项 {field} 必须是列表，实际是 {type(value).__name__}：{cfg_path}")
+        out = []
+        for item in value:
+            if item is None:
+                continue
+            if isinstance(item, (dict, list, tuple)):
+                raise ValueError(
+                    f"配置项 {field} 的元素必须是标量，实际是 {type(item).__name__}：{cfg_path}")
+            out.append(str(item))
+        return out
 
     server = section("server")
     auth = section("auth")
@@ -113,25 +147,45 @@ def load(path: str | Path | None = None) -> Settings:
         raise RuntimeError(
             "未配置数据库连接：设置环境变量 SOCIALWORK_DB_DSN，或在 config/api.yaml 填 db.dsn")
 
-    cors_origins = [str(x) for x in (server.get("cors_origins") or ["*"])]
-    # 生产环境通配来源等于把 API 暴露给任意站点；只告警不阻断，避免上线即挂。
-    # 收敛方式见 docs/服务器部署.md「CORS 配置」。
+    cors_origins = str_list(server.get("cors_origins") or ["*"], "server.cors_origins")
+    # 生产环境通配来源等于把 API 暴露给任意站点。原来是只告警不阻断，
+    # 意味着漏配一次就静默放行（审计 C-05）。现在改为 fail closed：
+    # 生产 + 通配 → 直接拒绝启动，逼部署时显式配置。
+    # 确实需要通配（例如内网全同源反代）时，显式设
+    # SOCIAL_WORK_ALLOW_WILDCARD_CORS=1 放行，把风险变成一次有意识的决定。
     if cors_origins == ["*"] and os.environ.get(
             "SOCIAL_WORK_ENV", "").strip().lower() == "production":
-        log.warning(
-            "CORS 允许任意来源（*），生产环境请改为显式 allowlist：%s",
-            cfg_path or "内置默认值")
+        if os.environ.get("SOCIAL_WORK_ALLOW_WILDCARD_CORS", "").strip() != "1":
+            raise RuntimeError(
+                "生产环境（SOCIAL_WORK_ENV=production）不允许 CORS 通配来源 *。"
+                "请在配置文件里把 server.cors_origins 改成显式 allowlist"
+                f"（当前配置：{cfg_path or '内置默认值'}）；"
+                "确需通配请显式设 SOCIAL_WORK_ALLOW_WILDCARD_CORS=1。")
+        log.warning("生产环境使用通配 CORS（已通过 "
+                    "SOCIAL_WORK_ALLOW_WILDCARD_CORS=1 显式放行）")
+
+    def to_int(value, field: str) -> int:
+        """带字段名的整数解析。原来直接 int(x)，类型错只报
+        `invalid literal for int()`，看不出是哪个配置项。"""
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"配置项 {field} 必须是整数，实际是 {value!r}：{cfg_path}") from None
 
     return Settings(
         path=cfg_path,
         root=root,
         templates_dir=templates,
         cors_origins=cors_origins,
-        timezone_offset_hours=int(server["timezone_offset_hours"]),
-        token_ttl_hours=int(auth["token_ttl_hours"]),
-        projects=[str(x) for x in (raw.get("projects") or DEFAULTS["projects"])],
+        timezone_offset_hours=to_int(server["timezone_offset_hours"],
+                                     "server.timezone_offset_hours"),
+        token_ttl_hours=to_int(auth["token_ttl_hours"], "auth.token_ttl_hours"),
+        projects=str_list(raw.get("projects") or DEFAULTS["projects"], "projects"),
         db_dsn=dsn,
-        server={**server, "port": int(os.environ.get("PORT") or server["port"])},
+        server={**server,
+                "port": to_int(os.environ.get("PORT") or server["port"],
+                               "server.port（或环境变量 PORT）")},
         llm=llm,
         search=search,
         upload=upload,

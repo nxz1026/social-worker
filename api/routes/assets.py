@@ -154,7 +154,7 @@ def api_activity_upload(
     编号归属 → 同名冲突 → 流式落盘并限大小。文件名以 NN- 开头且该核对项
     已齐时，仍返回 200，但附带 warning 提醒会重复。
     """
-    from settings import SETTINGS
+    from api.settings import SETTINGS
 
     require_write(user)
     act_dir, _meta = activity_meta_or_404(name, dirname, user, write=True)

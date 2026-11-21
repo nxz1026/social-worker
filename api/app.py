@@ -15,6 +15,7 @@ import hashlib
 import importlib.util
 import io
 import json
+import logging
 import mimetypes
 import os
 import re
@@ -48,7 +49,11 @@ for _p in (str(_REPO_ROOT), str(_API_DIR)):
 
 import apikey as _apikey  # noqa: E402
 import keysafe as _keysafe  # noqa: E402
-from settings import SETTINGS  # noqa: E402
+# 必须用包名 api.settings 而非裸名 settings：api/ 在 sys.path 里，
+# 裸名与 api.settings 会被 Python 当成**两个不同模块**各执行一次，
+# 产出两个 SETTINGS 单例（实测 is 判断为 False、dataclass 类型也不同）。
+# 改一份不影响另一份，是隐性故障源。
+from api.settings import SETTINGS  # noqa: E402
 import status as status_mod  # noqa: E402
 
 from api import admin, auth  # noqa: E402
@@ -86,6 +91,8 @@ from engine import llm as _llm  # noqa: E402
 from engine import readme as _readme  # noqa: E402
 
 app = FastAPI(title="社工文档服务", version="0.1")
+
+log = logging.getLogger("socialwork.api")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=SETTINGS.cors_origins,
@@ -148,8 +155,12 @@ def _ensure_api_key_secret_column() -> None:
                 cur.execute(
                     "ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS secret_enc text")
             conn.commit()
-    except Exception:
-        pass
+    except Exception as exc:
+        # 不阻断启动（认证只依赖 key_hash），但**必须留痕**：
+        # 原来这里 `except Exception: pass` 零日志，线上缺列无人知（审计 C-07）。
+        # 缺列的后果是「查看 API Key 明文」报 SQL 错误，属于要修但不必停服的问题。
+        log.warning("启动迁移失败（api_keys.secret_enc 未补）：%s: %s",
+                    type(exc).__name__, exc)
 
 
 # ---------- 统一错误 ----------
