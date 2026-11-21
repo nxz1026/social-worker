@@ -816,12 +816,18 @@ function checkSummary(check) {
 }
 
 function reviewSummary(check) {
+  /* 计数一律用后端返回的值：前端自己 filter 会与 deliverable 判据打架。
+   * 原来前端数「必需项里有 review 的」，后端数「所有有 review 的」，
+   * 于是出现「已核对 13/14」旁边挂绿色「可交付」的矛盾（审计 R-03）。*/
   const required = (check.items || []).filter(it => it.status !== 'na');
-  const done = required.filter(it => it.review).length;
+  const done = check.reviewed_required_count != null
+    ? check.reviewed_required_count
+    : required.filter(it => it.review).length;
+  const total = check.required_count != null ? check.required_count : required.length;
   const signed = (check.items || []).filter(it => it.signed).length;
   const deliv = check.deliverable ? '<span class="badge ok">可交付</span>'
                                  : '<span class="badge muted">未齐备</span>';
-  return `已核对 ${done}/${required.length} · 已签字 ${signed} ${deliv}`;
+  return `已核对 ${done}/${total} · 已签字 ${signed} ${deliv}`;
 }
 
 function renderFileRows(entries, sub, check) {

@@ -83,13 +83,14 @@ def api_set_na(name: str, dirname: str, body: dict,
             raise HTTPException(400, f"核对序号超出范围 1-15：{no}")
         nos.add(no)
 
-    data = _ingest.read_activity_yaml(act_dir)
-    data["not_applicable"] = sorted(nos)
-    path = act_dir / _ingest.ACTIVITY_YAML
-    text = yaml.safe_dump(data, allow_unicode=True, sort_keys=False)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(text, encoding="utf-8")
-    tmp.replace(path)
+    def _mutate(data: dict) -> dict:
+        data["not_applicable"] = sorted(nos)
+        return data
+
+    # 与 save_review 共用同一把活动锁：两者都改 activity.yaml 的不同字段，
+    # 各自「读全量 → 改 → 覆盖写」在并发下会互相丢字段（审计 R-02）。
+    from engine import ylock as _ylock
+    _ylock.update_yaml(act_dir / _ingest.ACTIVITY_YAML, _mutate, lock_dir=act_dir)
     return {"ok": True, "not_applicable": sorted(nos)}
 
 

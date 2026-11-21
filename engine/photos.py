@@ -524,7 +524,9 @@ def compress_dir(act_dir: Path, photo_dir: Path,
         result["compressed"] += 1
         result["saved_bytes"] += len(old) - len(payload)
         if not dry_run:
-            tmp = path.with_name(path.name + ".tmp")
+            # 唯一临时名：压缩多张照片并发跑时，固定 .tmp 会撞同一文件
+            tmp = path.with_name(
+                f"{path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp")
             tmp.write_bytes(payload)
             tmp.replace(path)
     return result

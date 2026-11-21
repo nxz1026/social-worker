@@ -19,10 +19,10 @@ DRY=""
 # 资产验收放在同步之前：验收不过就什么都不做，生产仍是旧版本。
 # 放在同步之后的话，新代码已经对外服务了，验收失败只能报错、拦不住。
 echo "== 部署前资产验收（模板/项目数据不入库，跳过不算通过）=="
-SOCIAL_WORK_TEST_REPO="${TEST_REPO:-$REPO}" \
-  python3 "$REPO/scripts/verify_assets.py"
-va=$?
-if [ "$va" -ne 0 ]; then
+# set -e 下不能写 `python3 ...; va=$?`：非零退出会当场终止脚本，
+# 后面的 va=$? 与提示语都是死代码，运维看不到「生产未改动」这句关键信息。
+if ! SOCIAL_WORK_TEST_REPO="${TEST_REPO:-$REPO}" \
+     python3 "$REPO/scripts/verify_assets.py"; then
     echo "  ! 资产验收未通过，已中止部署（生产未改动）"
     exit 1
 fi

@@ -9,7 +9,6 @@
 """
 from __future__ import annotations
 
-import contextlib
 import fcntl
 import hashlib
 import importlib.util
@@ -288,30 +287,7 @@ def _load_manifest() -> dict:
     data.setdefault("files", {})
     return data
 
-def _save_manifest(manifest: dict) -> None:
-    p = _manifest_file()
-    p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_suffix(".tmp")
-    tmp.write_text(yaml.safe_dump(manifest, allow_unicode=True, sort_keys=True),
-                   encoding="utf-8")
-    tmp.replace(p)
 
-@contextlib.contextmanager
-def _manifest_lock():
-    """非阻塞文件锁，拿不到直接报错（不做排队）。"""
-    lock = ROOT / "state" / ".manifest.lock"
-    lock.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(lock, os.O_CREAT | os.O_RDWR, 0o644)
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        os.close(fd)
-        raise HTTPException(409, "台账正被其他进程写入，请稍后重试")
-    try:
-        yield
-    finally:
-        fcntl.flock(fd, fcntl.LOCK_UN)
-        os.close(fd)
 
 
 

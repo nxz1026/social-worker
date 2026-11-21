@@ -10,6 +10,8 @@
 """
 from __future__ import annotations
 
+from . import ylock as _ylock
+
 import os
 import re
 from datetime import datetime
@@ -171,9 +173,7 @@ def write_mirror(doc: Path, project_name: str, activity_dirname: str = "",
     if dry_run:
         return True
     target.parent.mkdir(parents=True, exist_ok=True)
-    tmp = target.with_name(target.name + ".tmp")
-    tmp.write_text(text, encoding="utf-8")
-    tmp.replace(target)
+    _ylock.atomic_write_text(target, text)
     return True
 
 
@@ -227,9 +227,7 @@ def ensure_stignore(project_dir: Path, dry_run: bool = False) -> bool:
     if dry_run:
         return True
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(new_text, encoding="utf-8")
-    tmp.replace(path)
+    _ylock.atomic_write_text(path, new_text)
     return True
 
 

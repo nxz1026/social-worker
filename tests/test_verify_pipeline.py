@@ -24,6 +24,10 @@ from pathlib import Path
 import pytest
 import requests
 
+import sys as _sys
+_sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent))
+from verify_guard import pytestmark  # noqa: E402,F401  生产验证套件守卫
+
 # ---------- 服务端真实数据 ----------
 BASE = os.environ.get("SW_TEST_BASE_URL", "http://127.0.0.1:8001").rstrip("/")
 PROJECT = "惠民社区保障资金项目"       # token 对应的 admin 对该项目有 write 权限

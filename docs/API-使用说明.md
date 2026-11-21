@@ -230,7 +230,19 @@ curl -H "Authorization: Bearer sk-sw-xxx" \
 `complete` 要求 `partial_count == 0` 且 `missing_count == 0`。
 
 核对结果里每项还带 `review`（谁核对 / 何时 / 备注，未核对为 `null`）与 `signed`；
-顶层带 `reviewed_count`、`signed_count`、`deliverable`（必需项既齐全又全部核对过才为 `true`）。
+顶层带：
+
+| 字段 | 含义 |
+|---|---|
+| `required_count` | 必需项数（`status != na` 的项） |
+| `reviewed_required_count` | **必需项里**已核对的项数 |
+| `reviewed_count` | 所有已核对项数（含 na 项，仅供统计） |
+| `signed_count` | 已签字项数 |
+| `deliverable` | 必需项既齐全、且**每一项**都有核对记录才为 `true` |
+
+**`deliverable` 用 `reviewed_required_count` 判定，不是 `reviewed_count`。**
+`na` 项（第 15 项「其他」恒为 na）即使有核对记录也不计入交付判据 ——
+否则「13/14 必需项核对 + na 项凑数」会被误判为可交付（审计 R-03）。
 
 ### 4.3.1 标记核对 / 签字
 

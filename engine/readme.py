@@ -9,6 +9,8 @@ README 只写人要看的东西：不写 activity.yaml 里的 source / imported_
 """
 from __future__ import annotations
 
+from . import ylock as _ylock
+
 from datetime import datetime
 from pathlib import Path
 
@@ -268,9 +270,7 @@ def _write_if_changed(path: Path, text: str, dry_run: bool = False) -> bool:
     if dry_run:
         return True
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(text, encoding="utf-8")
-    tmp.replace(path)
+    _ylock.atomic_write_text(path, text)
     return True
 
 

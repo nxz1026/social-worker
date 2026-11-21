@@ -131,15 +131,15 @@ def write_activity_yaml(act_dir: Path, *, code: str | None, source: str,
     act.mkdir(parents=True, exist_ok=True)
     path = act / ACTIVITY_YAML
 
-    # 合并：原有字段原样保留，本次四项覆盖
-    data = read_activity_yaml(act)
-    data["code"] = code
-    data["source"] = source
-    data["imported_at"] = imported_at
-    data["status"] = "imported"
+    def _mutate(data: dict) -> dict:
+        # 合并：原有字段原样保留（含 reviews / not_applicable），本次四项覆盖
+        data["code"] = code
+        data["source"] = source
+        data["imported_at"] = imported_at
+        data["status"] = "imported"
+        return data
 
-    text = yaml.safe_dump(data, allow_unicode=True, sort_keys=False)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(text, encoding="utf-8")
-    tmp.replace(path)
+    # 与其他 activity.yaml 写者共用活动锁（审计 R-02）
+    from . import ylock as _ylock
+    _ylock.update_yaml(path, _mutate, lock_dir=act)
     return path

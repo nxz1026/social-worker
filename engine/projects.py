@@ -6,6 +6,8 @@
 """
 from __future__ import annotations
 
+from . import ylock as _ylock
+
 import json
 import os
 from pathlib import Path
@@ -198,6 +200,4 @@ def save_project_code(name: str, code: str) -> None:
     if not replaced:
         raise ValueError(f"yaml 里没有 project.code：{name}")
 
-    tmp = yaml_path.with_name(yaml_path.name + ".tmp")
-    tmp.write_text("".join(lines), encoding="utf-8")
-    tmp.replace(yaml_path)
+    _ylock.atomic_write_text(yaml_path, "".join(lines))

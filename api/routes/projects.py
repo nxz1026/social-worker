@@ -1,6 +1,8 @@
 """项目级端点（项目 CRUD、活动清单、核对、编号）。"""
 from __future__ import annotations
 
+from engine import ylock as _ylock
+
 from datetime import datetime
 from pathlib import Path
 
@@ -114,9 +116,7 @@ def api_create_project(body: dict, request: Request,
     yaml_path = target / f"{name}.yaml"
     text = yaml.safe_dump({"project": {"short": short, "code_rules": rules}},
                           allow_unicode=True, sort_keys=False)
-    tmp = yaml_path.with_name(yaml_path.name + ".tmp")
-    tmp.write_text(text, encoding="utf-8")
-    tmp.replace(yaml_path)
+    _ylock.atomic_write_text(yaml_path, text)
 
     _audit_mod.audit(conn, user["id"], "create_project", target=name,
           detail={"short": short, "code_rules": rules}, ip=request.client.host)
@@ -144,9 +144,7 @@ def api_update_project(name: str, body: dict, request: Request,
         raise HTTPException(400, "body 必须是 yaml 对象")
 
     text = yaml.safe_dump(body, allow_unicode=True, sort_keys=False)
-    tmp = yaml_path.with_name(yaml_path.name + ".tmp")
-    tmp.write_text(text, encoding="utf-8")
-    tmp.replace(yaml_path)
+    _ylock.atomic_write_text(yaml_path, text)
 
     _audit_mod.audit(conn, user["id"], "update_project", target=name,
           detail={"keys": sorted(body)}, ip=request.client.host)

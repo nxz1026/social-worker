@@ -17,6 +17,8 @@
 """
 from __future__ import annotations
 
+from . import ylock as _ylock
+
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -346,10 +348,21 @@ def merge_review_status(result: dict, reviews: dict) -> dict:
 
     covered = sum(1 for it in required
                   if it.get("status") in ("ok", "partial"))
-    deliverable = (len(required) > 0 and covered == len(required)
-                   and reviewed_count >= len(required))
+    # 「可交付」必须逐项判断：必需项既齐全、又**每一项**都有核对记录。
+    # 原来用 reviewed_count >= len(required) 做计数比较，而 reviewed_count
+    # 把 na 项也算进去 —— 只核对 13 个必需项 + 第 15 项「其他」（恒为 na）
+    # 就能凑够 14，把「可交付」点亮（审计 R-03，已复现）。
+    reviewed_required = sum(1 for it in required if it.get("review"))
+    deliverable = (len(required) > 0
+                   and covered == len(required)
+                   and reviewed_required == len(required))
     result["items"] = items
     result["reviewed_count"] = reviewed_count
+    # 必需项的核对数：deliverable 用的就是这个口径，前端展示也用它，
+    # 避免前后端两套算法打架（原来前端自己数必需项，会出现
+    # 「已核对 13/14」与绿色「可交付」并存的矛盾）。
+    result["reviewed_required_count"] = reviewed_required
+    result["required_count"] = len(required)
     result["signed_count"] = signed_count
     result["deliverable"] = deliverable
     return result
@@ -394,41 +407,41 @@ def save_review(act_dir: Path, item_no: int, *,
     if no not in valid_nos:
         raise ValueError(f"核对序号超出范围 1-{OTHER_ITEM['no']}：{no}")
 
-    data = read_activity_yaml(act)
-    raw = data.get("reviews")
-    reviews = {str(k): v for k, v in raw.items()
-               if isinstance(v, dict)} if isinstance(raw, dict) else {}
+    # scan 的校验在锁外先做（只读文件系统，不碰 yaml）
+    scan_rel = ""
+    if not clear and str(scan or "").strip():
+        scan_rel = _resolve_scan(act, scan).relative_to(act.resolve()).as_posix()
 
-    if clear:
-        reviews.pop(str(no), None)
-    else:
-        scan_rel = ""
-        if str(scan or "").strip():
-            scan_rel = _resolve_scan(act, scan).relative_to(act.resolve()).as_posix()
-        now = datetime.now(CST).isoformat(timespec="seconds")
-        record = {
-            "reviewed_by": str(reviewed_by or "").strip(),
-            "reviewed_at": now,
-            "reviewed_note": str(note or "").strip(),
-            "signed": bool(signed),
-        }
-        if signed:
-            record["signed_at"] = now
-        if scan_rel:
-            record["scan"] = scan_rel
-        reviews[str(no)] = record
+    def _mutate(data: dict) -> dict:
+        raw = data.get("reviews")
+        reviews = {str(k): v for k, v in raw.items()
+                   if isinstance(v, dict)} if isinstance(raw, dict) else {}
+        if clear:
+            reviews.pop(str(no), None)
+        else:
+            now = datetime.now(CST).isoformat(timespec="seconds")
+            record = {
+                "reviewed_by": str(reviewed_by or "").strip(),
+                "reviewed_at": now,
+                "reviewed_note": str(note or "").strip(),
+                "signed": bool(signed),
+            }
+            if signed:
+                record["signed_at"] = now
+            if scan_rel:
+                record["scan"] = scan_rel
+            reviews[str(no)] = record
+        if reviews:
+            data["reviews"] = {k: reviews[k] for k in sorted(reviews, key=int)}
+        else:
+            data.pop("reviews", None)
+        return data
 
-    if reviews:
-        data["reviews"] = {k: reviews[k] for k in sorted(reviews, key=int)}
-    else:
-        data.pop("reviews", None)
-
-    path = act / ACTIVITY_YAML
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(yaml.safe_dump(data, allow_unicode=True, sort_keys=False),
-                   encoding="utf-8")
-    tmp.replace(path)
-    return reviews.get(str(no), {})
+    # 整个「读 yaml → 改 reviews → 写回」在活动锁内完成。
+    # 原来无锁 + 固定 .tmp 名：并发写会让后写者整段覆盖 reviews（丢记录），
+    # 或撞同一临时文件报 FileNotFoundError（审计 R-02，实测 8 线程只剩 3 条）。
+    written = _ylock.update_yaml(act / ACTIVITY_YAML, _mutate, lock_dir=act)
+    return (written.get("reviews") or {}).get(str(no), {})
 
 
 def _cell(text: str) -> str:

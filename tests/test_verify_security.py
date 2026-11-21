@@ -38,6 +38,10 @@ from api.deps import require_admin, scopes_of  # noqa: E402
 from api.shared.paths import normalize_rel, safe_rel_path  # noqa: E402
 from api.state import _LOGIN_FAIL_MAX  # noqa: E402
 
+import sys as _sys
+_sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent))
+from verify_guard import pytestmark  # noqa: E402,F401  生产验证套件守卫
+
 HOST, PORT = "127.0.0.1", 8001
 PROJECT = "惠民社区保障资金项目"
 TMP_KEY_NAME = "__sec_verify_tmp__"
