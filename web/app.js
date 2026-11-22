@@ -572,6 +572,7 @@ async function pageActivity(name, dirname, params) {
         <button class="btn" data-act="act-upload" ${canWrite() ? '' : 'disabled title="需 editor/admin"'}>上传文件</button>
         <button class="btn" data-act="open-llm" ${canWrite() ? '' : 'disabled title="需 editor/admin"'}>LLM 生成</button>
         <button class="btn" data-act="do-check">核对</button>
+        <button class="btn" data-act="open-trash">回收站</button>
         <button class="btn" data-act="sync-feishu" ${isAdmin() ? '' : 'disabled title="需 admin"'}>同步飞书</button>
       </div>
     </div>
@@ -803,12 +804,57 @@ async function downloadActivityFile(path) {
 async function deleteActivityFile(path) {
   if (!actCtx) return;
   const { projectName, dirname } = actCtx;
-  if (!confirm(`删除「${path}」？\n会移到活动目录的 .trash，可在磁盘恢复。`)) return;
+  if (!confirm(`删除「${path}」？\n会移到回收站，可在活动页「回收站」里恢复。`)) return;
   await api(`/projects/${enc(projectName)}/activities/${enc(dirname)}/files`, {
     method: 'DELETE', body: { path },
   });
   toast('已移入回收站', 'ok');
   await refreshActivity();
+}
+
+/* 回收站：列出与恢复。
+ * 后端 /trash 与 /trash/restore 早已实现，但界面一直没入口 ——
+ * 删除提示写着「可在磁盘恢复」，用户实际只能上服务器找（审计 PR-06 / E2E-3）。
+ */
+async function openTrash() {
+  if (!actCtx) return;
+  const { projectName, dirname } = actCtx;
+  const base = `/projects/${enc(projectName)}/activities/${enc(dirname)}`;
+  openModal('回收站', loading());
+  let items = [];
+  try {
+    const res = await api(base + '/trash');
+    items = res.items || [];
+  } catch (e) {
+    $('modalBody').innerHTML = errorState(e.message || '读取回收站失败');
+    return;
+  }
+  const rows = items.map(it => `<tr>
+      <td>${esc(it.deleted_at || '—')}</td>
+      <td class="mono">${esc(it.original || '')}</td>
+      <td>${fmtBytes(it.size || 0)}</td>
+      <td>${canWrite() ? `<button class="btn sm" data-act="restore-file" data-trash="${esc(it.trash)}">恢复</button>` : '—'}</td>
+    </tr>`).join('');
+  $('modalBody').innerHTML = items.length
+    ? `<table class="tbl"><thead><tr><th>删除时间</th><th>原路径</th><th>大小</th><th></th></tr></thead>
+       <tbody>${rows}</tbody></table>
+       <p class="muted" style="margin-top:8px">恢复后回到原位置；原位置已有同名文件会提示冲突。</p>`
+    : empty('回收站是空的');
+  $('modalFoot').innerHTML = '<button class="btn" data-close-modal>关闭</button>';
+}
+
+async function restoreFromTrash(trashPath) {
+  if (!actCtx) return;
+  const { projectName, dirname } = actCtx;
+  const base = `/projects/${enc(projectName)}/activities/${enc(dirname)}`;
+  try {
+    await api(base + '/trash/restore', { method: 'POST', body: { trash: trashPath } });
+    toast('已恢复', 'ok');
+    await openTrash();          // 刷新列表
+    await refreshActivity();
+  } catch (e) {
+    toast(e.message || '恢复失败', 'err');
+  }
 }
 
 async function recheckActivity() {
@@ -2422,6 +2468,8 @@ document.addEventListener('click', async e => {
     }
     if (act === 'download') { e.preventDefault(); await downloadActivityFile(node.dataset.path); return; }
     if (act === 'del-file') { await deleteActivityFile(node.dataset.path); return; }
+    if (act === 'open-trash') { await openTrash(); return; }
+    if (act === 'restore-file') { await restoreFromTrash(node.dataset.trash); return; }
     if (act === 'do-check') { await recheckActivity(); return; }
     if (act === 'rev-review') { await openReviewModal(node.dataset.no, 'review'); return; }
     if (act === 'rev-sign') { await openReviewModal(node.dataset.no, 'sign'); return; }

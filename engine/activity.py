@@ -41,6 +41,21 @@ PLAN_ROW_SPECS = {
 }
 
 
+# 模板里人数类占位符自带单位（如「人    数：{{实际人数}} 人」），
+# 如果 activity.yaml 写到「14人」，两边一拼就成「14人 人」（真实 E2E 实测）。
+# 这里把值里**冗余的人/人次单位**剥掉，让模板的统一单位生效。
+_UNIT_TAIL = re.compile(r"\s*(?:人次|人|名)\s*$")
+
+
+def _count_text(value) -> str | None:
+    """人数类字段：去掉尾部单位，只留数字/区间。"""
+    text = _text(value)
+    if text is None:
+        return None
+    stripped = _UNIT_TAIL.sub("", text)
+    return stripped or text
+
+
 def _text(value) -> str | None:
     """空值统一成 None，其余转字符串（编号这类字段 yaml 里可能写成数字）。"""
     if value is None:
@@ -234,15 +249,15 @@ def build_data(project_name: str, activity_dir: str,
                      or _text(activity.get("date"))),
         "活动地点": _text(activity.get("活动地点")) or _text(activity.get("place")),
         "服务对象": _text(activity.get("服务对象")),
-        "预计人数": _text(activity.get("预计人数")),
-        "实际人数": _text(activity.get("实际人数")),
+        "预计人数": _count_text(activity.get("预计人数")),
+        "实际人数": _count_text(activity.get("实际人数")),
         "执行社工": _text(activity.get("执行社工")),
         "执行社工团队": _text(activity.get("执行社工团队")),
         "出纳": _text(activity.get("出纳")),
         "经办人": _text(activity.get("经办人")),
         "费用归属部门": _text(activity.get("费用归属部门")),
-        "领取人数": _text(activity.get("领取人数")),
-        "测评人数": _text(activity.get("测评人数")),
+        "领取人数": _count_text(activity.get("领取人数")),
+        "测评人数": _count_text(activity.get("测评人数")),
         "总得分": _text(activity.get("总得分")),
         "满意率": _text(activity.get("满意率")),
         "平均分": _text(activity.get("平均分")),
