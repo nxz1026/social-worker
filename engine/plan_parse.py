@@ -171,9 +171,9 @@ def _price(value) -> float:
 
 
 def _first_plan_docx(act_dir: Path) -> Path | None:
-    """活动目录里的 01-*.docx（计划书）。"""
-    matches = sorted(act_dir.glob("01-*.docx"))
-    return matches[0] if matches else None
+    """活动目录里的计划书 docx：有/无 01- 前缀都认。"""
+    from . import checks as _checks
+    return _checks.find_first_file(act_dir, "活动计划")
 
 
 def parse_existing_plan(act_dir: Path) -> dict | None:

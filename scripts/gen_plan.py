@@ -123,7 +123,7 @@ def build_facts(act_dir: Path) -> dict:
     project_name = gen_brief._project_name(act_dir)
     base = activity_data.build_data(project_name, str(act_dir))
     yaml_act = read_activity_yaml(act_dir)
-    plan_md = gen_brief._to_md(gen_brief._first_docx(act_dir, "01"))
+    plan_md = gen_brief._to_md(gen_brief._first_docx(act_dir, "活动计划"))
     project_data = _project_data(project_name)
     act_type = llm._activity_type(act_dir.name)
 

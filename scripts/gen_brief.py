@@ -65,10 +65,14 @@ def _project_name(act_dir: Path) -> str:
 # 计划书解析
 # --------------------------------------------------------------------------
 
-def _first_docx(act_dir: Path, prefix: str) -> Path | None:
-    """活动目录里按编号前缀取第一个 docx（01- / 06- / 08-）。"""
-    matches = sorted(act_dir.glob(f"{prefix}-*.docx"))
-    return matches[0] if matches else None
+def _first_docx(act_dir: Path, item_name: str) -> Path | None:
+    """按清单项取第一个 docx，兼容有/无序号前缀的命名。
+
+    原来只 glob「01-*.docx」，而 Web 按模板原名生成的是「计划书.docx」，
+    真实活动目录里两种并存（见 engine.checks.find_first_file）。
+    """
+    from engine import checks as _checks
+    return _checks.find_first_file(act_dir, item_name)
 
 
 def _to_md(path: Path | None) -> str:
@@ -198,9 +202,9 @@ def _cn_date(text: str) -> str:
 
 def build_facts(act_dir: Path) -> dict:
     """活动目录 → brief 的 facts。缺的字段留空串 / None，由调用方决定是否告警。"""
-    plan_md = _to_md(_first_docx(act_dir, "01"))
-    report_md = _to_md(_first_docx(act_dir, "06"))
-    budget_md = _to_md(_first_docx(act_dir, "08"))
+    plan_md = _to_md(_first_docx(act_dir, "活动计划"))
+    report_md = _to_md(_first_docx(act_dir, "总结报告"))
+    budget_md = _to_md(_first_docx(act_dir, "决算表"))
 
     expected = _grab(plan_md, "预计参与人数", "预计人数", "参与人数")
     facts = {

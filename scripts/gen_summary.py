@@ -116,10 +116,10 @@ def _count_photos(act_dir: Path) -> int | None:
 
 def build_facts(act_dir: Path) -> dict:
     """活动目录 → summary 的 facts。缺的字段留空串 / None，由调用方决定是否告警。"""
-    plan_md = brief._to_md(brief._first_docx(act_dir, "01"))
-    report_md = brief._to_md(brief._first_docx(act_dir, "06"))
-    budget_md = brief._to_md(brief._first_docx(act_dir, "08"))
-    survey_md = brief._to_md(brief._first_docx(act_dir, "05"))
+    plan_md = brief._to_md(brief._first_docx(act_dir, "活动计划"))
+    report_md = brief._to_md(brief._first_docx(act_dir, "总结报告"))
+    budget_md = brief._to_md(brief._first_docx(act_dir, "决算表"))
+    survey_md = brief._to_md(brief._first_docx(act_dir, "满意度测评汇总表"))
 
     expected = brief._grab(plan_md, "预计参与人数", "预计人数", "参与人数")
     goals = brief._parse_goals(plan_md)
@@ -164,7 +164,7 @@ def _staffing(facts: dict, act_dir: Path) -> str:
     """按项目 yaml 的 staff + 计划书的社工人数推导「N名项目社工」。"""
     project_name = brief._project_name(act_dir)
     extra = {}
-    count = _parse_staff_count(brief._to_md(brief._first_docx(act_dir, "01")))
+    count = _parse_staff_count(brief._to_md(brief._first_docx(act_dir, "活动计划")))
     if count:
         extra["社工人数"] = count
     try:

@@ -46,6 +46,77 @@ CHECKLIST = [
 # 第 15 项「其他」：没有命中规则，恒为不适用
 OTHER_ITEM = {"no": 15, "name": "其他"}
 
+# 清单项 → 可能的文件名词根。带序号前缀是规范写法（01-计划书.docx），
+# 但 Web 界面按模板原名生成的是「计划书.docx」，真实活动目录里两种并存，
+# 且前缀后还可能带活动名（01-20261105xx活动计划书.docx）。
+# 所以查找顺序是：先按 前缀+关键词 精确找，再退到「无前缀的关键词」。
+_NAME_WORDS = {
+    "活动计划": ("计划书", "活动计划"),
+    "总结报告": ("总结报告",),
+    "决算表": ("决算表",),
+    "简报": ("简报",),
+    "活动通知": ("活动通知", "通知"),
+    "满意度测评汇总表": ("满意度测评汇总表", "满意度"),
+    "监督记录表": ("监督记录",),
+    "物资领取表": ("物资领取",),
+    "劳务领取表": ("劳务领取",),
+}
+
+
+def _item_prefixes(item: dict) -> tuple[str, ...]:
+    """清单项的文件名序号前缀（可能多个，也可能是空）。"""
+    pre = item.get("prefixes")
+    if pre:
+        return tuple(str(x) for x in pre)
+    one = item.get("prefix")
+    return (str(one),) if one else ()
+
+
+def find_first_file(act_dir: Path, item_name: str,
+                    exts: tuple[str, ...] = (".docx",)) -> Path | None:
+    """活动目录里按清单项找第一个文件，兼容三种真实命名。
+
+    1. `01-计划书-xx.docx`（规范：序号前缀 + 关键词 + 活动名）
+    2. `01-20261105xx活动计划书.docx`（前缀 + 日期活动名 + 关键词）
+    3. `计划书.docx`（Web 按模板原名生成，无前缀）
+
+    找不到返回 None。多个命中取字典序第一个（与原有行为一致）。
+    """
+    act = Path(act_dir)
+    if not act.is_dir():
+        return None
+    item = next((it for it in CHECKLIST if it.get("name") == item_name), None)
+    if item is None:
+        return None
+    words = _NAME_WORDS.get(item_name, (item_name,))
+    prefixes = _item_prefixes(item)
+
+    def _pick(patterns: list[str]) -> Path | None:
+        hits: list[Path] = []
+        for pat in patterns:
+            for ext in exts:
+                hits.extend(act.glob(f"{pat}*{ext}" if pat.endswith("-") else f"{pat}*{ext}"))
+        hits = sorted({p for p in hits if p.is_file()})
+        return hits[0] if hits else None
+
+    # 1) 前缀 + 关键词（01-计划书*、06-总结报告*、08-决算表*）
+    for pre in prefixes:
+        for w in words:
+            hit = _pick([f"{pre}{w}"])
+            if hit:
+                return hit
+    # 2) 前缀 + 任意（01-20261105xx活动计划书 —— 关键词在前缀之后）
+    for pre in prefixes:
+        hit = _pick([pre])
+        if hit:
+            return hit
+    # 3) 无前缀（计划书.docx）
+    for w in words:
+        hit = _pick([w])
+        if hit:
+            return hit
+    return None
+
 MEDIA_EXT = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp"}
 # 签字件只认拍照 / 扫描常见格式；gif/webp 不作为签字依据
 SIGNED_EXT = {".jpg", ".jpeg", ".png", ".pdf"}
