@@ -246,9 +246,16 @@ def _decision_total(act_dir: Path) -> tuple[float | None, str]:
     决算表的合计行写作「合计 | 合计 | … | 1662（元）」，正则跳过中间的
     非数字字符直接取数；同一文档出现多个「合计」时取最后一个（表尾合计行）。
     """
-    matches = sorted(Path(act_dir).glob(f"{DECISION_PREFIX}-*.docx"))
+    # 两种命名都要认：规范是「08-决算表.docx」，但 Web 界面生成的是
+    # 模板原名「决算表.docx」（无序号前缀），真实活动目录里两种都存在。
+    # 原来只 glob「08-*.docx」，遇到无前缀的决算表直接判成缺失，
+    # 导致三表校验永远 amount_consistent=False（E2E 实测）。
+    act = Path(act_dir)
+    matches = sorted(act.glob(f"{DECISION_PREFIX}-*.docx"))
     if not matches:
-        return None, f"{DECISION_PREFIX}-决算表.docx"
+        matches = sorted(act.glob("决算表*.docx"))
+    if not matches:
+        return None, f"{DECISION_PREFIX}-决算表.docx / 决算表.docx"
 
     text = _docx_text(matches[0])
     found = re.findall(r"合计[^0-9]*([\d.]+)", text)
