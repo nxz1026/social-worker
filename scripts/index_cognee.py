@@ -51,7 +51,14 @@ class Item:
 
     @property
     def is_image_list(self) -> bool:
-        return self.path is None
+        """是否「照片清单」条目。
+
+        原来只判断 path is None，导致任何没传 path 的普通文档条目都被判成
+        照片清单（实测：Item(project="P", rel="方案/sub/a.docx", kind="方案")
+        的 upload_name 返回 '__照片清单.md'）。照片清单是活动级的特殊产物，
+        用 activity 字段才是准的。
+        """
+        return self.path is None and bool(self.activity)
 
 
 def _activity_code(activity_dir: Path) -> str:
