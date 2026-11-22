@@ -145,3 +145,62 @@ def test_signed_does_not_bypass_review_requirement():
 
     assert out["complete"] is True
     assert out["deliverable"] is False, "只有 1/14 项核对过，不能可交付"
+
+
+def test_dashboard_counts_signed_as_complete(tmp_path, monkeypatch):
+    """仪表盘「已完整活动」要用 merge_review_status 的口径。
+
+    原来 dashboard 只调 checks.check()，签字确认即齐备的规则拿不到，
+    「已完整活动」恒为 0（2026-11-23 实测）。
+    """
+    # 导入 api.routes.misc 会加载配置，先给测试 DSN
+    import os as _os
+    _os.environ.setdefault("SOCIAL_WORK_ROOT", "/srv/social-work")
+    _os.environ.setdefault(
+        "SOCIALWORK_DB_DSN",
+        "host=127.0.0.1 port=5432 dbname=socialwork user=admin password=x")
+    import sys as _sys
+    _sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "api"))
+    from api.routes import misc as _misc
+
+    proj = tmp_path / "测试项目"
+    acts = proj / "活动"
+    # 一个：材料全齐但第 8 项只有未签字 docx，且已签字 → 算完整
+    a1 = acts / "01-已签字"
+    a1.mkdir(parents=True)
+    # 其余必需项都齐（用清单里的前缀造占位文件），只让第 8 项缺扫描件
+    for item in checks.CHECKLIST:
+        if item["no"] == 8 or item.get("kind", "").startswith("dir"):
+            continue
+        pre = item.get("prefix") or (item.get("prefixes") or [""])[0]
+        if not pre:
+            continue
+        ext = ".xlsx" if item.get("kind") == "xlsx" else ".docx"
+        (a1 / f"{pre}{item['name']}{ext}").write_bytes(b"x")
+    (a1 / "09-监督记录表.docx").write_bytes(b"x")
+    # 其他签字类项（3 签到表 / 14 满意度测评表）给扫描件，保证它们判 ok
+    (a1 / "03-签到表-签字.jpg").write_bytes(b"x")
+    (a1 / "04-满意度测评表-签字.jpg").write_bytes(b"x")
+    # 目录类（10/11/12/13）各建一个非空目录
+    for item in checks.CHECKLIST:
+        pre = item.get("prefix") or ""
+        if item.get("kind", "").startswith("dir") and pre:
+            d = a1 / f"{pre}{item['name']}"
+            d.mkdir()
+            (d / "x.jpg").write_bytes(b"x")
+    checks.save_review(a1, 8, reviewed_by="测试", signed=True)
+    # 一个：什么都缺、没签字 → 不完整
+    a2 = acts / "02-空活动"
+    a2.mkdir(parents=True)
+
+    monkeypatch.setattr(_misc._projects, "PROJECTS_ROOT", tmp_path)
+    monkeypatch.setattr(_misc._projects, "list_projects",
+                        lambda: [{"name": "测试项目", "short": "测试"}])
+    user = {"id": 1, "username": "admin", "role": "admin",
+            "projects": {"测试项目": "write"}}
+
+    out = _misc.api_dashboard(user)
+
+    stat = [p for p in out["projects"] if p["name"] == "测试项目"][0]
+    assert stat["activity_total"] == 2
+    assert stat["activity_complete"] == 1, "签字确认过的活动应计入已完整"

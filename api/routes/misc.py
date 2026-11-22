@@ -354,7 +354,12 @@ def api_dashboard(user=Depends(current_user)):
         complete = 0
         for act_dir in dirs:
             try:
-                ok = _checks.check(act_dir)["complete"]
+                # 必须合并 reviews 再判 complete：签字确认即视为齐备的规则
+                # 在 merge_review_status 里实现，只调 check() 拿不到
+                # （2026-11-23 仪表盘「已完整活动」恒为 0 的根因）。
+                merged = _checks.merge_review_status(
+                    _checks.check(act_dir), _checks.read_reviews(act_dir))
+                ok = merged["complete"]
             except Exception:
                 ok = False
             if ok:

@@ -705,6 +705,14 @@ python3 scripts/verify_assets.py
 **归档是同步执行**：上传后直接返回最终 `status`（`done` / `pending`）。
 大文件要走飞书上传，实测 30KB 约 10 秒、7MB 约 140 秒，**客户端超时建议 300 秒**。
 
+### 11.5.3.1 仪表盘的完整性口径
+
+`GET /api/dashboard` 的 `activity_complete` 与活动页 `/check` 使用**同一个口径**
+（`merge_review_status` 之后的结果），即签字确认过的项按齐备计入。
+
+如果两处不一致，说明有一方漏了合并 reviews —— 2026-11-23 仪表盘就漏过，
+导致活动页显示完整、仪表盘「已完整活动」恒为 0。
+
 ### 11.5.4 系统维护（仅 admin）
 
 | 端点 | 说明 |
