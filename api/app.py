@@ -320,18 +320,6 @@ def _roster(project: str = "") -> dict[str, str]:
 
 ROSTER_TYPES = ("projects", "orgs", "persons", "places")
 
-def _roster_summary(project: str = "") -> dict:
-    """名册覆盖度：每类几个名字 + 哪几类还是空的（关系页据此提示补名册）。"""
-    roster = _roster(project)
-    counts: dict[str, int] = {}
-    for kind in roster.values():
-        counts[kind] = counts.get(kind, 0) + 1
-    return {
-        "counts": {k: counts.get(k, 0) for k in ROSTER_TYPES},
-        "missing": [k for k in ROSTER_TYPES if not counts.get(k)],
-        "path": "entities.yaml",
-        "rebuild": "python3 scripts/convert-md.py --relink-only",
-    }
 
 def _suggest_project(path: Path) -> tuple[str, str]:
     """按文件名推荐项目：命中 project_aliases.yaml 就返回，判不了返回空。"""
@@ -389,25 +377,6 @@ def check_api_upload_name(filename: str) -> str:
             "（例：2026-11-05-花都-爱邻议事会第一期活动签到表.jpg）；"
             "请客户端自行 OCR 并规范命名后重新上传，服务端不再对未规范命名的图片/PDF 做 OCR/识图。")
 
-def _audit_rows(date: str | None = None) -> list[dict]:
-    day = date or datetime.now(TZ).strftime("%Y-%m-%d")
-    p = ROOT / "state" / "audit" / f"{day}.jsonl"
-    rows: list[dict] = []
-    try:
-        with open(p, encoding="utf-8") as fh:
-            for line in fh:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    obj = json.loads(line)
-                except ValueError:
-                    continue
-                if isinstance(obj, dict):
-                    rows.append(obj)
-    except OSError:
-        return []
-    return rows
 
 # ---------- 文档（端点已拆到 api/routes/docs.py，此处只留共用辅助） ----------
 
@@ -441,57 +410,8 @@ def _pending_bases() -> list[Path]:
             ROOT / "vault-huadu" / "md" / "_待确认",
             ROOT / "vault-huimin" / "md" / "_待确认"]
 
-def _safe_pending_path(rel: str) -> Path:
-    """把请求里的相对路径限制在 `_待确认` 目录内（防路径越界）。
 
-    审计 #3：当前没有任何端点调用本函数（`_待确认` 相关端点已随旧流程删除）。
-    保留原因：若将来恢复 `_待确认` 处理，路径防护必须走这里，不能裸拼 ROOT。
-    恢复调用时务必补「路径越界返回 400」的测试。
-    """
-    raw = (rel or "").strip()
-    if not raw:
-        raise HTTPException(400, "缺 path")
-    p = (ROOT / raw).resolve()
-    for base in _pending_bases():
-        try:
-            p.relative_to(base.resolve())
-            return p
-        except ValueError:
-            continue
-    raise HTTPException(400, "只能操作 _待确认 目录里的文件")
 
-def _trash_file(path: Path) -> str:
-    """移到 `sources/.trash/<日期>/<sources 内相对路径>`，返回相对路径。
-
-    ⚠️ 2026-11-09 修：原来只保留文件名 ⇒ `_待确认/其他/a.docx` 丢掉「其他」这层，
-       恢复时会被挪到 `sources/a.docx`，等于换了位置。现在保留相对路径，
-       `trash_restore` 能按原样放回去。
-    """
-    day = datetime.now(TZ).strftime("%Y-%m-%d")
-    try:
-        rel = path.resolve().relative_to(ROOT.resolve())
-        sub = rel.parts[1:] if rel.parts[:1] == ("sources",) else (path.name,)
-    except ValueError:
-        sub = (path.name,)
-    dest = ROOT / "sources" / ".trash" / day / Path(*sub)
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    n = 1
-    while dest.exists():
-        dest = dest.with_name(f"{dest.stem}-{n}{dest.suffix}")
-        n += 1
-    shutil.move(str(path), str(dest))
-    return dest.relative_to(ROOT).as_posix()
-
-def _run_reconcile(dataset: str, timeout: int) -> subprocess.CompletedProcess:
-    try:
-        proc = subprocess.run(
-            ["python3", str(SCRIPTS / "reconcile.py"), "--dataset", dataset,
-             "--pg-dsn", PG_DSN, "--no-notify"],
-            cwd=str(ROOT), capture_output=True, text=True, timeout=timeout)
-    except subprocess.TimeoutExpired:
-        raise HTTPException(504, "对账超时（改动已落盘，15 分钟定时器会补）")
-    _COGNEE_CACHE.pop(dataset, None)
-    return proc
 
 
 

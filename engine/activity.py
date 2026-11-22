@@ -48,12 +48,19 @@ _UNIT_TAIL = re.compile(r"\s*(?:人次|人|名)\s*$")
 
 
 def _count_text(value) -> str | None:
-    """人数类字段：去掉尾部单位，只留数字/区间。"""
+    """人数类字段：去掉尾部单位，只留数字/区间。
+
+    只在**剥完仍有阿拉伯数字**时才剥：「14人」→「14」，
+    但「十人」→ 保持「十人」（原来是「十」，把中文数字吃掉了）。
+    「8-10人」这种区间保留「8-10」。
+    """
     text = _text(value)
     if text is None:
         return None
     stripped = _UNIT_TAIL.sub("", text)
-    return stripped or text
+    if not stripped or not any(ch.isdigit() for ch in stripped):
+        return text
+    return stripped
 
 
 def _text(value) -> str | None:

@@ -399,8 +399,10 @@ def api_sat_put(name: str, dirname: str, body: dict,
 
     path = script("satisfaction").scores_path(act_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(entries, ensure_ascii=False, indent=2) + "\n",
-                    encoding="utf-8")
+    # 原子写：两个社工同时录分数时，直接 write_text 会互相截断出一个半截 json
+    from engine import ylock as _ylock
+    _ylock.atomic_write_text(
+        path, json.dumps(entries, ensure_ascii=False, indent=2) + "\n")
     return {"ok": True, "count": len(entries),
             "path": path.relative_to(act_dir.resolve()).as_posix()}
 

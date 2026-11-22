@@ -66,7 +66,7 @@ def check() -> tuple[int, dict]:
                     ("authoriz", "token", "permission", "identity"))
     return (1 if auth_hint else 2), {
         "ok": False, "reason": msg or "无法列出根目录（token 失效或 folder 不存在）",
-        "code": code, "auth_hint": auth_hint,
+        "error_code": code or "", "auth_hint": auth_hint,
         "need_login": bool(auth_hint),
         "hint": ("运行 lark-cli auth login --domain drive --no-wait --json，"
                  "把 verification_url 交给用户确认") if auth_hint else "",
@@ -79,7 +79,7 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
     code, res = check()
     if args.json:
-        print(json.dumps({"code": code, **res}, ensure_ascii=False))
+        print(json.dumps({"exit_code": code, **res}, ensure_ascii=False))
     else:
         if res.get("ok"):
             print(f"  ✅ {res['reason']}（root={res.get('root')}）")

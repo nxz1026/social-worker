@@ -92,14 +92,17 @@ def ensure(project: str, dry_run: bool = False) -> dict:
 
 
 def push(project: str, folder_token: str | None = None,
-         dry_run: bool = False) -> dict:
+         dry_run: bool = False, *, resolved: bool = False) -> dict:
     """把本地项目目录镜像到飞书（文件级，增量）。
 
-    folder_token 为空时先调 ensure() 取远端目录。
+    folder_token 为空时先调 ensure() 取远端目录；
+    resolved=True 表示调用方已经 ensure 过（dry-run 下 token 为 None 是正常的），
+    不要再 ensure 一次 —— 否则「将创建目录」会被打印两遍。
+
     返回 {"name", "pushed", "uploaded", "skipped"}。
     """
     name = str(project).strip()
-    if folder_token is None:
+    if folder_token is None and not resolved:
         folder_token = ensure(name, dry_run=dry_run)["folder_token"]
     if not folder_token:
         return {"name": name, "pushed": False, "uploaded": None, "skipped": None}
@@ -236,7 +239,8 @@ def sync(project: str | list[str] | None = "", dry_run: bool = False) -> list[di
     for proj_dir in targets:
         print(f"\n### {proj_dir.name}")
         info = ensure(proj_dir.name, dry_run=dry_run)
-        pushed = push(proj_dir.name, info.get("folder_token"), dry_run=dry_run)
+        pushed = push(proj_dir.name, info.get("folder_token"), dry_run=dry_run,
+                      resolved=True)
         out.append({"name": proj_dir.name,
                     "created_dir": bool(info.get("created_dir")),
                     "pushed": bool(pushed.get("pushed"))})

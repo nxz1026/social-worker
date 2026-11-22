@@ -162,8 +162,10 @@ def test_超时和坏JSON同样兜底(cf, tmp_path, monkeypatch):
 
 
 def test_main输出与退出码一致(cf, tmp_path, monkeypatch, capsys):
-    """现状记录：check() 已返回退出码，但 --json 输出里的 "code" 是错误码
-    字段（code = err.get("code") or err.get("type")），两者不是一回事。"""
+    """--json 输出里退出码与错误码分属不同字段（2026-11-22 修）。
+
+    原来两者都叫 code，res 的 code 覆盖了退出码，机器消费方读不到真实退出码。
+    """
     cfg = tmp_path / "feishu-flow.yaml"
     cfg.write_text('feishu:\n  root: "R"\n', encoding="utf-8")
     cf.CONFIG = cfg
@@ -173,7 +175,8 @@ def test_main输出与退出码一致(cf, tmp_path, monkeypatch, capsys):
     out = json.loads(capsys.readouterr().out)
     assert rc == 1                       # main 的返回码是对的
     assert out["need_login"] is True
-    assert out["code"] == ""             # BUG：JSON 里没有进程退出码，恒为错误码字段
+    assert out["exit_code"] == 1        # 进程退出码
+    assert out["error_code"] == ""       # lark-cli 没给错误码
 
 
 # ======================================================================
@@ -338,8 +341,10 @@ def test_stage_project源目录不存在直接抛(sf, tmp_path, monkeypatch):
 
 
 def test_prune_feishu_meta删元数据(sf, monkeypatch):
-    """现状记录：删掉元数据**目录本身**后没有递归进去，目录内的 .stversions
-    不会被清理（返回值只数了 2，不是 3）。断言的是当前行为。"""
+    """删掉元数据目录本身后不必递归：目录已删，里面的 .stversions 随之消失。
+
+    返回的 removed 是「删除的顶层项数」（.obsidian + .stignore = 2），
+    不是目录内的文件数 —— 这是正确语义，不是 bug。"""
     deleted = []
     pages = {
         "ROOT": [{"name": ".obsidian", "type": "folder", "token": "d1"},
@@ -358,7 +363,7 @@ def test_prune_feishu_meta删元数据(sf, monkeypatch):
 
     monkeypatch.setattr(sf, "_list_children", fake_list)
     monkeypatch.setattr(sf.subprocess, "run", fake_run)
-    assert sf._prune_feishu_meta("ROOT") == 2          # BUG：嵌套元数据没清到
+    assert sf._prune_feishu_meta("ROOT") == 2          # 删了 .obsidian + .stignore
     kinds = {(c[c.index("--file-token") + 1], c[c.index("--type") + 1]) for c in deleted}
     assert kinds == {("d1", "folder"), ("f1", "file")}
     # 无 token 的条目跳过；正常目录「方案」不被删
@@ -394,15 +399,18 @@ def test_sync远端根不可读抛RuntimeError(sf, tmp_path, monkeypatch):
 
 
 def test_sync_dry_run逐项规划(sf, tmp_path, monkeypatch, capsys):
-    """现状记录：dry-run 下 push() 内部会自己再调一次 ensure()，于是
-    「将创建目录」打印两遍。断言的是当前输出。"""
+    """dry-run 下「将创建目录」只打印一遍（2026-11-22 修）。
+
+    原来 push() 内部会再调一次 ensure()，同一目录打印两遍。
+    sync() 已经 ensure 过，传给 push 的 resolved=True 让它跳过。
+    """
     root = _mkprojects(tmp_path)
     monkeypatch.setattr(sf, "ROOT", root)
     monkeypatch.setattr(sf, "child_folders", lambda parent: {})
     out = sf.sync(["P1"], dry_run=True)
     assert out == [{"name": "P1", "created_dir": False, "pushed": False}]
     text = capsys.readouterr().out
-    assert text.count("将创建目录 P1") == 2        # BUG：dry-run 下 ensure 被调两次
+    assert text.count("将创建目录 P1") == 1        # 只提示一次
     assert "将镜像" not in text                    # push 的 dry-run print 没走到
 
 
