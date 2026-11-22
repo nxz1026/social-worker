@@ -619,6 +619,10 @@ function renderChecklistHtml(check) {
     const review = reviewed
       ? `<span class="badge ${it.signed ? 'ok' : 'muted'}">${reviewText(it)}</span>`
       : '<span class="badge muted">未核对</span>';
+    // 已签字确认但文件还没上传：状态已归位为齐备，这里提醒补扫描件
+    const pend = it.pending_upload
+      ? ' <span class="badge warn" title="已人工签字确认，文件待上传">待补文件</span>'
+      : '';
     const ops = write ? `<span class="ops">
         <button class="btn sm" data-act="rev-review" data-no="${it.no}">${reviewed ? '改核对' : '核对'}</button>
         <button class="btn sm" data-act="rev-sign" data-no="${it.no}" ${it.signed ? 'disabled' : ''}>签字</button>
@@ -630,7 +634,7 @@ function renderChecklistHtml(check) {
     <span class="body">
       <span class="name">${esc(it.name)}</span>
       <span class="detail" title="${esc(it.detail || '')}">${esc(it.detail || '')}</span>
-      <span class="review">${review}${it.review && it.review.reviewed_note ? ` <span class="muted">${esc(it.review.reviewed_note)}</span>` : ''}</span>
+      <span class="review">${review}${pend}${it.review && it.review.reviewed_note ? ` <span class="muted">${esc(it.review.reviewed_note)}</span>` : ''}</span>
     </span>
     ${ops}
   </div>`;

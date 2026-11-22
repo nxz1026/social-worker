@@ -239,6 +239,15 @@ curl -H "Authorization: Bearer sk-sw-xxx" \
 | `reviewed_count` | 所有已核对项数（含 na 项，仅供统计） |
 | `signed_count` | 已签字项数 |
 | `deliverable` | 必需项既齐全、且**每一项**都有核对记录才为 `true` |
+| `pending_upload_count` | 已人工签字确认、但文件还没上传的项数 |
+
+**签字确认即视为齐备**（2026-11-23）：文件缺失（`missing`）或只有未签字
+docx（`partial`）的项，只要人工点了「签字」，就按齐备计入 `complete` 与
+`ok_count`，活动可以正常完成 —— 因为缺的文件本身是待上传状态，不该卡住
+完成度。但 `pending_upload_count` 会记下这些项，界面显示「待补文件」提醒，
+`item.pending_upload=true`，审计日志照常记录 `review_material`。
+
+`deliverable` 仍需逐项核对，签字归位不等于可交付。
 
 **`deliverable` 用 `reviewed_required_count` 判定，不是 `reviewed_count`。**
 `na` 项（第 15 项「其他」恒为 na）即使有核对记录也不计入交付判据 ——

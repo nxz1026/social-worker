@@ -87,3 +87,61 @@ def test_deliverable_true_when_all_required_reviewed():
     out = _merge(items, reviews)
     assert out["deliverable"] is True
     assert out["reviewed_required_count"] == 14
+
+
+# ---------------- 「签字确认即视为齐备」 ----------------
+
+def test_signed_partial_counts_as_complete():
+    """第 8 项只有未签字 docx（partial），人工签字后活动应算完成。"""
+    items = [{"no": i, "name": f"项{i}", "status": "ok"} for i in range(1, 15)]
+    items[7]["status"] = "partial"
+    reviews = {str(i): {"reviewed_by": "聂聃"} for i in range(1, 15)}
+    reviews["8"]["signed"] = True
+
+    out = _merge(items, reviews)
+
+    assert out["complete"] is True
+    assert out["partial_count"] == 0
+    assert out["pending_upload_count"] == 1
+    item8 = [it for it in out["items"] if it["no"] == 8][0]
+    assert item8["pending_upload"] is True
+    assert item8["status"] == "partial", "文件状态本身不变，只是不再卡完成度"
+
+
+def test_signed_missing_counts_as_complete():
+    """第 9 项文件完全缺失（missing），人工签字后也算齐备。"""
+    items = [{"no": i, "name": f"项{i}", "status": "ok"} for i in range(1, 15)]
+    items[8]["status"] = "missing"
+    reviews = {str(i): {"reviewed_by": "聂聃"} for i in range(1, 15)}
+    reviews["9"]["signed"] = True
+
+    out = _merge(items, reviews)
+
+    assert out["complete"] is True
+    assert out["missing_count"] == 0
+    assert out["pending_upload_count"] == 1
+
+
+def test_unsigned_missing_still_incomplete():
+    """反向：没签字的缺失项仍然卡完成度。"""
+    items = [{"no": i, "name": f"项{i}", "status": "ok"} for i in range(1, 15)]
+    items[8]["status"] = "missing"
+    reviews = {str(i): {"reviewed_by": "聂聃"} for i in range(1, 15)}
+
+    out = _merge(items, reviews)
+
+    assert out["complete"] is False
+    assert out["missing_count"] == 1
+    assert out["pending_upload_count"] == 0
+
+
+def test_signed_does_not_bypass_review_requirement():
+    """签字归位不等于可交付：未核对的必需项仍让 deliverable=False。"""
+    items = [{"no": i, "name": f"项{i}", "status": "ok"} for i in range(1, 15)]
+    items[8]["status"] = "missing"
+    reviews = {"9": {"reviewed_by": "聂聃", "signed": True}}   # 只核对了 1 项
+
+    out = _merge(items, reviews)
+
+    assert out["complete"] is True
+    assert out["deliverable"] is False, "只有 1/14 项核对过，不能可交付"

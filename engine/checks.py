@@ -417,8 +417,25 @@ def merge_review_status(result: dict, reviews: dict) -> dict:
             item["review"] = None
             item["signed"] = False
 
+    # 「签字确认即视为齐备」：用户手工签过字的 partial 项（只有未签字 docx、
+    # 缺扫描件），在人工签字后不再卡着活动不完整 —— 但文件本身仍是待上传状态，
+    # 单独标 pending_upload 让界面提醒补扫描件（2026-11-23 用户要求）。
+    pending_upload = 0
+    for it in required:
+        # 文件没齐（missing）或只有未签字版（partial），只要人工签过字就归位：
+        # 缺的文件本身是待上传状态，不该卡住活动完成度。
+        if it.get("status") in ("partial", "missing") and it.get("signed"):
+            it["pending_upload"] = True
+            pending_upload += 1
+
+    def _effective_status(it: dict) -> str:
+        """签字确认过的 missing / partial 等同于 ok（用于完整性与交付判据）。"""
+        if it.get("status") in ("partial", "missing") and it.get("signed"):
+            return "ok"
+        return str(it.get("status") or "")
+
     covered = sum(1 for it in required
-                  if it.get("status") in ("ok", "partial"))
+                  if _effective_status(it) in ("ok", "partial"))
     # 「可交付」必须逐项判断：必需项既齐全、又**每一项**都有核对记录。
     # 原来用 reviewed_count >= len(required) 做计数比较，而 reviewed_count
     # 把 na 项也算进去 —— 只核对 13 个必需项 + 第 15 项「其他」（恒为 na）
@@ -427,6 +444,19 @@ def merge_review_status(result: dict, reviews: dict) -> dict:
     deliverable = (len(required) > 0
                    and covered == len(required)
                    and reviewed_required == len(required))
+
+    # 顶层完整性也按「签字确认后的有效状态」重算：
+    # 原本 complete 来自 check() 的 partial/missing 计数，签字后仍为 False，
+    # 用户点了签字活动依然显示未完成（本次要解决的问题）。
+    eff_ok = sum(1 for it in items if _effective_status(it) in ("ok", "partial"))
+    eff_partial = sum(1 for it in items
+                      if it.get("status") == "partial" and not it.get("signed"))
+    eff_missing = sum(1 for it in items
+                      if it.get("status") == "missing" and not it.get("signed"))
+    result["ok_count"] = eff_ok
+    result["partial_count"] = eff_partial
+    result["missing_count"] = eff_missing
+    result["complete"] = eff_partial == 0 and eff_missing == 0
     result["items"] = items
     result["reviewed_count"] = reviewed_count
     # 必需项的核对数：deliverable 用的就是这个口径，前端展示也用它，
@@ -436,6 +466,8 @@ def merge_review_status(result: dict, reviews: dict) -> dict:
     result["required_count"] = len(required)
     result["signed_count"] = signed_count
     result["deliverable"] = deliverable
+    # 已签字确认但文件还没上传的项数（界面据此提示「待补扫描件」）
+    result["pending_upload_count"] = pending_upload
     return result
 
 

@@ -112,7 +112,12 @@ function reviewSummary(check) {
   const signed = (check.items || []).filter(it => it.signed).length;
   const deliv = check.deliverable ? '<span class="badge ok">可交付</span>'
                                  : '<span class="badge muted">未齐备</span>';
-  return `已核对 ${done}/${total} · 已签字 ${signed} ${deliv}`;
+  // 已签字确认但文件还没上传的项：活动已算完成，但要提醒补扫描件
+  const pending = check.pending_upload_count || 0;
+  const pendTip = pending
+    ? ` <span class="badge warn" title="这些项已人工签字确认，文件待上传">待补文件 ${pending}</span>`
+    : '';
+  return `已核对 ${done}/${total} · 已签字 ${signed} ${deliv}${pendTip}`;
 }
 
 // 本地日期（toISOString 是 UTC，跨时区会差一天）
