@@ -429,6 +429,7 @@ curl -X POST -H "Authorization: Bearer sk-sw-xxx" -H "Content-Type: application/
 |---|---|
 | `POST .../fill` | 模板填充：`{"template":"决算表","data":{...}}` → 写盘，返回 `{path,filled,missing}` |
 | | **活动通知**（2026-11-23 新增）：11 个占位符自动填，`missing` 为空 |
+| | **签到表**（2026-11-23 新增）：3 个占位符（活动名称用两处 / 活动编号 / 页眉项目名称） |
 | `POST .../llm` | LLM 生成，**只返回不落盘**：`{"task":"summary","style":"务实"}`。实测 2–4 分钟 |
 | `GET  .../llm-progress` | 生成进度：`{running, stage, percent}`。前端轮询它显示阶段 |
 | `POST .../llm-fill` | LLM 生成后合并进模板并落盘 |
@@ -494,6 +495,20 @@ stage 依次为 `generating`（首次生成，约占 2/3 时间）→ `checking`
 
 实现复用下载端点的 blob（`fetch` + `x-token` + `URL.createObjectURL`），
 **零第三方依赖**（不引入 mammoth/pdf.js/marked），关闭时 `revokeObjectURL`。
+
+### 5.5.3 签到表模板
+
+`templates/library/签到表.docx`，正文 24 行 5 列（序号/姓名/联系电话/单位/备注）。
+
+| 占位符 | 出现位置 | 来源 |
+|---|---|---|
+| `{{活动名称}}` | 标题 + 「活动名称：」两处 | activity.yaml 活动名称 |
+| `{{活动编号}}` | 档案编号行 | activity.yaml `code`（与「项目编号」同一个值，别名） |
+| `{{项目名称}}` | 页眉（右对齐） | 项目 yaml `project.name` |
+
+**注意**：页眉原来是 67 个空格做右对齐，项目名长时会顶破版心；
+改成段落右对齐（`WD_ALIGN_PARAGRAPH.RIGHT`），`test_template_layout` 的
+前导空格与宽度检查才通过。
 
 ## 6. 照片上传
 

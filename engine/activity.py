@@ -292,8 +292,11 @@ def build_data(project_name: str, activity_dir: str,
         "社区全称": community,
         "联系电话": phone,
         # activity.yaml
+        # 活动编号与项目编号在 yaml 里是同一个 code 字段（CDYJR{年}{月:03d}-C-{类型}{活动年}{月}{流水}）。
+        # 签到表等对外文书抬头写「档案编号/活动编号」，这里给个别名，语义更准。
         "项目编号": (_text(activity.get("code")) or _text(activity.get("项目编号"))
                      or _project_code(project_name)),
+        "活动编号": None,  # 往下统一填成项目编号
         "活动名称": (_text(activity.get("活动名称")) or _text(activity.get("name"))
                      or _name_from_dir(act_dir.name)),
         "活动时间": (_text(activity.get("活动时间")) or _text(activity.get("time"))
@@ -344,6 +347,9 @@ def build_data(project_name: str, activity_dir: str,
     # 人手分配要用到 extra / activity.yaml 里的社工人数与网格数，所以放在合并之后推导；
     # extra 显式给了就尊重显式值
     data["人手分配"] = data.get("人手分配") or _staffing_text(staff, data)
+    # 活动编号 = 项目编号（同一个 code 字段）
+    data["活动编号"] = data.get("项目编号")
+
     # 活动简介是可选的：有内容才补「，」前缀，避免生成「…进行X活动，。现进行…」
     if not data.get("活动简介"):
         data["活动简介_suffix"] = ""
