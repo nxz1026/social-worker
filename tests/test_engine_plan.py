@@ -29,10 +29,14 @@ def _plan_result() -> dict:
         "目标人群": "沿线居民、商户与电瓶车车主。",
         "宣传方式": "电话通知、公告栏张贴、商户微信群。",
         "筛选方式": "优先居民代表、党员志愿者与商户代表。",
+        # 2026-11-23 追加：没指定也按合理值生成
+        "活动地点": "民乐北巷街区",
+        "服务对象": "沿线居民、商户与电瓶车车主",
+        "预计人数": "20",
         "环节": [
-            {"内容": "集合签到，宣读公约。", "物资": "签到表、公约", "人员": "聂聃"},
-            {"内容": "分组挪车，疏通通道。", "物资": "手套、警示锥", "人员": "全体社工"},
-            {"内容": "复查拍照，清点物资。", "物资": "相机、物资清单", "人员": "刘佳"},
+            {"阶段": "环节", "时间": "9:00", "内容": "集合签到，宣读公约。", "物资": "签到表、公约", "人员": "聂聃", "备注": ""},
+            {"阶段": "环节", "时间": "9:00", "内容": "分组挪车，疏通通道。", "物资": "手套、警示锥", "人员": "全体社工", "备注": ""},
+            {"阶段": "环节", "时间": "9:00", "内容": "复查拍照，清点物资。", "物资": "相机、物资清单", "人员": "刘佳", "备注": ""},
         ],
         "预计困难": [
             {"困难": "车主不配合挪车", "方案": "提前张贴告知，联合社区劝导"},
@@ -47,9 +51,10 @@ def _plan_result() -> dict:
 
 def test_plan_task_registered_with_fields_in_order():
     spec = llm.TASKS["plan"]
-    assert spec["fields"] == ("活动背景内容", "活动目的内容", "活动目标内容",
-                             "目标人群", "宣传方式", "筛选方式", "环节",
-                             "预计困难", "物资")
+    assert spec["fields"][:9] == ("活动背景内容", "活动目的内容", "活动目标内容",
+                                  "目标人群", "宣传方式", "筛选方式", "环节",
+                                  "预计困难", "物资")
+    assert set(spec["fields"][9:]) == {"活动地点", "服务对象", "预计人数"}
     assert set(spec["lists"]) == {"环节", "预计困难", "物资"}
 
 
@@ -62,7 +67,7 @@ def test_build_prompt_plan_has_nested_skeleton_and_row_rules():
     assert '"环节"' in prompt and '"内容"' in prompt and '"人员"' in prompt
     assert '"预计困难"' in prompt and '"方案"' in prompt
     assert '"物资"' in prompt and '"类别"' in prompt and '"单价"' in prompt
-    assert "环节给 2~5 条" in prompt
+    assert "环节给 3~5 条" in prompt
     assert "预计困难给 2~4 条" in prompt
     assert "物资清单给 3~8 条" in prompt
     assert "预算上限" in prompt
@@ -83,8 +88,9 @@ def test_normalize_plan_keeps_text_and_rows():
     assert list(out) == list(llm.TASKS["plan"]["fields"])
     assert out["目标人群"] == "沿线居民、商户与电瓶车车主。"
     assert len(out["环节"]) == 3
-    assert out["环节"][0] == {"内容": "集合签到，宣读公约。",
-                              "物资": "签到表、公约", "人员": "聂聃"}
+    assert out["环节"][0] == {"阶段": "环节", "时间": "9:00",
+                              "内容": "集合签到，宣读公约。",
+                              "物资": "签到表、公约", "人员": "聂聃", "备注": ""}
     assert out["预计困难"][1]["方案"] == "两人一组，备急救包"
     assert out["物资"][0]["类别"] == "广告宣传费"
     assert out["物资"][1]["规格"] == "4个"
@@ -102,7 +108,7 @@ def test_normalize_plan_drops_extra_row_fields():
     data = _plan_result()
     data["环节"][0]["备注"] = "多余"
     out = llm._normalize("plan", data)
-    assert set(out["环节"][0]) == {"内容", "物资", "人员"}
+    assert set(out["环节"][0]) == {"阶段", "时间", "内容", "物资", "人员", "备注"}
 
 
 def test_normalize_plan_rejects_short_rows():

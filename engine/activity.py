@@ -31,7 +31,8 @@ REQUIRED_KEYS = (
 # columns 是「元素子字段 → 占位符前缀」，rows 是模板固定行数（超出的截断）。
 PLAN_ROW_SPECS = {
     "环节": {
-        "columns": {"内容": "环节内容", "物资": "环节物资", "人员": "环节人员"},
+        "columns": {"阶段": "环节阶段", "时间": "环节时间", "内容": "环节内容",
+                    "物资": "环节物资", "人员": "环节人员", "备注": "环节备注"},
         "rows": 5,
     },
     "预计困难": {
@@ -54,6 +55,7 @@ PLAN_ROW_SPECS = {
 # 模板里人数类占位符自带单位（如「人    数：{{实际人数}} 人」），
 # 如果 activity.yaml 写到「14人」，两边一拼就成「14人 人」（真实 E2E 实测）。
 # 这里把值里**冗余的人/人次单位**剥掉，让模板的统一单位生效。
+_COUNT_KEYS = {"预计人数", "实际人数", "领取人数", "测评人数", "志愿者人数"}
 _UNIT_TAIL = re.compile(r"\s*(?:人次|人|名)\s*$")
 
 
@@ -384,7 +386,8 @@ def build_data(project_name: str, activity_dir: str,
 
     if extra:
         for key, value in extra.items():
-            data[key] = value
+            # 人数类字段走同一规整（LLM 可能输出「25人」，模板自带单位会重复）
+            data[key] = _count_text(value) if key in _COUNT_KEYS else value
             if key in PLAN_ROW_SPECS:
                 # 结构化多行由 expand_plan_rows 展开成 环节内容_1…，不走通用列表展开
                 continue

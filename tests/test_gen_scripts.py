@@ -567,7 +567,8 @@ def test_render_plan_writes_docx_with_project_name(activity_dir: Path, project_r
     facts = gen_plan.build_facts(activity_dir)
     result = {
         "活动背景内容": "背景文字",
-        "环节": [{"内容": "签到", "物资": "签到表", "人员": "社工"}],
+        "环节": [{"阶段": "签到", "时间": "9:00", "内容": "签到",
+                    "物资": "签到表", "人员": "社工", "备注": ""}],
         "预计困难": [{"困难": "下雨", "方案": "改到室内"}],
         "物资": [{"名称": "横幅"}],
     }
@@ -596,7 +597,8 @@ def test_render_plan_returns_truncation_notes(activity_dir: Path, project_root: 
     monkeypatch.setattr(gen_plan, "PLAN_TEMPLATE", template)
 
     facts = gen_plan.build_facts(activity_dir)
-    result = {"环节": [{"内容": f"环节{i}", "物资": "", "人员": ""}
+    result = {"环节": [{"阶段": f"阶段{i}", "时间": "9:00",
+                                  "内容": f"环节{i}", "物资": "", "人员": "", "备注": ""}
                        for i in range(1, 8)]}
     notes = gen_plan.render_plan("测试项目", activity_dir, facts, result,
                                  tmp_path / "out.docx")
@@ -632,7 +634,8 @@ def test_gen_plan_main_writes_docx_with_fake_llm(activity_dir: Path, project_roo
     monkeypatch.setattr(gen_plan.llm, "resolve_style", lambda *a, **k: "务实")
     monkeypatch.setattr(gen_plan.llm, "write", lambda *a, **k: {
         "活动背景内容": "假背景",
-        "环节": [{"内容": "假环节", "物资": "假物资", "人员": "假人员"}],
+        "环节": [{"阶段": "假阶段", "时间": "9:00", "内容": "假环节",
+                       "物资": "假物资", "人员": "假人员", "备注": ""}],
         "预计困难": [{"困难": "假困难", "方案": "假方案"}],
     })
 
