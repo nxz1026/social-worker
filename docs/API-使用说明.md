@@ -554,11 +554,21 @@ office 文件名后面的 `↗ md` 徽标仍保留，鼠标悬停能看到对应
 | pdf | `<iframe>` 预览 |
 | md / markdown | 轻量渲染（标题/列表/代码块） |
 | txt | `<pre>` 原样 |
-| docx / xlsx / doc / xls / ppt | 不渲染，提示「浏览器不能直接预览，请下载」 |
+| docx / xlsx / doc / xls / ppt | **服务端 LibreOffice 转 PDF 预览**（版式 100% 保真） |
 | zip / rar / 7z | 不预览，直接下载 |
 
-实现复用下载端点的 blob（`fetch` + `x-token` + `URL.createObjectURL`），
-**零第三方依赖**（不引入 mammoth/pdf.js/marked），关闭时 `revokeObjectURL`。
+实现复用 `fetch` + `x-token` + `URL.createObjectURL`，**前端零第三方依赖**
+（不引入 mammoth/SheetJS/pdf.js，md 渲染自写），关闭时 `revokeObjectURL`。
+
+Office 预览走 `GET .../preview`：服务端用 LibreOffice 转 PDF，浏览器 iframe
+原生显示。选这个方案而不是前端库，是因为：版式完全一致（mammoth 会丢页眉
+页脚/分栏/编号）、新增体积为 0、Excel 合并单元格与公式都保留。
+
+实测：455KB docx → 4 页 PDF **1.0s**（缓存命中 0.03s）；xlsx → 1 页 0.7s；
+独立 profile 并发 3 个 1.8s 内完成。
+
+转好的 PDF 缓存到活动目录 `.preview/`，键含 `(mtime, size)`，源文件一改自动失效；
+每次转换顺带清理旧缓存（保留最近 20 个）。
 
 ### 5.5.4 计划书物资（必备内容）
 

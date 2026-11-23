@@ -588,3 +588,10 @@ pre.genout { max-height: none; }
   .page-head .actions { width: 100%; margin-left: 0; }
   .modal { padding: 10px; }
 }
+
+/* Office 转 PDF 预览时顶部那条说明 */
+.preview-note {
+  padding: 6px 12px; margin-bottom: 8px;
+  background: var(--sidebar-2, #eef2f7);
+  border-radius: 6px; font-size: 12px; color: #6b7c93;
+}

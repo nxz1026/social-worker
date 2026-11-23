@@ -916,7 +916,8 @@ async function downloadActivityFile(path) {
 // 按扩展名分流：图片/PDF 走 blob URL，md 轻量渲染，Office 只提示下载，压缩包直接下载
 const PREVIEW_IMG = ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp'];
 const PREVIEW_ARCHIVE = ['zip', 'rar', '7z'];
-const PREVIEW_OFFICE = ['docx', 'xlsx'];
+// Office 类：服务端 LibreOffice 转 PDF 后预览（版式 100% 保真，前端零依赖）
+const PREVIEW_OFFICE = ['docx', 'xlsx', 'doc', 'xls', 'ppt', 'pptx', 'odt', 'ods'];
 
 function fileExt(path) {
   const base = String(path).split('/').pop() || '';
@@ -999,19 +1000,20 @@ async function openPreview(path) {
   openModal('预览 · ' + name, loading(), previewFoot(path), true);
   const foot = previewFoot(path);
 
-  // Word / Excel：浏览器无法直接渲染，只给文件信息 + 下载入口
-  if (PREVIEW_OFFICE.includes(ext)) {
+  const { projectName, dirname } = actCtx;
+  const base = `/projects/${enc(projectName)}/activities/${enc(dirname)}`;
+  // Office 走 preview（服务端转 PDF），其余走 download 拿原文件
+  const isOffice = PREVIEW_OFFICE.includes(ext);
+  const url = isOffice
+    ? `${API}${base}/preview?path=${enc(path)}`
+    : `${API}${base}/download?path=${enc(path)}`;
+  if (isOffice) {
     $('modalBody').innerHTML = `<div class="preview-tip">
       <div class="preview-tip-title">${esc(name)}</div>
-      <p>浏览器不能直接预览 ${ext.toUpperCase()} 文件，请下载后用本地软件打开。</p>
+      <p class="muted">正在转换为 PDF 预览…</p>
       <p class="muted">${previewMeta(path)}</p>
     </div>`;
-    $('modalFoot').innerHTML = foot;
-    return;
   }
-
-  const { projectName, dirname } = actCtx;
-  const url = `${API}/projects/${enc(projectName)}/activities/${enc(dirname)}/download?path=${enc(path)}`;
 
   // md / txt 只需要文本，其他类型拿 blob 做对象 URL
   const wantText = ext === 'md' || ext === 'markdown' || ext === 'txt';
@@ -1030,10 +1032,15 @@ async function openPreview(path) {
       previewUrl = URL.createObjectURL(blob);
       $('modalBody').innerHTML = `<div class="preview-img-wrap">
         <img src="${previewUrl}" alt="${esc(name)}"></div>`;
-    } else if (ext === 'pdf') {
+    } else if (ext === 'pdf' || isOffice) {
+      // 服务端已把 docx/xlsx 转成 PDF，这里和原生 pdf 同一条渲染路径
       const blob = await r.blob();
       previewUrl = URL.createObjectURL(blob);
-      $('modalBody').innerHTML = `<iframe class="preview-frame" src="${previewUrl}" title="${esc(name)}"></iframe>`;
+      const note = isOffice
+        ? '<div class="preview-note">由 LibreOffice 转换预览，版式与原件一致；下载可拿原始文件</div>'
+        : '';
+      $('modalBody').innerHTML = note +
+        `<iframe class="preview-frame" src="${previewUrl}" title="${esc(name)}"></iframe>`;
     } else if (wantText) {
       const text = await r.text();
       $('modalBody').innerHTML = ext === 'txt'
@@ -1043,7 +1050,7 @@ async function openPreview(path) {
       // 其他格式（doc/xls/ppt 等旧格式）一律提示下载
       $('modalBody').innerHTML = `<div class="preview-tip">
         <div class="preview-tip-title">${esc(name)}</div>
-        <p>浏览器不能直接预览该类型文件，请下载后打开。</p>
+        <p>该格式暂不支持预览，请下载后打开。</p>
         <p class="muted">${previewMeta(path)}</p>
       </div>`;
     }

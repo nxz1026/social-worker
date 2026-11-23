@@ -17,6 +17,7 @@ from fastapi.responses import FileResponse
 from PIL import Image
 
 from engine import caption as _caption
+from engine import office_convert as _office
 
 from api.deps import current_user, db, require_write
 from api.shared import audit as _audit_mod
@@ -214,6 +215,41 @@ def api_activity_download(name: str, dirname: str, path: str,
         raise HTTPException(404, f"文件不存在：{path}")
     media = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
     return FileResponse(target, media_type=media, filename=target.name)
+
+
+@router.get("/api/projects/{name}/activities/{dirname}/preview")
+def api_activity_preview(name: str, dirname: str, path: str,
+                         user=Depends(current_user)):
+    """预览活动内文件，返回浏览器能直接显示的内容。
+
+    - pdf / 图片：原样返回
+    - docx / xlsx / doc / xls 等：LibreOffice 转 PDF 后返回（版式 100% 保真）
+    - 其他（压缩包等）：404 + 提示只能下载
+
+    转好的 PDF 缓存到活动目录 .preview/，按 (mtime, size) 失效。
+    """
+    act_dir, _meta = activity_meta_or_404(name, dirname, user)
+    target = safe_rel_path(act_dir, path)
+    if not target.is_file():
+        raise HTTPException(404, f"文件不存在：{path}")
+
+    suffix = target.suffix.lower()
+    # 图片与 PDF 直接给浏览器
+    if suffix == ".pdf":
+        return FileResponse(target, media_type="application/pdf")
+    if suffix in _office.DIRECT_EXTS:
+        media = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
+        return FileResponse(target, media_type=media)
+    # Office 转 PDF
+    if suffix in _office.OFFICE_EXTS:
+        cache = Path(act_dir) / _office.CACHE_DIR
+        try:
+            pdf = _office.to_pdf(target, cache)
+        except _office.ConvertError as exc:
+            raise HTTPException(415, f"{exc}；请下载后查看") from None
+        _office.cleanup(cache)      # 顺手清旧缓存，不阻塞
+        return FileResponse(pdf, media_type="application/pdf")
+    raise HTTPException(415, "该格式不支持预览，请下载后查看")
 
 
 @router.delete("/api/projects/{name}/activities/{dirname}/files")
