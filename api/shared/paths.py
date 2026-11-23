@@ -132,14 +132,46 @@ def overwrite_block_reason(act_dir: Path, dst: Path) -> str:
     return ""
 
 
+# 模板名 → 归档序号（与 engine.checks.CHECKLIST 的 prefix 对应）。
+# 模板文件名和清单项名不完全一致（计划书↔活动计划、监督记录↔监督记录表），
+# 所以用显式映射，不做模糊匹配（模糊匹配会把「项目管理目录」算错）。
+TEMPLATE_SERIAL = {
+    "计划书": "01",
+    "活动通知": "02",
+    "签到表": "03",
+    "服务对象满意度调查表": "04",
+    "满意度测评汇总表": "05",
+    "总结报告": "06",
+    "简报": "07",
+    "决算表": "08",
+    "监督记录": "09",
+    "报销单": "21",          # 报销单在清单里是 09-/21- 双前缀，成品统一 21
+    "发票明细表": "22",
+    "劳务领取表": "23",
+    "志愿者补贴领取表": "24",
+    "物资领取表": "25",
+    "支出证明单": "26",
+    "对公付款申请单": "27",
+    # 活动目录 / 项目管理目录 是归档索引，不带序号
+}
+
+
+def template_serial(tpl_name: str) -> str:
+    """模板名 → 两位数序号；未登记的返回空串（不加前缀）。"""
+    return TEMPLATE_SERIAL.get(str(tpl_name).strip(), "")
+
+
 def fill_output(act_dir: Path, body: dict, tpl: Path,
                 *, check_overwrite: bool = True) -> Path:
-    """解析输出路径：默认「模板名.扩展名」，限制在活动目录内。
+    """解析输出路径：默认「序号-模板名.扩展名」，限制在活动目录内。
 
+    默认名按归档规范带序号（01-计划书.docx）；模板没登记序号时退回
+    「模板名.扩展名」。调用方显式给了 output 就完全按它来。
     check_overwrite=True 时（默认），目标已存在且活动状态表明可能人工改过，
     且调用方没给 force=true，就抛 409 NEED_FORCE，避免静默覆盖。
     """
-    default = f"{tpl.stem}{tpl.suffix}"
+    serial = template_serial(tpl.stem)
+    default = f"{serial}-{tpl.stem}{tpl.suffix}" if serial else f"{tpl.stem}{tpl.suffix}"
     out_rel = str(body.get("output") or default).strip()
     dst = safe_rel_path(act_dir, out_rel)
     if not dst.suffix:

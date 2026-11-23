@@ -259,9 +259,10 @@ def test_captions_fill_writes_template(projects_root):
                       {"file": "b.jpg", "caption": "图2 居民签到"}]},
         ADMIN)
 
-    assert out["path"] == "简报.docx"
+    # 默认名带归档序号（2026-11-23）
+    assert out["path"] == "07-简报.docx"
     assert out["filled"] == 2
-    text = "\n".join(p.text for p in Document(str(act / "简报.docx")).paragraphs)
+    text = "\n".join(p.text for p in Document(str(act / "07-简报.docx")).paragraphs)
     assert "图1 活动现场" in text and "图2 居民签到" in text
 
 

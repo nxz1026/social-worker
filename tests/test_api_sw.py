@@ -275,7 +275,7 @@ def test_run_template_dry_run_does_not_write(env):
          "dry_run": True},
         Req(), None, ADMIN)
     assert out["dry_run"] is True
-    assert out["path"] == f"活动/{ACT}/决算表.docx"
+    assert out["path"] == f"活动/{ACT}/08-决算表.docx"   # 默认名带序号
     assert not (env / "惠民项目" / "活动" / ACT / "决算表.docx").exists()
 
 
@@ -289,7 +289,7 @@ def test_run_task_uses_llm_and_default_template(env, monkeypatch):
         Req(), None, ADMIN)
     assert "AI 生成内容" in out["preview"]
     assert out["self_check"]["ok"] is True
-    assert (env / "惠民项目" / "活动" / ACT / "简报.docx").is_file()
+    assert (env / "惠民项目" / "活动" / ACT / "07-简报.docx").is_file()
 
 
 def test_run_template_missing_code_is_code_missing(env):
