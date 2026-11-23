@@ -140,15 +140,38 @@ function icon(name) {
   return `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">${paths[name] || ''}</svg>`;
 }
 
+/* 侧边栏项目折叠状态：默认收起，用户点开的记在 localStorage。
+ * 当前所在项目由 renderSidebar 强制展开（不进这个集合也能看到子项）。*/
+const NAV_FOLD_KEY = 'sw_nav_fold';
+function navFoldOpen(name) {
+  try {
+    const raw = JSON.parse(localStorage.getItem(NAV_FOLD_KEY) || '{}');
+    return !!raw[name];
+  } catch { return false; }
+}
+function navFoldToggle(name) {
+  try {
+    const raw = JSON.parse(localStorage.getItem(NAV_FOLD_KEY) || '{}');
+    raw[name] = !raw[name];
+    localStorage.setItem(NAV_FOLD_KEY, JSON.stringify(raw));
+  } catch { /* 存不了就只在本次会话生效 */ }
+}
+
 async function renderSidebar() {
   let projects = [];
   try { projects = await ensureProjects(); } catch (e) { toast('项目列表加载失败：' + e.message, 'err'); }
+  // 项目做成「菜单-子菜单」折叠式：3 个项目 × 2 个子项平铺着太乱。
+  // 折叠状态存 localStorage；当前所在项目强制展开，避免点进去看不见自己。
+  const curProject = (parseHash().parts[0] === 'project') ? parseHash().parts[1] : '';
   const projectNav = projects.length ? projects.map(p => {
     const name = p.name;
     const short = projectShort(p);
-    return `<div class="nav-project">
+    const open = name === curProject || navFoldOpen(name);
+    return `<div class="nav-project${open ? ' open' : ''}" data-project-wrap="${esc(name)}">
       <a class="nav-project-head" data-project="${esc(name)}" href="#/project/${enc(name)}" title="${esc(short)}">
-        <span class="dot"></span><span>${esc(short)}</span>
+        <span class="nav-fold" data-act="nav-fold" data-fold="${esc(name)}"
+              title="${open ? '收起' : '展开'}">${open ? '▾' : '▸'}</span>
+        <span class="dot"></span><span class="nav-name">${esc(short)}</span>
       </a>
       <div class="nav-sub">
         <a class="nav-link" data-nav="project:${esc(name)}" href="#/project/${enc(name)}"><span>概览</span></a>
@@ -203,6 +226,18 @@ function updateActiveNav(parts) {
   els('#sidebarNav [data-project]').forEach(a => {
     a.classList.toggle('current', a.dataset.project === currentProject);
   });
+  // 当前项目自动展开：renderSidebar 在 route() 之前调用，那时 hash 还没变成
+  // 项目路径，展开判断拿不到当前项目。route() 每次会调 updateActiveNav，
+  // 在这里补一次（2026-11-23 实测：进项目页后侧边栏仍是收起的）。
+  if (currentProject) {
+    els('#sidebarNav .nav-project').forEach(w => {
+      const name = w.dataset.projectWrap;
+      const open = name === currentProject || navFoldOpen(name);
+      w.classList.toggle('open', open);
+      const fold = w.querySelector('.nav-fold');
+      if (fold) { fold.textContent = open ? '▾' : '▸'; fold.title = open ? '收起' : '展开'; }
+    });
+  }
 }
 
 /* ---------------- 弹窗 ---------------- */
@@ -2740,6 +2775,16 @@ document.addEventListener('click', async e => {
     if (act === 'fill-submit') { await submitFill(); return; }
     if (act === 'close-refresh') { closeModal(); await refreshActivity(); return; }
     if (act === 'open-llm') { await openLlmModal(); return; }
+    if (act === 'nav-fold') {
+      e.preventDefault(); e.stopPropagation();
+      navFoldToggle(node.dataset.fold);
+      const wrap = node.closest('.nav-project');
+      const open = !wrap.classList.contains('open');
+      wrap.classList.toggle('open', open);
+      node.textContent = open ? '▾' : '▸';
+      node.title = open ? '收起' : '展开';
+      return;
+    }
     if (act === 'llm-run') { await runLlm(); return; }
     if (act === 'llm-apply') { await applyLlm(); return; }
     if (act === 'open-invoice') { await openInvoiceModal(); return; }

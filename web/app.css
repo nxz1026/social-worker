@@ -176,6 +176,16 @@ a.nav-group-title:hover { color: #dbe5f1; text-decoration: none; }
 .nav-project-head:hover { background: var(--sidebar-2); color: #fff; text-decoration: none; }
 .nav-project-head.current { color: #fff; font-weight: 500; }
 .nav-project-head .dot { width: 6px; height: 6px; border-radius: 50%; background: #5b8def; flex: none; }
+/* 折叠箭头 */
+.nav-fold {
+  width: 12px; flex: none; cursor: pointer;
+  color: #7c8ba1; font-size: 10px; line-height: 1;
+  transition: color .15s;
+}
+.nav-fold:hover { color: #dbe5f1; }
+/* 子菜单默认隐藏，.open 才展开（3 项目×2 子项平铺太乱）*/
+.nav-project .nav-sub { display: none; }
+.nav-project.open .nav-sub { display: block; }
 .nav-sub { padding-left: 26px; }
 .nav-sub .nav-link { padding: 5px 10px; font-size: 12.5px; color: #aebccd; }
 .nav-sub .nav-link.active { background: #2a3d58; color: #fff; }
