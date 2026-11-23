@@ -750,10 +750,30 @@ function renderFileRows(entries, sub, check) {
       list = [];
     }
   }
-  if (!list.length) {
+  // md 是给 Obsidian 客户端与关系图谱用的骨架，和 office 文件摆在一起太乱。
+  // 后端在每个 office 文件上带 mirror=<该文件对应的 md 名>，据此把
+  // 被引用的 md 隐藏（2026-11-23 用户要求：文档重复就忽略 md，不显示）。
+  // 只隐藏有对应 office 文件的 md；纯 md（无同名 docx/xlsx）照常显示。
+  const mirrored = new Set();
+  for (const e of list) {
+    if (e && !e.is_dir && e.mirror) mirrored.add(String(e.mirror));
+  }
+  // 活动元数据与索引文件不是给用户看的：activity.yaml 是内部配置，
+  // _X-资料索引.md 是生成的目录清单，列出来只会让人困惑。
+  const HIDDEN_NAMES = new Set(['activity.yaml', '_photos.json', 'scores.json']);
+  const visible = list.filter(e => {
+    if (!e || e.is_dir) return true;
+    const name = String(e.name);
+    if (mirrored.has(name)) return false;              // 被 office 文件引用的 md 骨架
+    if (HIDDEN_NAMES.has(name)) return false;          // 内部元数据
+    if (name.startsWith('_') && name.endsWith('.md')) return false;  // 生成的索引
+    return true;
+  });
+
+  if (!visible.length) {
     return empty(selected && !sub ? '该项没有对应文件' : '目录为空');
   }
-  return list.map(item => {
+  return visible.map(item => {
     const path = sub ? `${sub}/${item.name}` : item.name;
     const isDir = !!item.is_dir;
     const nameHtml = isDir
@@ -1634,6 +1654,41 @@ async function applyLlm() {
       '<button class="btn primary" data-act="close-refresh">关闭并刷新</button>';
     toast('已落盘：' + r.path, 'ok');
   } catch (e) {
+    // 409 = 覆盖保护（目标文件已存在且活动状态是 imported/generated 等）。
+    // 这是要防误覆盖人工修改，但界面之前没有任何确认入口，用户只看到
+    // 「不起作用」（2026-11-23 实测：llmMsg 停在「落盘中…」→ 409）。
+    // 这里明确问一次，用户确认后带 force=true 重试。
+    const msg = String(e.message || '');
+    if (/409|force=true|覆盖/.test(msg)) {
+      const ok = confirm(
+        `「${out || tpl}」已存在，覆盖会丢失人工修改内容。\n\n确定要在原文件上重新生成吗？`);
+      if (ok) {
+        el('#llmMsg').textContent = '覆盖落盘中…';
+        try {
+          const force = { ...body, force: true };
+          const r2 = dirty
+            ? await api(`/projects/${enc(projectName)}/activities/${enc(dirname)}/fill`, {
+                method: 'POST',
+                body: { template: tpl, data, force: true, ...(out ? { output: out } : {}) },
+              })
+            : await api(`/projects/${enc(projectName)}/activities/${enc(dirname)}/llm-fill`, {
+                method: 'POST', body: force,
+              });
+          const miss2 = r2.missing || [];
+          el('#llmMsg').textContent = `已覆盖落盘：${r2.path}（填充 ${r2.filled} 处${miss2.length ? `，缺 ${miss2.length} 项` : ''}）`;
+          $('modalFoot').innerHTML = '<button class="btn" data-close-modal>关闭</button>' +
+            '<button class="btn primary" data-act="close-refresh">关闭并刷新</button>';
+          toast('已覆盖落盘：' + r2.path, 'ok');
+          return;
+        } catch (e2) {
+          el('#llmMsg').textContent = '覆盖失败：' + e2.message;
+          toast('覆盖失败：' + e2.message, 'err');
+          return;
+        }
+      }
+      el('#llmMsg').textContent = '已取消。可改「输出文件名」避免覆盖。';
+      return;
+    }
     el('#llmMsg').textContent = '落盘失败：' + e.message;
     toast('落盘失败：' + e.message, 'err');
   }

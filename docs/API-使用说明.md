@@ -429,7 +429,7 @@ curl -X POST -H "Authorization: Bearer sk-sw-xxx" -H "Content-Type: application/
 |---|---|
 | `POST .../fill` | 模板填充：`{"template":"决算表","data":{...}}` → 写盘，返回 `{path,filled,missing}` |
 | | **活动通知**（2026-11-23 新增）：11 个占位符自动填，`missing` 为空 |
-| | **签到表**（2026-11-23 新增）：3 个占位符（活动名称用两处 / 活动编号 / 页眉项目名称） |
+| | **签到表**（2026-11-23 新增）：5 个占位符（活动名称两处 / 活动编号 / 活动时间 / 项目社工 / 页眉项目名称） |
 | `POST .../llm` | LLM 生成，**只返回不落盘**：`{"task":"summary","style":"务实"}`。实测 2–4 分钟 |
 | `GET  .../llm-progress` | 生成进度：`{running, stage, percent}`。前端轮询它显示阶段 |
 | `POST .../llm-fill` | LLM 生成后合并进模板并落盘 |
@@ -480,6 +480,19 @@ stage 依次为 `generating`（首次生成，约占 2/3 时间）→ `checking`
 `rewriting`（不达标重写）→ 完成后 `{"running": false}`。
 没有正在跑的任务也是 `{"running": false}`。
 
+## 5.7 活动文件列表的显示规则
+
+活动页的文件列表（`GET .../files` 的渲染）会过滤三类条目：
+
+| 过滤 | 依据 | 原因 |
+|---|---|---|
+| md 骨架 | 后端在每个 office 文件上带 `mirror=<对应 md 名>`，被引用的 md 隐藏 | md 是给 Obsidian 与关系图谱用的，和 docx/xlsx 混在一起太乱 |
+| 内部元数据 | `activity.yaml` / `_photos.json` / `scores.json` | 不是给用户看的 |
+| 生成的索引 | `_X-资料索引.md` | 自动生成的目录清单 |
+
+**只有「有对应 office 文件的 md」被隐藏**；纯 md（无同名 docx/xlsx）照常显示。
+office 文件名后面的 `↗ md` 徽标仍保留，鼠标悬停能看到对应的 md 名。
+
 ## 5.6 文件预览（Web 界面）
 
 活动页点文件名 → 弹窗预览；点行内「下载」按钮才下载。
@@ -503,6 +516,8 @@ stage 依次为 `generating`（首次生成，约占 2/3 时间）→ `checking`
 | 占位符 | 出现位置 | 来源 |
 |---|---|---|
 | `{{活动名称}}` | 标题 + 「活动名称：」两处 | activity.yaml 活动名称 |
+| `{{活动时间}}` | 日期/时间栏 | activity.yaml 活动时间 |
+| `{{项目社工}}` | 负责社工栏 | activity.yaml 执行社工 / 项目 yaml |
 | `{{活动编号}}` | 档案编号行 | activity.yaml `code`（与「项目编号」同一个值，别名） |
 | `{{项目名称}}` | 页眉（右对齐） | 项目 yaml `project.name` |
 
