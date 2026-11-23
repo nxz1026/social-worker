@@ -160,50 +160,91 @@ function navFoldToggle(name) {
 async function renderSidebar() {
   let projects = [];
   try { projects = await ensureProjects(); } catch (e) { toast('项目列表加载失败：' + e.message, 'err'); }
-  // 项目做成「菜单-子菜单」折叠式：3 个项目 × 2 个子项平铺着太乱。
-  // 折叠状态存 localStorage；当前所在项目强制展开，避免点进去看不见自己。
-  const curProject = (parseHash().parts[0] === 'project') ? parseHash().parts[1] : '';
-  const projectNav = projects.length ? projects.map(p => {
+  // 侧边栏两级折叠（2026-11-23 用户要求）：
+  //   一级：仪表盘 / 项目 / 模板 / 检索 / 管理 都可折叠（项目按社区再分一层）
+  //   二级：项目 → 社区 → 具体项目 → 概览/活动列表
+  // 以前只有 3 个项目还看得过来，以后项目多了必须分层。
+  const cur = parseHash().parts;
+  const curProject = cur[0] === 'project' ? cur[1] : '';
+  const curCommunity = curProject
+    ? (projects.find(p => p.name === curProject) || {}).community || ''
+    : '';
+
+  // 按社区分组
+  const byCommunity = new Map();
+  for (const p of projects) {
+    const c = String(p.community || '未分组');
+    if (!byCommunity.has(c)) byCommunity.set(c, []);
+    byCommunity.get(c).push(p);
+  }
+
+  const projItem = (p) => {
     const name = p.name;
-    const short = projectShort(p);
     const open = name === curProject || navFoldOpen(name);
     return `<div class="nav-project${open ? ' open' : ''}" data-project-wrap="${esc(name)}">
-      <a class="nav-project-head" data-project="${esc(name)}" href="#/project/${enc(name)}" title="${esc(short)}">
-        <span class="nav-fold" data-act="nav-fold" data-fold="${esc(name)}"
-              title="${open ? '收起' : '展开'}">${open ? '▾' : '▸'}</span>
-        <span class="dot"></span><span class="nav-name">${esc(short)}</span>
+      <a class="nav-project-head" data-project="${esc(name)}" href="#/project/${enc(name)}" title="${esc(projectShort(p))}">
+        <span class="nav-fold" data-act="nav-fold" data-fold="${esc(name)}" title="${open ? '收起' : '展开'}">${open ? '▾' : '▸'}</span>
+        <span class="dot"></span><span class="nav-name">${esc(projectShort(p))}</span>
       </a>
       <div class="nav-sub">
         <a class="nav-link" data-nav="project:${esc(name)}" href="#/project/${enc(name)}"><span>概览</span></a>
         <a class="nav-link" data-nav="activities:${esc(name)}" href="#/project/${enc(name)}/activities"><span>活动列表</span></a>
       </div>
     </div>`;
-  }).join('') : '<div class="nav-link"><span class="muted">暂无项目</span></div>';
+  };
+
+  const communityBlock = ([cname, list]) => {
+    const open = cname === curCommunity || navFoldOpen('社区:' + cname);
+    return `<div class="nav-community${open ? ' open' : ''}">
+      <div class="nav-community-head" data-act="nav-fold" data-fold="社区:${esc(cname)}"
+           title="${open ? '收起' : '展开'}">
+        <span class="nav-fold-ico">${open ? '▾' : '▸'}</span>
+        <span>${esc(cname)}</span>
+        <span class="nav-count">${list.length}</span>
+      </div>
+      <div class="nav-community-body">${list.map(projItem).join('')}</div>
+    </div>`;
+  };
+
+  const projectNav = projects.length
+    ? Array.from(byCommunity.entries()).map(communityBlock).join('')
+    : '<div class="nav-link"><span class="muted">暂无项目</span></div>';
+
+  // 一级分组：可折叠的「项目 / 检索 / 管理」
+  // 当前所在路径对应的组强制展开（进了项目页就展开「项目」组），
+  // 折叠记录只管用户手动收起的其他组。
+  const curGroup = cur[0] === 'project' ? 'projects'
+    : cur[0] === 'search' || cur[0] === 'doc' || cur[0] === 'docs' ? 'search'
+    : cur[0] === 'admin' ? 'admin' : '';
+  const group = (key, iconName, label, inner, href) => {
+    const open = key === curGroup || navFoldOpen('组:' + key);
+    const head = href
+      ? `<a class="nav-group-title nav-group-toggle" href="${href}">
+           <span class="nav-fold" data-act="nav-fold" data-fold="组:${key}">${open ? '▾' : '▸'}</span>
+           ${icon(iconName)}<span>${esc(label)}</span></a>`
+      : `<div class="nav-group-title nav-group-toggle" data-act="nav-fold" data-fold="组:${key}">
+           <span class="nav-fold">${open ? '▾' : '▸'}</span>${icon(iconName)}<span>${esc(label)}</span>
+         </div>`;
+    return `<div class="nav-group${open ? ' open' : ''}" data-group-wrap="${key}">
+      ${head}<div class="nav-group-body">${inner}</div>
+    </div>`;
+  };
 
   $('sidebarNav').innerHTML = `
     <a class="nav-link" data-nav="dashboard" href="#/dashboard">${icon('dashboard')}<span>仪表盘</span></a>
-    <div class="nav-group">
-      <div class="nav-group-title">${icon('project')}<span>项目</span></div>
-      ${projectNav}
-    </div>
+    ${group('projects', 'project', '项目', projectNav)}
     <div class="nav-group">
       <a class="nav-link" data-nav="templates" href="#/templates">${icon('template')}<span>模板</span></a>
       <a class="nav-link" data-nav="sync" href="#/sync">${icon('sync')}<span>同步</span></a>
     </div>
-    <div class="nav-group">
-      <a class="nav-group-title" href="#/search">${icon('search')}<span>检索</span></a>
-      <div class="nav-sub">
-        <a class="nav-link" data-nav="search" href="#/search"><span>知识检索</span></a>
-        <a class="nav-link" data-nav="docs" href="#/docs"><span>文档库</span></a>
-      </div>
-    </div>
-    <div class="nav-group" data-admin="1">
-      <a class="nav-group-title" href="#/admin/users">${icon('users')}<span>管理</span></a>
-      <div class="nav-sub">
-        <a class="nav-link" data-nav="users" href="#/admin/users"><span>用户</span></a>
-        <a class="nav-link" data-nav="audit" href="#/admin/audit"><span>审计</span></a>
-      </div>
-    </div>`;
+    ${group('search', 'search', '检索',
+      `<a class="nav-link" data-nav="search" href="#/search"><span>知识检索</span></a>
+       <a class="nav-link" data-nav="docs" href="#/docs"><span>文档库</span></a>`,
+      '#/search')}
+    ${group('admin', 'users', '管理',
+      `<a class="nav-link" data-nav="users" href="#/admin/users"><span>用户</span></a>
+       <a class="nav-link" data-nav="audit" href="#/admin/audit"><span>审计</span></a>`,
+      '#/admin/users')}`;
   showApp();
   updateActiveNav(parseHash().parts);
 }
@@ -1550,6 +1591,10 @@ async function openLlmModal() {
         <select id="llmTpl">${tplOptions || '<option value="">（模板库为空）</option>'}</select>
       </label>
       <label class="field"><span>输出文件名（留空 = 模板名）</span><input id="llmOut" placeholder="如 07-简报.docx"></label>
+      <label class="field" style="flex-direction:row;align-items:center;gap:8px">
+        <input type="checkbox" id="llmForce" style="width:auto;margin:0">
+        <span style="margin:0">覆盖已存在的同名文件（会丢失人工修改）</span>
+      </label>
     </div>
     <div class="notice blue">先生成 JSON，每个字段可编辑；「应用」后按模板落盘。未修改时走 llm-fill，修改过则用编辑后的数据走模板填充。</div>
     <div class="row" style="margin-bottom:10px">
@@ -1568,6 +1613,40 @@ async function openLlmModal() {
   taskSel.addEventListener('change', syncTpl);
   syncTpl();
   actCtx.llm = { result: null };
+  // 上次的生成结果如果还在，直接读回来显示，省得每次重新生成（100~240 秒）。
+  taskSel.addEventListener('change', () => loadLlmCache(taskSel.value));
+  loadLlmCache(taskSel.value);
+}
+
+/* 读取该任务上次留档的生成结果并回显。没有就保持空白，等用户点「生成」。*/
+async function loadLlmCache(task) {
+  if (!actCtx || !task) return;
+  const { projectName, dirname } = actCtx;
+  try {
+    const r = await api(`/projects/${enc(projectName)}/activities/${enc(dirname)}`
+      + `/llm-cache?task=${enc(task)}`);
+    if (!r || !r.exists || !r.result) return;
+    renderLlmResult(r.result, `（读取自 ${r.saved_at || ''} 的留档，可直接编辑或重新生成）`);
+  } catch { /* 读不到就按没有处理 */ }
+}
+
+/* 把生成结果渲染成可编辑字段区。runLlm 与 loadLlmCache 共用。*/
+function renderLlmResult(all, hint) {
+  const check = all._check || null;
+  const rewrites = Number(all._rewrites || 0);
+  const fields = Object.fromEntries(
+    Object.entries(all).filter(([k]) => !k.startsWith('_')));
+  actCtx.llm = { result: fields, check };
+  el('#llmMsg').textContent = hint || '生成完成，可逐字段修改。';
+  el('#llmResult').innerHTML = renderSelfCheck(check, rewrites) +
+    `<div class="section-title">生成结果</div>` +
+    Object.entries(fields).map(([k, v]) => {
+      const isArr = Array.isArray(v);
+      const text = isArr ? JSON.stringify(v, null, 2) : String(v ?? '');
+      return `<label class="field"><span>${esc(k)}${isArr ? '（数组，JSON）' : ''}</span>
+        <textarea data-llm-key="${esc(k)}" data-array="${isArr ? '1' : '0'}">${esc(text)}</textarea>
+      </label>`;
+    }).join('');
 }
 
 /* 文风自检结果条：通过=绿色，未通过=黄色（.notice 默认色） */
@@ -1623,22 +1702,7 @@ async function runLlm() {
       method: 'POST', body: { task, style },
     });
     stopPoll();
-    const all = r.result || {};
-    // _check / _rewrites 是内部元信息，不当作可编辑字段
-    const check = all._check || null;
-    const rewrites = Number(all._rewrites || 0);
-    const fields = Object.fromEntries(Object.entries(all).filter(([k]) => !k.startsWith('_')));
-    actCtx.llm = { result: fields, check };
-    el('#llmMsg').textContent = '生成完成，可逐字段修改。';
-    el('#llmResult').innerHTML = renderSelfCheck(check, rewrites) +
-      `<div class="section-title">生成结果</div>` +
-      Object.entries(fields).map(([k, v]) => {
-        const isArr = Array.isArray(v);
-        const text = isArr ? JSON.stringify(v, null, 2) : String(v ?? '');
-        return `<label class="field"><span>${esc(k)}${isArr ? '（数组，JSON）' : ''}</span>
-          <textarea data-llm-key="${esc(k)}" data-array="${isArr ? '1' : '0'}">${esc(text)}</textarea>
-        </label>`;
-      }).join('');
+    renderLlmResult(r.result || {}, '生成完成，可逐字段修改。');
   } catch (e) {
     stopPoll();
     el('#llmMsg').textContent = '生成失败：' + e.message;
@@ -1656,6 +1720,7 @@ async function applyLlm() {
   const style = el('#llmStyle').value;
   const tpl = el('#llmTpl').value;
   const out = el('#llmOut').value.trim();
+  const forceChecked = !!(el('#llmForce') && el('#llmForce').checked);
   if (!tpl) { toast('请先选择落盘模板（弹窗顶部「落盘模板」）', 'warn'); return; }
 
   const data = {};
@@ -1671,6 +1736,7 @@ async function applyLlm() {
   const dirty = JSON.stringify(data) !== JSON.stringify(actCtx.llm.result);
   const body = { task, style, template: tpl };
   if (out) body.output = out;
+  if (forceChecked) body.force = true;
   el('#llmMsg').textContent = '落盘中…';
   try {
     let r;
@@ -1692,40 +1758,20 @@ async function applyLlm() {
     // 409 = 覆盖保护（目标文件已存在且活动状态是 imported/generated 等）。
     // 这是要防误覆盖人工修改，但界面之前没有任何确认入口，用户只看到
     // 「不起作用」（2026-11-23 实测：llmMsg 停在「落盘中…」→ 409）。
-    // 这里明确问一次，用户确认后带 force=true 重试。
+    // 处理：勾上「覆盖已存在」并提示用户再点一次，下次请求就带 force=true。
     const msg = String(e.message || '');
     if (/409|force=true|覆盖/.test(msg)) {
-      const ok = confirm(
-        `「${out || tpl}」已存在，覆盖会丢失人工修改内容。\n\n确定要在原文件上重新生成吗？`);
-      if (ok) {
-        el('#llmMsg').textContent = '覆盖落盘中…';
-        try {
-          const force = { ...body, force: true };
-          const r2 = dirty
-            ? await api(`/projects/${enc(projectName)}/activities/${enc(dirname)}/fill`, {
-                method: 'POST',
-                body: { template: tpl, data, force: true, ...(out ? { output: out } : {}) },
-              })
-            : await api(`/projects/${enc(projectName)}/activities/${enc(dirname)}/llm-fill`, {
-                method: 'POST', body: force,
-              });
-          const miss2 = r2.missing || [];
-          el('#llmMsg').textContent = `已覆盖落盘：${r2.path}（填充 ${r2.filled} 处${miss2.length ? `，缺 ${miss2.length} 项` : ''}）`;
-          $('modalFoot').innerHTML = '<button class="btn" data-close-modal>关闭</button>' +
-            '<button class="btn primary" data-act="close-refresh">关闭并刷新</button>';
-          toast('已覆盖落盘：' + r2.path, 'ok');
-          return;
-        } catch (e2) {
-          el('#llmMsg').textContent = '覆盖失败：' + e2.message;
-          toast('覆盖失败：' + e2.message, 'err');
-          return;
-        }
-      }
-      el('#llmMsg').textContent = '已取消。可改「输出文件名」避免覆盖。';
-      return;
+      // 不依赖 confirm（await 之后调用，部分浏览器会拦截）：
+      // 直接把勾选框勾上并提示，用户再点一次即可。
+      const box = el('#llmForce');
+      if (box) box.checked = true;
+      el('#llmMsg').textContent =
+        `「${out || tpl}」已存在。已自动勾选「覆盖已存在的同名文件」，再点一次「应用并落盘」即可覆盖。`;
+      toast('文件已存在：已勾选覆盖，请再点一次', 'warn');
+    } else {
+      el('#llmMsg').textContent = '落盘失败：' + e.message;
+      toast('落盘失败：' + e.message, 'err');
     }
-    el('#llmMsg').textContent = '落盘失败：' + e.message;
-    toast('落盘失败：' + e.message, 'err');
   }
 }
 
@@ -2777,12 +2823,20 @@ document.addEventListener('click', async e => {
     if (act === 'open-llm') { await openLlmModal(); return; }
     if (act === 'nav-fold') {
       e.preventDefault(); e.stopPropagation();
-      navFoldToggle(node.dataset.fold);
-      const wrap = node.closest('.nav-project');
+      const key = node.dataset.fold;
+      navFoldToggle(key);
+      // 三类折叠目标的 class 不同：项目 .nav-project、社区 .nav-community、
+      // 一级分组 .nav-group。按 fold key 前缀 + DOM 祖先定位。
+      const wrap = node.closest('.nav-project, .nav-community, .nav-group');
+      if (!wrap) return;
       const open = !wrap.classList.contains('open');
       wrap.classList.toggle('open', open);
-      node.textContent = open ? '▾' : '▸';
-      node.title = open ? '收起' : '展开';
+      const arrow = node.classList.contains('nav-fold') ? node
+        : (node.querySelector(':scope > .nav-fold') || node.querySelector(':scope > .nav-fold-ico'));
+      if (arrow) arrow.textContent = open ? '▾' : '▸';
+      const label = open ? '收起' : '展开';
+      if (node.title !== undefined) node.title = label;
+      if (arrow) arrow.title = label;
       return;
     }
     if (act === 'llm-run') { await runLlm(); return; }

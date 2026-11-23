@@ -38,6 +38,16 @@ PLAN_ROW_SPECS = {
         "columns": {"困难": "预计困难", "方案": "解决方案"},
         "rows": 2,
     },
+    # 物资是计划书的必备内容（用户 2026-11-23 强调）。LLM 的 plan 任务已经
+    # 输出物资列表，但原来没进 PLAN_ROW_SPECS，导致 {{物资名称_1}} 等
+    # 28 个占位符全部填不上。小计由代码算（单价×数量），不让模型算。
+    "物资": {
+        "columns": {"类别": "物资类别", "名称": "物资名称", "规格": "物资规格",
+                    "单价": "物资单价"},
+        "rows": 5,
+        "computed": {"小计": "物资小计"},
+        "total": "合计金额",       # 模板里的 {{合计金额}} 就是物资合计
+    },
 }
 
 
@@ -217,6 +227,41 @@ def _staffing_text(staff: dict, data: dict) -> str:
     return text
 
 
+_SPEC_QTY = re.compile(r"^\s*(\d+(?:\.\d+)?)")
+
+
+def _material_qty(spec) -> float | None:
+    """从「5米」「4个」「2箱」这种规格里取开头的数量。取不到返回 None。"""
+    m = _SPEC_QTY.match(str(spec or ""))
+    return float(m.group(1)) if m else None
+
+
+def _material_subtotal(item: dict) -> str:
+    """物资小计 = 单价 × 规格开头的数量。任一项缺就不填，避免瞎算。"""
+    price = _material_qty(item.get("单价"))
+    qty = _material_qty(item.get("规格"))
+    if price is None or qty is None:
+        return ""
+    value = price * qty
+    return f"{value:.2f}".rstrip("0").rstrip(".") if value != int(value) else str(int(value))
+
+
+def _material_total(rows, limit: int) -> str:
+    """物资合计：把每行小计加起来；一条都算不出就返回空串。"""
+    total = 0.0
+    got = False
+    for item in list(rows)[:limit]:
+        if not isinstance(item, dict):
+            continue
+        sub = _material_subtotal(item)
+        if sub:
+            total += float(sub)
+            got = True
+    if not got:
+        return ""
+    return f"{total:.2f}".rstrip("0").rstrip(".") if total != int(total) else str(int(total))
+
+
 def expand_plan_rows(data: dict, plan: dict,
                      notes: list[str] | None = None) -> None:
     """把 plan 的 环节 / 预计困难 展开成 环节内容_1… 这类带序号的值。
@@ -243,6 +288,12 @@ def expand_plan_rows(data: dict, plan: dict,
                 item = {}
             for src, prefix in spec["columns"].items():
                 data[f"{prefix}_{seq}"] = _text(item.get(src)) or ""
+            # 派生列（物资小计 = 单价 × 规格里的数量）由代码算，不让模型算。
+            for out_prefix in spec.get("computed", {}).values():
+                data[f"{out_prefix}_{seq}"] = _material_subtotal(item)
+        total = spec.get("total")
+        if total:
+            data[total] = _material_total(rows, limit)
 
 
 def build_data(project_name: str, activity_dir: str,

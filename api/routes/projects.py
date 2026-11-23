@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from engine import ylock as _ylock
 
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -45,10 +46,31 @@ def _act_year(act_month: int, act_year: int | None = None) -> int:
 
 # ---------- 项目 ----------
 
+# 社区名从 funder 全称里取：四川省成都市温江区公平街道惠民社区居民委员会 → 惠民
+_COMMUNITY_RE = re.compile(r"(?:街道)?([\u4e00-\u9fa5]{2,4})社区居民委员会")
+
+
+def project_community(item: dict) -> str:
+    """项目所属社区（侧边栏分组用）。取不到返回「未分组」。"""
+    data = item.get("data") or {}
+    parties = data.get("parties") or {}
+    funder = (parties.get("funder") or {}).get("name") or ""
+    m = _COMMUNITY_RE.search(str(funder))
+    return m.group(1) if m else "未分组"
+
+
 @router.get("/api/projects")
 def api_list_projects(user=Depends(current_user)):
-    """列全部项目。admin 看到全部；editor/viewer 按授权项目过滤。"""
-    items = [p for p in _projects.list_projects() if project_allowed(user, p)]
+    """列全部项目。admin 看到全部；editor/viewer 按授权项目过滤。
+
+    每项额外带 community 字段（社区名），供侧边栏「项目 → 社区 → 项目」
+    两级分组用（2026-11-23）。
+    """
+    items = []
+    for p in _projects.list_projects():
+        if not project_allowed(user, p):
+            continue
+        items.append({**p, "community": project_community(p)})
     return {"total": len(items), "items": items}
 
 

@@ -1,6 +1,7 @@
 """活动材料端点：核对、索引、模板填充、LLM 生成、图注。"""
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from pathlib import Path
 
@@ -214,10 +215,76 @@ def api_activity_llm(name: str, dirname: str, body: dict, request: Request,
     finally:
         _LLM_PROGRESS.pop(key, None)
 
+    # 生成结果留档：一次调用 100~240 秒，不能让用户每次重开弹窗都重新生成。
+    # 存到活动目录 _llm/<task>.json，下次打开弹窗直接读回来编辑（2026-11-23）。
+    _save_llm_result(act_dir, task, style, result)
+
     _audit_mod.audit(conn, user["id"], "llm_generate", project=name, target=task,
                      detail={"activity": dirname, "style": style},
                      ip=request.client.host)
     return {"task": task, "style": style, "result": result}
+
+
+# LLM 生成结果留档目录（活动目录下）
+LLM_CACHE_DIR = "_llm"
+# 只缓存内容字段；_check/_rewrites 是内部元信息，一并存下来便于回看自检结果
+_LLM_CACHE_EXTS = (".json",)
+
+
+def _llm_cache_path(act_dir: Path, task: str) -> Path:
+    """活动目录 _llm/<task>.json。task 做文件名白名单，防路径穿越。"""
+    safe = "".join(ch for ch in str(task) if ch.isalnum() or ch in "_-")
+    return Path(act_dir) / LLM_CACHE_DIR / f"{safe or 'task'}.json"
+
+
+def _save_llm_result(act_dir: Path, task: str, style: str, result: dict) -> None:
+    """把生成结果写盘；失败不影响主流程（结果已经返回给用户了）。"""
+    try:
+        from engine import ylock as _ylock
+        path = _llm_cache_path(act_dir, task)
+        payload = {
+            "task": task,
+            "style": style,
+            "saved_at": datetime.now(TZ).isoformat(timespec="seconds"),
+            "result": result,
+        }
+        _ylock.atomic_write_text(
+            path, json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
+    except Exception:
+        pass          # 留档失败不该让生成白跑
+
+
+@router.get("/api/projects/{name}/activities/{dirname}/llm-cache")
+def api_llm_cache(name: str, dirname: str, task: str = "",
+                  user=Depends(current_user)):
+    """读上次的 LLM 生成结果：{exists, task, style, saved_at, result}。
+
+    没传 task 时列出该活动所有已留档的任务；传了就读那一份。
+    """
+    act_dir, _meta = activity_meta_or_404(name, dirname, user)
+    base = Path(act_dir) / LLM_CACHE_DIR
+    if not task:
+        tasks = []
+        if base.is_dir():
+            for f in sorted(base.glob("*.json")):
+                try:
+                    d = json.loads(f.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                tasks.append({"task": d.get("task") or f.stem,
+                              "style": d.get("style") or "",
+                              "saved_at": d.get("saved_at") or ""})
+        return {"exists": bool(tasks), "tasks": tasks}
+    path = _llm_cache_path(act_dir, task)
+    if not path.is_file():
+        return {"exists": False}
+    try:
+        d = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {"exists": False}
+    return {"exists": True, "task": d.get("task") or task,
+            "style": d.get("style") or "", "saved_at": d.get("saved_at") or "",
+            "result": d.get("result") or {}}
 
 
 @router.get("/api/projects/{name}/activities/{dirname}/llm-progress")

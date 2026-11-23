@@ -296,7 +296,16 @@ def test_llm_returns_result_without_writing(projects_root, monkeypatch):
     assert out["result"]["导语"] == "测试导语"
     assert seen["task"] == "brief" and seen["style"] == "务实"
     assert seen["facts"]["项目编号"] == "CDYJR2026008-C-16110001"
-    assert {p.name for p in act.iterdir()} == before      # 不落盘
+    # 不生成模板文件；但会写 _llm/<task>.json 留档（2026-11-23 加的，
+    # 避免每次打开弹窗重新生成）。所以排除 _llm 后目录应无变化。
+    after = {p.name for p in act.iterdir()} - {'_llm'}
+    assert after == before, "除留档目录外不应产生文件"
+    cache = act / '_llm' / 'brief.json'
+    assert cache.is_file(), "生成结果应留档到 _llm/<task>.json"
+    import json as _json
+    saved = _json.loads(cache.read_text(encoding='utf-8'))
+    assert saved["task"] == "brief" and saved["style"] == "务实"
+    assert saved["result"]["导语"] == "测试导语"
 
 
 def test_llm_fill_writes_output(tmp_path, projects_root, monkeypatch):

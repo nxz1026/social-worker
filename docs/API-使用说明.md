@@ -432,6 +432,7 @@ curl -X POST -H "Authorization: Bearer sk-sw-xxx" -H "Content-Type: application/
 | | **签到表**（2026-11-23 新增）：5 个占位符（活动名称两处 / 活动编号 / 活动时间 / 项目社工 / 页眉项目名称） |
 | `POST .../llm` | LLM 生成，**只返回不落盘**：`{"task":"summary","style":"务实"}`。实测 2–4 分钟 |
 | `GET  .../llm-progress` | 生成进度：`{running, stage, percent}`。前端轮询它显示阶段 |
+| `GET  .../llm-cache?task=` | 读上次生成结果（留档在 `_llm/<task>.json`）。不传 task 列出全部留档 |
 | `POST .../llm-fill` | LLM 生成后合并进模板并落盘 |
 | `POST .../captions` | 生成图注；`picked` 为空时程序按文件名挑图 |
 | `POST .../captions/fill` | 把图注填进模板 `{{图注_N}}` |
@@ -522,6 +523,22 @@ office 文件名后面的 `↗ md` 徽标仍保留，鼠标悬停能看到对应
 
 实现复用下载端点的 blob（`fetch` + `x-token` + `URL.createObjectURL`），
 **零第三方依赖**（不引入 mammoth/pdf.js/marked），关闭时 `revokeObjectURL`。
+
+### 5.5.4 计划书物资（必备内容）
+
+`plan` 任务的 schema 本来就要求输出「物资」列表（类别/名称/规格/单价），
+但 `PLAN_ROW_SPECS` 里没有物资项，导致模板的 28 个物资占位符填不上。
+
+2026-11-23 补上：
+
+| 占位符 | 来源 |
+|---|---|
+| `{{物资类别_1..5}}` / `{{物资名称_N}}` / `{{物资规格_N}}` / `{{物资单价_N}}` | LLM 输出的物资列表 |
+| `{{物资小计_N}}` | **代码算**：单价 × 规格开头的数量（不让模型算） |
+| `{{合计金额}}` | 各行小计之和 |
+
+实测：横幅 2条×60 + KT板 4个×80 + 矿泉水 3箱×45 → 小计 120/320/135，
+合计 575。
 
 ### 5.5.3 签到表模板
 
