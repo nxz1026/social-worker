@@ -25,6 +25,7 @@ from pathlib import Path
 
 import openpyxl
 from docx import Document
+from docx.oxml.ns import qn
 from docx.table import _Cell
 
 PLACEHOLDER_RE = re.compile(r"\{\{([^{}]+)\}\}")
@@ -130,19 +131,27 @@ def _substitute(text: str, data: dict, acc: dict) -> str:
             acc["filled"] += 1
             return _to_text(value)
         acc["missing"].add(key)
-        return match.group(0)          # 缺字段：原样保留
+        # 缺字段：清空占位符，不原样留在成品里（2026-11-23 用户要求）。
+        # 用户拿到的必须是能直接用的文档，不该出现 {{环节阶段_1}} 这种残骸。
+        # 缺了哪些仍然通过返回值的 missing 告诉调用方。
+        return ""
 
     return PLACEHOLDER_RE.sub(repl, text)
 
 
-def _fill_para(para, data: dict, acc: dict) -> None:
-    """填充单个段落；没有占位符的段落直接跳过，保证幂等。"""
+def _fill_para(para, data: dict, acc: dict) -> bool:
+    """填充单个段落；没有占位符的段落直接跳过，保证幂等。
+
+    返回 True 表示「这一段原本有内容，填完变空了」——调用方据此删掉空段，
+    模板自带的空行不动。
+    """
     text = para.text
     if "{{" not in text:
-        return
+        return False
     new = _substitute(text, data, acc)
     if new != text:
         _rewrite_para(para, new)
+    return not new.strip()
 
 
 def _fill_table(table, data: dict, acc: dict) -> None:
@@ -190,6 +199,27 @@ def _usable(data: dict) -> dict:
             if not str(key).startswith("_")}
 
 
+def _prune_emptied(paras: list) -> int:
+    """删掉「填完变空」的段落，返回删除数量。
+
+    只删**本来有占位符、替换后空了**的段落；模板自带的空行不动。
+    有图片 / 分页符 / 分节符的保留，否则会改版式。
+    """
+    removed = 0
+    for para in paras:
+        p = para._p
+        if p.getparent() is None:
+            continue
+        if p.findall('.//' + qn('w:drawing')) or p.findall('.//' + qn('w:pict')) \
+                or p.findall('.//' + qn('w:object')):
+            continue
+        if p.findall('.//' + qn('w:br')):
+            continue
+        p.getparent().remove(p)
+        removed += 1
+    return removed
+
+
 def render_docx(src: Path, dst: Path, data: dict) -> dict:
     """读 docx 模板，替换 {{字段}} 后写到 dst。
 
@@ -201,12 +231,13 @@ def render_docx(src: Path, dst: Path, data: dict) -> dict:
     doc = Document(str(src))
     acc: dict = {"filled": 0, "missing": set()}
 
-    for para in doc.paragraphs:
-        _fill_para(para, data, acc)
+    emptied = [para for para in doc.paragraphs
+               if _fill_para(para, data, acc)]
     for table in doc.tables:
         _fill_table(table, data, acc)
     for part in _all_headers_footers(doc):
         _fill_story(part, data, acc)
+    _prune_emptied(emptied)
 
     dst.parent.mkdir(parents=True, exist_ok=True)
     doc.save(str(dst))

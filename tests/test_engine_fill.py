@@ -76,15 +76,21 @@ def test_render_docx_fills_values(tmp_path):
 
 
 @requires_jue_suan
-def test_render_docx_missing_keeps_placeholder(tmp_path):
+def test_render_docx_missing_clears_placeholder(tmp_path):
+    """缺字段时清空占位符，成品里不留 {{...}} 残骸。
+
+    2026-11-23 用户要求：发给用户看的文档不能有占位符。缺了什么通过
+    返回值的 missing 告知调用方，由界面提示补数据。
+    """
     dst = tmp_path / "决算表-缺字段.docx"
     result = fill.render_docx(JUE_SUAN, dst, {})
 
     assert result["filled"] == 0
     assert result["missing"]
     assert "项目名称" in result["missing"]
-    # 缺字段不抛错，占位符原样留在输出里
-    assert "{{项目名称}}" in _docx_text(dst)
+    text = _docx_text(dst)
+    assert "{{" not in text, "成品里不应残留占位符"
+    assert "项目名称：" in text, "标签文字保留，只是值被清空"
 
 
 @requires_jue_suan

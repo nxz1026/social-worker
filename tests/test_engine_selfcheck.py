@@ -211,5 +211,7 @@ def test_render_docx_ignores_underscore_keys(tmp_path):
 
     text = "\n".join(para.text for para in Document(str(dst)).paragraphs)
     assert "测试项目" in text
-    assert "{{_check}}" in text             # 内部键不参与替换
+    # 内部键（下划线开头）不参与替换：值不写进文档，占位符一并清掉
+    assert "_check" not in text
+    assert "{{" not in text
     assert stats["missing"] == ["_check"]
