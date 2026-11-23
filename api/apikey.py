@@ -72,6 +72,34 @@ _touch_lock = threading.Lock()
 _touch_running = 0
 
 
+# API Key 的权限范围（api_keys.scopes 列）。空数组 = 继承 owner 角色，保持历史行为。
+KEY_SCOPE_READONLY = "readonly"
+
+
+def _read_scopes(key_id, conn) -> list[str]:
+    """读 api_keys.scopes。读不到就当空（继承 owner），不因查库失败拒绝请求。"""
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT scopes FROM api_keys WHERE id = %s", (key_id,))
+            row = cur.fetchone()
+        if not row or row[0] is None:
+            return []
+        value = row[0]
+        return [str(x) for x in value] if isinstance(value, (list, tuple)) else [str(value)]
+    except Exception:
+        return []
+
+
+def is_readonly_key(user) -> bool:
+    """API Key 是否被显式标成只读。
+
+    只认 api_key 身份：Web 登录会话没有 scopes 概念，永远 False。
+    """
+    if not user or user.get("auth_type") != "api_key":
+        return False
+    return KEY_SCOPE_READONLY in (user.get("scopes") or [])
+
+
 def _touch_last_used(key_id: int) -> None:
     """节流后异步更新 last_used_at：独立线程 + 独立连接，失败静默。
 
@@ -158,6 +186,10 @@ def verify(conn, plain: str) -> dict | None:
         "projects": load_projects(conn, user_id, role),
         "auth_type": "api_key",
         "key_id": key_id,
+        # schema 里 api_keys.scopes 一直存在却从未被读取（2026-11-23 审计发现）：
+        # 于是标了 readonly 的 key 实际拥有 owner 的全部权限，能上传/删除。
+        # 这里把列读出来，由 require_write / scopes_enforce 判定。
+        "scopes": _read_scopes(key_id, conn),
     }
     # 只有真实 psycopg 连接才异步写 last_used_at；单测里的假连接跳过
     if isinstance(conn, psycopg.Connection):

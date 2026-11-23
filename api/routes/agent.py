@@ -15,14 +15,15 @@ from fastapi import (APIRouter, Depends, File, Form, HTTPException, Request,
 from PIL import Image
 
 from api.deps import (can_write, check_project, current_user, db,
-                      project_access, scopes_of)
+                      project_access, require_delete, scopes_of)
 from api.errors import ApiError
 from api.shared import audit as _audit_mod
 from api.shared.delivery import sw_delivery
-from api.shared.domain import (activity_require_code, activity_sub_dir,
-                               activity_upload_filename, find_template,
-                               project_allowed, project_meta_or_404)
-from api.shared.paths import fill_output
+from api.shared.domain import (activity_meta_or_404, activity_require_code,
+                               activity_sub_dir, activity_upload_filename,
+                               find_template, project_allowed,
+                               project_meta_or_404)
+from api.shared.paths import fill_output, safe_rel_path
 from api.state import (ROOT, SETTINGS, TZ, _ARCHIVE_MAX_BYTES,
                        _ARCHIVE_MAX_ENTRIES, _ARCHIVE_MAX_UNCOMPRESSED,
                        _ARCHIVE_RATIO_LIMIT, _ARCHIVE_RATIO_MIN_BYTES,
@@ -909,3 +910,70 @@ def api_sw_photos_upload_archive(
 
     return {"ok": True, "matched": matched_count, "unmatched": unmatched,
             "total_saved": total_saved}
+
+
+# ---------------- 删除（2026-11-23 新增） ----------------
+# 客户端反馈「服务端没有删单文件 API，无法清除测试上传的冗余文件」。
+# 删除比写更危险：要求确认语 + 写权限 + 软删除到 .trash（可恢复）+ 审计。
+
+@router.delete("/api/sw/projects/{p}/activities/{a}/files")
+def api_sw_delete_activity_file(p: str, a: str, body: dict,
+                                request: Request,
+                                user=Depends(require_delete),
+                                conn=Depends(db)):
+    """删除活动内单个文件（软删除到 .trash/，可恢复）。
+
+    请求体：{"path": "09-监督记录.docx", "confirm": "DELETE"}
+    - path 相对活动目录，越界 → 400
+    - 必须给 confirm=DELETE，防误删
+    - 回收站里的文件不能再删
+    """
+    if str(body.get("confirm") or "") != "DELETE":
+        raise ApiError(400, "CONFIRM_REQUIRED",
+                       "删除需要显式确认：请求体带 confirm=\"DELETE\"",
+                       "这是防误删；确认可恢复后再发")
+    act_dir, _meta = activity_meta_or_404(p, a, user, write=True)
+    rel_in = str(body.get("path") or "").strip()
+    if not rel_in:
+        raise ApiError(400, "VALIDATION", "缺 path")
+    target = safe_rel_path(act_dir, rel_in)
+    if not target.is_file():
+        raise ApiError(404, "NOT_FOUND", f"文件不存在：{rel_in}")
+
+    rel = target.relative_to(act_dir.resolve())
+    if rel.parts and rel.parts[0] == ".trash":
+        raise ApiError(400, "VALIDATION", "不能删除回收站里的文件")
+
+    stamp = datetime.now(TZ).strftime("%Y%m%d-%H%M%S")
+    dest = act_dir / ".trash" / stamp / rel
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    n = 1
+    while dest.exists():
+        dest = dest.with_name(f"{dest.stem}-{n}{dest.suffix}")
+        n += 1
+    shutil.move(str(target), str(dest))
+
+    _audit_mod.audit(conn, user["id"], "delete_activity_file", project=p,
+                     target=rel.as_posix(),
+                     detail={"activity": a, "via": "agent_api",
+                             "trash": dest.relative_to(act_dir).as_posix()},
+                     ip=request.client.host)
+    return {"ok": True, "path": rel.as_posix(),
+            "trash": dest.relative_to(act_dir).as_posix(),
+            "recover": f"在活动页「回收站」可恢复；或调 POST .../trash/restore"}
+
+
+@router.get("/api/sw/projects/{p}/activities/{a}/trash")
+def api_sw_list_trash(p: str, a: str, user=Depends(current_user)):
+    """列出活动回收站内容（删除后想找回时用）。"""
+    act_dir, _meta = activity_meta_or_404(p, a, user)
+    root = act_dir / ".trash"
+    items: list[dict] = []
+    if root.is_dir():
+        for f in sorted(root.rglob("*")):
+            if f.is_file():
+                rel = f.relative_to(act_dir).as_posix()
+                items.append({"trash_path": rel,
+                              "deleted_at": f.parts[-3] if len(f.parts) >= 3 else "",
+                              "size": f.stat().st_size})
+    return {"total": len(items), "items": items}

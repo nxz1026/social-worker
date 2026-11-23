@@ -70,9 +70,32 @@ def require_write(user=Depends(current_user)):
     """全局写权限（editor/admin）。
 
     项目级细粒度（readonly/write）由各端点自己调 check_project(write=True)。
+    API Key 若被显式标成 readonly（api_keys.scopes 含 readonly），一律拒绝写。
     """
+    # 循环导入：apikey 依赖 deps 的权限判定，这里延迟导入。
+    from api.apikey import is_readonly_key
+
+    if is_readonly_key(user):
+        raise HTTPException(403, "该 API Key 为只读权限，不能执行写操作")
     if user["role"] not in ("admin", "editor"):
         raise HTTPException(403, "无写权限（需 editor/admin）")
+    return user
+
+
+def require_delete(user=Depends(current_user)):
+    """删除权限：比写权限更严。
+
+    删除会真正移除归档材料，除 editor/admin + 项目写权限外，还要求：
+    - API Key 不能是 readonly
+    - 调用方必须显式确认（由端点要求传 confirm，见各删除端点）
+    这里只管身份与角色，确认语在端点里校验。
+    """
+    from api.apikey import is_readonly_key
+
+    if is_readonly_key(user):
+        raise HTTPException(403, "该 API Key 为只读权限，不能删除")
+    if user["role"] not in ("admin", "editor"):
+        raise HTTPException(403, "无删除权限（需 editor/admin）")
     return user
 
 

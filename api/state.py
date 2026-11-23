@@ -66,15 +66,18 @@ _SENSITIVE_DETAIL_KEYS = {
 API_KEY_BLOCKED_PREFIX = "/api/admin/"
 
 # ---------- 活动照片批量上传（docs/照片上传协议.md） ----------
-_PHOTO_MAX_FILES = 200
-_PHOTO_MAX_BYTES = 50 * 1024 * 1024
-_PHOTO_MAX_TOTAL_BYTES = 500 * 1024 * 1024   # 单次多文件上传整批上限
+# 2026-11-23 收紧：用户明确「那么多图片不上传」，单次几千张散图不是支持场景。
+# 原值 200 张 / 50MB 单张 / 500MB 单批 → 现 60 张 / 20MB 单张 / 120MB 单批。
+# 实际项目一次活动照片在 50 张上下，超了应该先筛选或打 zip 走归档流程。
+_PHOTO_MAX_FILES = 60
+_PHOTO_MAX_BYTES = 20 * 1024 * 1024
+_PHOTO_MAX_TOTAL_BYTES = 120 * 1024 * 1024   # 单次多文件上传整批上限
 # 单图像素上限（宽 × 高）：防「小文件解压出巨图」的解压炸弹
 _PHOTO_MAX_PIXELS = 80_000_000
 # 与 engine.photos.IMAGE_SUFFIXES 保持一致；这里单独写一份便于错误提示
 _PHOTO_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp"}
 # zip 上传预算：先看中央目录，再决定读不读，避免解压炸弹打爆内存/磁盘
-_ARCHIVE_MAX_BYTES = 1024 * 1024 * 1024           # 压缩包本身 1 GB
+_ARCHIVE_MAX_BYTES = 500 * 1024 * 1024            # 压缩包本身 500 MB（原 1 GB）
 _ARCHIVE_MAX_ENTRIES = 5000                        # 条目数上限
 _ARCHIVE_MAX_UNCOMPRESSED = 2 * 1024 * 1024 * 1024  # 解压后总量 2 GB
 _ARCHIVE_RATIO_LIMIT = 200                         # 单条压缩比上限

@@ -881,6 +881,40 @@ python3 scripts/verify_assets.py
 
 后三个是**后台任务**：端点只受理并返回 `started`，进度与结果看服务日志。
 
+## 11.6 删除文件与回收站（Agent API）
+
+```http
+DELETE /api/sw/projects/{p}/activities/{a}/files
+{"path": "09-监督记录.docx", "confirm": "DELETE"}
+```
+
+| 检查 | 行为 |
+|---|---|
+| `confirm` 不是 `DELETE` | 400 CONFIRM_REQUIRED（防误删） |
+| 无写权限 / 只读 API Key | 403 |
+| 文件不存在 | 404 |
+| 路径在 `.trash/` 里 | 400（回收站文件不能再删） |
+
+成功后文件移到 `.trash/<时间戳>/<原相对路径>`，**可恢复**：
+
+```http
+GET  /api/sw/projects/{p}/activities/{a}/trash     # 列回收站
+POST /api/projects/{name}/activities/{dirname}/trash/restore  # 恢复
+```
+
+**API Key 权限（2026-11-23 修复）**：`api_keys.scopes` 列此前从未被读取，
+标了 `readonly` 的 key 实际拥有 owner 的全部权限。现在 `scopes` 含
+`readonly` 的 key 一切写操作与删除都返回 403；**空 scopes 保持继承 owner**
+（历史行为不变）。现有 2 个活跃 key 均为空 scopes，不受影响。
+
+## 11.7 上传限制（2026-11-23 收紧）
+
+| 接口 | 单文件 | 单次总量 | 条数 | 其他 |
+|---|---|---|---|---|
+| 活动文件上传 | **20MB**（原 50） | — | — | 同名 409、sha256 |
+| 照片上传 | **20MB**（原 50） | **120MB**（原 500） | **60 张**（原 200） | 像素 8000 万 |
+| zip 上传 | **500MB**（原 1GB） | 解压后 2GB | 5000 条 | 压缩比 200x |
+
 ## 12. 已知限制
 
 | 限制 | 说明 |
