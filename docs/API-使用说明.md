@@ -428,6 +428,7 @@ curl -X POST -H "Authorization: Bearer sk-sw-xxx" -H "Content-Type: application/
 | 端点 | 说明 |
 |---|---|
 | `POST .../fill` | 模板填充：`{"template":"决算表","data":{...}}` → 写盘，返回 `{path,filled,missing}` |
+| | **活动通知**（2026-11-23 新增）：11 个占位符自动填，`missing` 为空 |
 | `POST .../llm` | LLM 生成，**只返回不落盘**：`{"task":"summary","style":"务实"}` |
 | `POST .../llm-fill` | LLM 生成后合并进模板并落盘 |
 | `POST .../captions` | 生成图注；`picked` 为空时程序按文件名挑图 |
@@ -440,6 +441,24 @@ curl -X POST -H "Authorization: Bearer sk-sw-xxx" -H "Content-Type: application/
 | `POST .../satisfaction/list` | 扫问卷照片生成/更新 `scores.json`（保留已录分数） |
 | `POST .../satisfaction/fill` | 把分数统计填进汇总表模板 |
 | `GET  .../photos` | 列照片：文件名/大小/mtime/缩略图/是否程序默认选中 |
+
+### 5.5.2 活动通知模板
+
+`templates/library/活动通知.docx`，11 个占位符：
+
+| 占位符 | 数据来源 |
+|---|---|
+| `{{项目名称}}` | 项目 yaml `project.name` |
+| `{{活动名称}}` | activity.yaml 活动名称 / 目录名 |
+| `{{社区名称}}` | `parties.funder.name` 去掉省市区街道前缀 →「惠民社区居民委员会」 |
+| `{{活动时间}}` / `{{活动时间_cn}}` | activity.yaml 活动时间；后者转成「2026年11月11日」 |
+| `{{活动地点}}` / `{{服务对象}}` | activity.yaml 同名「字段，没填就留空 |
+| `{{活动简介}}` / `{{活动简介_suffix}}` | 可选；有内容时 suffix 自动补「，」 |
+| `{{项目社工}}` / `{{联系电话}}` / `{{年月日}}` | 项目 yaml / activity.yaml / 当天 |
+
+**社区名与电话是本次新增的数据字段**：`build_data` 之前只读 `parties.executer`，
+现在补了 `funder`（社区全称）+ `staff.leader.phone`（项目 yaml 里的电话），
+没有 phone 时回退到活动里的「联系电话」。
 
 ### 5.5.1 LLM 端点的两个形态
 
@@ -705,7 +724,7 @@ python3 scripts/verify_assets.py
 **归档是同步执行**：上传后直接返回最终 `status`（`done` / `pending`）。
 大文件要走飞书上传，实测 30KB 约 10 秒、7MB 约 140 秒，**客户端超时建议 300 秒**。
 
-### 11.5.3.1 仪表盘的完整性口径
+### 11.5.5 仪表盘的完整性口径
 
 `GET /api/dashboard` 的 `activity_complete` 与活动页 `/check` 使用**同一个口径**
 （`merge_review_status` 之后的结果），即签字确认过的项按齐备计入。

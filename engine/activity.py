@@ -47,6 +47,38 @@ PLAN_ROW_SPECS = {
 _UNIT_TAIL = re.compile(r"\s*(?:人次|人|名)\s*$")
 
 
+_ISO_DATE = re.compile(r"^(\d{4})-(\d{1,2})-(\d{1,2})\s*(.*)$")
+
+
+def _cn_date(text) -> str | None:
+    """2026-11-11 → 2026年11月11日；已带中文或格式不符则原样返回。"""
+    raw = _text(text)
+    if raw is None:
+        return None
+    m = _ISO_DATE.match(raw)
+    if not m:
+        return raw
+    y, mo, d, rest = m.groups()
+    out = f"{int(y)}年{int(mo)}月{int(d)}日"
+    return f"{out}{rest.strip()}" if rest.strip() else out
+
+
+_ADMIN_PREFIX = re.compile(r"^(?:四川省|\d{2}省)?(?:成都市)?(?:[\u4e00-\u9fa5]{2,4}区)?(?:[\u4e00-\u9fa5]{2,4}(?:街道|镇))?")
+
+
+def _community_short(name: str | None) -> str | None:
+    """社区全称 → 通知抬头用的简称。
+
+    「四川省成都市温江区公平街道惠民社区居民委员会」→「惠民社区居民委员会」。
+    去掉省/市/区/街道前缀，方便「XX社区居民委员会居民：」这种抬头。
+    """
+    text = _text(name)
+    if text is None:
+        return None
+    short = _ADMIN_PREFIX.sub("", text)
+    return short or text
+
+
 def _count_text(value) -> str | None:
     """人数类字段：去掉尾部单位，只留数字/区间。
 
@@ -231,6 +263,14 @@ def build_data(project_name: str, activity_dir: str,
     staff = project.get("staff") if isinstance(project.get("staff"), dict) else {}
     executer = parties.get("executer") if isinstance(parties.get("executer"), dict) else {}
     leader = staff.get("leader") if isinstance(staff.get("leader"), dict) else {}
+    funder = parties.get("funder") if isinstance(parties.get("funder"), dict) else {}
+    # 活动通知等对外文书要写社区名与联系电话：funder 是社区全称，
+    # 电话优先取 staff.leader.phone（项目 yaml），其次取活动里的「联系电话」。
+    community = _text(funder.get("name"))
+    phone = (_text(leader.get("phone"))
+             or _text(activity.get("联系电话"))
+             or _text(activity.get("phone"))
+             or _text((staff.get("social_worker") or {}).get("phone")))
 
     today = _today_text()
     data = {
@@ -247,6 +287,10 @@ def build_data(project_name: str, activity_dir: str,
         "帐号": _text(executer.get("account")),
         "开户行": _text(executer.get("bank")),
         "收款单位": _text(executer.get("name")),
+        # 对外文书（活动通知）用：社区名去掉行政区前缀，只留「XX社区居民委员会」
+        "社区名称": _community_short(community),
+        "社区全称": community,
+        "联系电话": phone,
         # activity.yaml
         "项目编号": (_text(activity.get("code")) or _text(activity.get("项目编号"))
                      or _project_code(project_name)),
@@ -254,6 +298,10 @@ def build_data(project_name: str, activity_dir: str,
                      or _name_from_dir(act_dir.name)),
         "活动时间": (_text(activity.get("活动时间")) or _text(activity.get("time"))
                      or _text(activity.get("date"))),
+        # 活动通知用：中文日期 + 活动简介（取自 activity.yaml，没有就留空让用户补）
+        "活动时间_cn": _cn_date(activity.get("活动时间") or activity.get("time")
+                                or activity.get("date")),
+        "活动简介": _text(activity.get("活动简介")) or _text(activity.get("简介")),
         "活动地点": _text(activity.get("活动地点")) or _text(activity.get("place")),
         "服务对象": _text(activity.get("服务对象")),
         "预计人数": _count_text(activity.get("预计人数")),
@@ -296,4 +344,9 @@ def build_data(project_name: str, activity_dir: str,
     # 人手分配要用到 extra / activity.yaml 里的社工人数与网格数，所以放在合并之后推导；
     # extra 显式给了就尊重显式值
     data["人手分配"] = data.get("人手分配") or _staffing_text(staff, data)
+    # 活动简介是可选的：有内容才补「，」前缀，避免生成「…进行X活动，。现进行…」
+    if not data.get("活动简介"):
+        data["活动简介_suffix"] = ""
+    else:
+        data["活动简介_suffix"] = "，" + str(data["活动简介"])
     return data
