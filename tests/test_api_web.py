@@ -25,7 +25,8 @@ os.environ.setdefault(
 
 import app  # noqa: E402
 from api.routes.activities import api_activity_detail  # noqa: E402
-from api.routes.materials import api_activity_fill, api_activity_llm, api_activity_llm_fill
+from api.routes.materials import (api_activity_fill, api_activity_llm,
+                                  api_activity_llm_fill, api_llm_progress)
 from api.routes.assets import (api_activity_delete_file, api_activity_download,  # noqa: E402
                                api_activity_files)
 from api.routes import misc as _misc  # noqa: E402
@@ -279,8 +280,13 @@ def test_llm_returns_result_without_writing(projects_root, monkeypatch):
     before = {p.name for p in act.iterdir()}
     seen = {}
 
-    def fake_write(task, facts, style=""):
+    def fake_write(task, facts, style="", **kwargs):
         seen.update({"task": task, "facts": facts, "style": style})
+        # 端点会传 on_progress，替身要收下并回调一次，验证进度链路
+        cb = kwargs.get("on_progress")
+        if cb:
+            cb("generating", 10)
+            cb("done", 100)
         return {"导语": "测试导语", "目的": "测试目的"}
 
     monkeypatch.setattr(app._llm, "write", fake_write)
@@ -404,3 +410,38 @@ def test_dashboard_three_projects(projects_root):
 def test_dashboard_filters_by_scope(projects_root):
     out = api_dashboard(VIEWER)
     assert [p["short"] for p in out["projects"]] == ["huimin"]
+
+
+def test_llm_progress_tracks_stages(projects_root, monkeypatch):
+    """LLM 生成进度：running=false → 生成中 running=true → 完成回到 false。
+
+    一次调用 100~240 秒，前端靠这个端点把「生成中」细化成具体阶段。
+    """
+    _activity(projects_root, "惠民项目", "01-走访调研-第一期")
+    BASE = "/projects/惠民项目/activities/01-走访调研-第一期"
+    USER = {"id": 1, "username": "admin", "role": "admin",
+            "projects": {"惠民项目": "write"}}
+
+    # 空闲
+    assert api_llm_progress("惠民项目", "01-走访调研-第一期", USER) == {"running": False}
+
+    # 生成期间：替身在回调里检查进度表已被写入
+    seen = []
+
+    def fake_write(task, facts, style="", **kwargs):
+        cb = kwargs.get("on_progress")
+        if cb:
+            cb("generating", 10)
+            seen.append(api_llm_progress("惠民项目", "01-走访调研-第一期", USER))
+            cb("rewriting", 70)
+            seen.append(api_llm_progress("惠民项目", "01-走访调研-第一期", USER))
+        return {"导语": "x"}
+
+    monkeypatch.setattr(app._llm, "write", fake_write)
+    api_activity_llm("惠民项目", "01-走访调研-第一期", {"task": "plan"},
+                     _Req(), USER, None)
+
+    assert seen[0]["running"] is True and seen[0]["stage"] == "generating"
+    assert seen[1]["stage"] == "rewriting" and seen[1]["percent"] == 70
+    # 完成后必须清掉，否则前端永远显示生成中
+    assert api_llm_progress("惠民项目", "01-走访调研-第一期", USER) == {"running": False}

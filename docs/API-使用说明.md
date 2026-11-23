@@ -429,7 +429,8 @@ curl -X POST -H "Authorization: Bearer sk-sw-xxx" -H "Content-Type: application/
 |---|---|
 | `POST .../fill` | 模板填充：`{"template":"决算表","data":{...}}` → 写盘，返回 `{path,filled,missing}` |
 | | **活动通知**（2026-11-23 新增）：11 个占位符自动填，`missing` 为空 |
-| `POST .../llm` | LLM 生成，**只返回不落盘**：`{"task":"summary","style":"务实"}` |
+| `POST .../llm` | LLM 生成，**只返回不落盘**：`{"task":"summary","style":"务实"}`。实测 2–4 分钟 |
+| `GET  .../llm-progress` | 生成进度：`{running, stage, percent}`。前端轮询它显示阶段 |
 | `POST .../llm-fill` | LLM 生成后合并进模板并落盘 |
 | `POST .../captions` | 生成图注；`picked` 为空时程序按文件名挑图 |
 | `POST .../captions/fill` | 把图注填进模板 `{{图注_N}}` |
@@ -465,7 +466,18 @@ curl -X POST -H "Authorization: Bearer sk-sw-xxx" -H "Content-Type: application/
 - `.../llm` 用来**预览**：生成结果直接返回，用户看过再决定落不落盘。
 - `.../llm-fill` 直接写盘。两者都用同一个 `engine.llm.write()`。
 
-真实调一次约 30~130 秒（含多轮文风重写），**调用方超时至少设 180 秒**。
+真实调一次 **100~240 秒**（2026-11-23 实测：生成 ~100s + 文风自检不达标再重写 ~60s），
+**调用方超时至少设 300 秒**。
+
+生成期间轮询 `GET .../llm-progress` 拿阶段：
+
+```json
+{"running": true, "stage": "rewriting", "percent": 70, "task": "plan"}
+```
+
+stage 依次为 `generating`（首次生成，约占 2/3 时间）→ `checking`（自检）→
+`rewriting`（不达标重写）→ 完成后 `{"running": false}`。
+没有正在跑的任务也是 `{"running": false}`。
 
 ## 6. 照片上传
 

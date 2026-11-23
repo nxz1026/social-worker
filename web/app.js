@@ -1375,17 +1375,46 @@ function renderSelfCheck(check, rewrites) {
     `<br>已自动重写 ${rewrites || 0} 次${rewrites ? '，仍未达标，可手动修改后落盘' : ''}</div>`;
 }
 
+/* LLM 生成阶段文案。一次调用实测 50~100 秒（含文风自检重写一次），
+ * 全程静默会让人以为卡死，所以按后端进度改文案（2026-11-23）。*/
+const STAGE_TEXT = {
+  generating: s => `生成中（已 ${s}s，约需 1.5–4 分钟）…`,
+  checking: s => `正在自检文风（已 ${s}s）…`,
+  rewriting: s => `自检未达标，正在重写（已 ${s}s）…`,
+  done: s => `生成完成（用时 ${s}s），可逐字段修改。`,
+};
+
+/* 轮询 /llm-progress，把「生成中」细化成具体阶段。返回停止函数。*/
+function startLlmPoll(projectName, dirname) {
+  const started = Date.now();
+  let alive = true;
+  const tick = async () => {
+    if (!alive) return;
+    const elapsed = Math.round((Date.now() - started) / 1000);
+    try {
+      const p = await api(`/projects/${enc(projectName)}/activities/${enc(dirname)}/llm-progress`);
+      const fn = STAGE_TEXT[p && p.stage] || STAGE_TEXT.generating;
+      if (alive) el('#llmMsg').textContent = fn(elapsed);
+    } catch { /* 进度查询失败不影响生成 */ }
+    if (alive) setTimeout(tick, 3000);
+  };
+  setTimeout(tick, 2000);
+  return () => { alive = false; };
+}
+
 async function runLlm() {
   if (!actCtx) return;
   const { projectName, dirname } = actCtx;
   const task = el('#llmTask').value;
   const style = el('#llmStyle').value;
-  el('#llmMsg').textContent = '生成中，可能要 1–3 分钟…';
+  el('#llmMsg').textContent = STAGE_TEXT.generating(0);
   el('#llmResult').innerHTML = '';
+  const stopPoll = startLlmPoll(projectName, dirname);
   try {
     const r = await api(`/projects/${enc(projectName)}/activities/${enc(dirname)}/llm`, {
       method: 'POST', body: { task, style },
     });
+    stopPoll();
     const all = r.result || {};
     // _check / _rewrites 是内部元信息，不当作可编辑字段
     const check = all._check || null;
@@ -1403,6 +1432,7 @@ async function runLlm() {
         </label>`;
       }).join('');
   } catch (e) {
+    stopPoll();
     el('#llmMsg').textContent = '生成失败：' + e.message;
     toast('LLM 生成失败：' + e.message, 'err');
   }
@@ -1621,7 +1651,7 @@ async function generateCaptions() {
   cap.tpl = el('#capTpl') ? el('#capTpl').value : cap.tpl;
   const picked = els('[data-photo]').filter(x => x.checked).map(x => x.dataset.photo);
   if (!picked.length) { toast('至少勾选一张照片', 'warn'); return; }
-  el('#capMsg').innerHTML = '<span class="muted">生成中，可能要 1–3 分钟…</span>';
+  el('#capMsg').innerHTML = '<span class="muted">生成中，约需 1.5–4 分钟（LLM 生成 + 文风自检重写）…</span>';
   try {
     const r = await api(actBase() + '/captions', {
       method: 'POST', body: { sub: cap.sub || CAPTION_SUB, style: cap.style, picked },

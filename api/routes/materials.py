@@ -1,6 +1,7 @@
 """活动材料端点：核对、索引、模板填充、LLM 生成、图注。"""
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 
 import yaml
@@ -19,8 +20,19 @@ from engine import ingest as _ingest
 from engine import llm as _llm
 from engine import projects as _projects
 from engine import readme as _readme
+from api.state import TZ
 
 router = APIRouter()
+
+# LLM 生成进度（进程内）。一次调用 50~100 秒，前端轮询这个表来显示
+# 「第几次生成 / 是否在自检重写」，避免用户以为卡死。
+# 键：f"{项目}/{活动}"，值：{"stage","percent","started_at"}
+_LLM_PROGRESS: dict[str, dict] = {}
+
+
+def _progress_key(name: str, dirname: str) -> str:
+    return f"{name}/{dirname}"
+
 
 
 @router.get("/api/projects/{name}/activities/{dirname}/check")
@@ -184,17 +196,41 @@ def api_activity_llm(name: str, dirname: str, body: dict, request: Request,
         raise HTTPException(400, "缺 task")
     style = str(body.get("style") or "")
     facts = _activity.build_data(name, dirname, user=user)
+    key = _progress_key(name, dirname)
+
+    def _on_progress(stage: str, percent: int) -> None:
+        _LLM_PROGRESS[key] = {"stage": stage, "percent": percent,
+                              "task": task, "ts": datetime.now(TZ).isoformat()}
+
+    _on_progress("generating", 5)
     try:
-        result = _llm.write(task, facts, style=style)
+        result = _llm.write(task, facts, style=style, on_progress=_on_progress)
     except ValueError as exc:
+        _LLM_PROGRESS.pop(key, None)
         raise HTTPException(400, str(exc))
     except _llm.LLMError as exc:
+        _LLM_PROGRESS.pop(key, None)
         raise HTTPException(502, f"LLM 生成失败：{exc}")
+    finally:
+        _LLM_PROGRESS.pop(key, None)
 
     _audit_mod.audit(conn, user["id"], "llm_generate", project=name, target=task,
                      detail={"activity": dirname, "style": style},
                      ip=request.client.host)
     return {"task": task, "style": style, "result": result}
+
+
+@router.get("/api/projects/{name}/activities/{dirname}/llm-progress")
+def api_llm_progress(name: str, dirname: str, user=Depends(current_user)):
+    """LLM 生成进度：{stage, percent}，没有正在跑的任务返回 {running: false}。
+
+    一次 LLM 调用实测 50~100 秒（含文风自检重写）。前端生成期间轮询这里，
+    把「生成中」细化成「第 1 次生成中 / 正在自检 / 第 2 次重写中」。
+    """
+    rec = _LLM_PROGRESS.get(_progress_key(name, dirname))
+    if not rec:
+        return {"running": False}
+    return {"running": True, **rec}
 
 
 @router.post("/api/projects/{name}/activities/{dirname}/llm-fill")

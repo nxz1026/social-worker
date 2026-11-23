@@ -14,6 +14,7 @@ import os
 import re
 import socket
 import sys
+from typing import Callable
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -700,7 +701,8 @@ def _generate(task: str, prompt: str) -> dict:
 
 def write(task: str, facts: dict, *, style: str = "",
           style_config: dict | None = None,
-          max_rewrite: int = 1) -> dict:
+          max_rewrite: int = 1,
+          on_progress: "Callable[[str, int], None] | None" = None) -> dict:
     """生成 → 自检 → 不达标则带自检意见重写 → 再自检。
 
     返回字段 dict，另带两个内部键（调用方 fill 时会忽略以 _ 开头的键）：
@@ -713,13 +715,26 @@ def write(task: str, facts: dict, *, style: str = "",
         str(facts.get("项目名称") or ""), str(facts.get("活动名称") or ""))
     prompt = build_prompt(task, facts, chosen, style_config=config)
 
+    # 进度回调：一次 LLM 调用实测 50~100 秒，前端需要知道「还活着」。
+    # stage: generating / checking / rewriting / done
+    def _emit(stage: str, percent: int) -> None:
+        if on_progress is None:
+            return
+        try:
+            on_progress(stage, percent)
+        except Exception:            # 进度上报失败绝不能影响生成
+            pass
+
+    _emit("generating", 10)
     result = _generate(task, prompt)
+    _emit("checking", 55)
     check = self_check(task, result, chosen, style_config=config)
 
     rewrites = 0
     limit = max(0, int(max_rewrite or 0))
     while not check["ok"] and rewrites < limit:
         rewrites += 1
+        _emit("rewriting", 60 + rewrites * 10)
         try:
             rewritten = _generate(task, prompt + "\n\n" + _rewrite_note(check))
         except LLMError as exc:
@@ -727,10 +742,12 @@ def write(task: str, facts: dict, *, style: str = "",
             print(f"自检重写失败，保留上一次结果：{exc}", file=sys.stderr)
             break
         result = rewritten
+        _emit("checking", 80)
         check = self_check(task, result, chosen, style_config=config)
         print(f"文风自检第 {rewrites} 次重写后：{check['score']} 分，"
               f"{'通过' if check['ok'] else '仍未通过'}", file=sys.stderr)
 
+    _emit("done", 100)
     out = dict(result)
     out["_check"] = check
     out["_rewrites"] = rewrites
