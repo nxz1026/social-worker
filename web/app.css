@@ -435,6 +435,37 @@ pre.genout { max-height: none; }
   display: flex; gap: 8px; justify-content: flex-end;
   padding: 12px 18px; border-top: 1px solid var(--line); background: #fbfcfe;
 }
+/* ---------- 文件预览 ---------- */
+.preview-frame {
+  width: 100%; height: 70vh; border: 1px solid var(--line);
+  border-radius: 8px; background: #fff;
+}
+.preview-img-wrap {
+  text-align: center; background: #f5f7fa;
+  border-radius: 8px; padding: 10px;
+}
+.preview-img-wrap img { max-width: 100%; max-height: 70vh; }
+.preview-pre, .preview-code {
+  margin: 0; padding: 12px 14px; border-radius: 8px;
+  background: #f6f8fa; border: 1px solid var(--line);
+  font-size: 12.5px; line-height: 1.65;
+  white-space: pre-wrap; word-break: break-word;
+  max-height: 70vh; overflow: auto;
+}
+.preview-md { line-height: 1.75; font-size: 14px; }
+.preview-md h1, .preview-md h2, .preview-md h3,
+.preview-md h4, .preview-md h5, .preview-md h6 { margin: 14px 0 8px; line-height: 1.35; }
+.preview-md h1:first-child, .preview-md h2:first-child { margin-top: 0; }
+.preview-md h1 { font-size: 22px; }
+.preview-md h2 { font-size: 19px; }
+.preview-md h3 { font-size: 16px; }
+.preview-md p { margin: 0 0 8px; }
+.preview-md ul { margin: 0 0 10px; padding-left: 22px; }
+.preview-md li { margin: 2px 0; }
+.preview-md code { background: #f0f2f5; padding: 1px 5px; border-radius: 4px; font-size: 12.5px; }
+.preview-tip { text-align: center; padding: 28px 16px; }
+.preview-tip-title { font-weight: 600; font-size: 15px; margin-bottom: 10px; word-break: break-all; }
+.preview-tip p { margin: 6px 0; }
 .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px 14px; }
 .form-grid .field { margin-bottom: 0; }
 .form-grid .field.full { grid-column: 1 / -1; }

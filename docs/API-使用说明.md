@@ -479,6 +479,22 @@ stage 依次为 `generating`（首次生成，约占 2/3 时间）→ `checking`
 `rewriting`（不达标重写）→ 完成后 `{"running": false}`。
 没有正在跑的任务也是 `{"running": false}`。
 
+## 5.6 文件预览（Web 界面）
+
+活动页点文件名 → 弹窗预览；点行内「下载」按钮才下载。
+
+| 扩展名 | 行为 |
+|---|---|
+| jpg/jpeg/png/gif/bmp/webp | `<img>` 预览 |
+| pdf | `<iframe>` 预览 |
+| md / markdown | 轻量渲染（标题/列表/代码块） |
+| txt | `<pre>` 原样 |
+| docx / xlsx / doc / xls / ppt | 不渲染，提示「浏览器不能直接预览，请下载」 |
+| zip / rar / 7z | 不预览，直接下载 |
+
+实现复用下载端点的 blob（`fetch` + `x-token` + `URL.createObjectURL`），
+**零第三方依赖**（不引入 mammoth/pdf.js/marked），关闭时 `revokeObjectURL`。
+
 ## 6. 照片上传
 
 **完整约定见 [照片上传协议](照片上传协议.md)。** 本节只列端点契约。

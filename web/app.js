@@ -31,6 +31,7 @@ let usersCache = null;      // 用户管理页当前列表（编辑弹窗用）
 let keysCache = {};         // API Key 明文缓存：{keyId: secret}，只在当前页面内存里
 let routeSeq = 0;
 let actCtx = null;          // 当前活动页上下文（文件操作 / 弹窗用）
+let previewUrl = '';        // 预览弹窗当前占用的 blob URL（关闭时 revoke）
 
 /* ---------------- 基础工具 ---------------- */
 const $ = id => document.getElementById(id);
@@ -217,6 +218,8 @@ function closeModal() {
   $('modal').classList.add('hidden');
   $('modalBody').innerHTML = '';
   $('modalFoot').innerHTML = '';
+  // 预览用的 blob URL 必须释放，否则每预览一次就在内存里漏一份文件
+  if (previewUrl) { URL.revokeObjectURL(previewUrl); previewUrl = ''; }
 }
 
 /* ---------------- 通用片段 ---------------- */
@@ -543,7 +546,15 @@ async function pageActivity(name, dirname, params) {
     api(base + '/files' + (sub ? '?sub=' + enc(sub) : '')),
     api('/projects/' + enc(name)),
   ]);
-  actCtx = { projectName: name, dirname, sub, detail, entries, project: proj, selected: 0 };
+  // 保留同一活动内已生成的 LLM 结果：整对象重建会把 actCtx.llm 冲掉，
+  // 于是「生成」完再点「应用并落盘」会提示「请先生成内容」（2026-11-23 实测）。
+  const keepLlm = (actCtx && actCtx.projectName === name
+                   && actCtx.dirname === dirname) ? actCtx.llm : null;
+  const keepSel = (actCtx && actCtx.projectName === name
+                   && actCtx.dirname === dirname) ? actCtx.selected : 0;
+  actCtx = { projectName: name, dirname, sub, detail, entries, project: proj,
+             selected: keepSel || 0 };
+  if (keepLlm) actCtx.llm = keepLlm;
 
   const check = detail.check || { items: [], ok_count: 0, partial_count: 0, missing_count: 0, na_count: 0, complete: false };
   const paths = sub.split('/').filter(Boolean);
@@ -747,7 +758,7 @@ function renderFileRows(entries, sub, check) {
     const isDir = !!item.is_dir;
     const nameHtml = isDir
       ? `<a href="#" data-act="enter-dir" data-path="${esc(path)}">${esc(item.name)}/</a>`
-      : `<a href="#" data-act="download" data-path="${esc(path)}">${esc(item.name)}</a>`;
+      : `<a href="#" data-act="preview" data-path="${esc(path)}">${esc(item.name)}</a>`;
     // Obsidian 骨架只做提示：Web 上不跳转，文件仍走「下载」原件
     const mirrorHtml = item.mirror
       ? ` <span class="badge muted" title="Obsidian 骨架：${esc(item.mirror)}">↗ md</span>`
@@ -803,6 +814,148 @@ async function downloadActivityFile(path) {
   document.body.appendChild(a);
   a.click();
   setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 800);
+}
+
+/* ---------------- 文件预览 ---------------- */
+// 按扩展名分流：图片/PDF 走 blob URL，md 轻量渲染，Office 只提示下载，压缩包直接下载
+const PREVIEW_IMG = ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp'];
+const PREVIEW_ARCHIVE = ['zip', 'rar', '7z'];
+const PREVIEW_OFFICE = ['docx', 'xlsx'];
+
+function fileExt(path) {
+  const base = String(path).split('/').pop() || '';
+  const i = base.lastIndexOf('.');
+  return i > 0 ? base.slice(i + 1).toLowerCase() : '';
+}
+
+/* 极简 markdown：标题 / 列表 / 代码块 / 段落。
+ * 只求「能看」，不追完整语法；先转义再加标签，避免 XSS。 */
+function renderSimpleMd(text) {
+  const lines = String(text).replace(/\r\n?/g, '\n').split('\n');
+  const out = [];
+  let inCode = false;
+  let inList = false;
+  const closeList = () => { if (inList) { out.push('</ul>'); inList = false; } };
+  for (const raw of lines) {
+    if (/^```/.test(raw)) {
+      if (inCode) { out.push('</code></pre>'); inCode = false; }
+      else { closeList(); out.push('<pre class="preview-code"><code>'); inCode = true; }
+      continue;
+    }
+    if (inCode) { out.push(esc(raw)); continue; }
+    if (!raw.trim()) { closeList(); out.push(''); continue; }
+    const h = raw.match(/^(#{1,6})\s+(.*)$/);
+    if (h) {
+      closeList();
+      out.push(`<h${h[1].length}>${inlineMd(h[2])}</h${h[1].length}>`);
+      continue;
+    }
+    const li = raw.match(/^\s*(?:[-*+]|\d+\.)\s+(.*)$/);
+    if (li) {
+      if (!inList) { out.push('<ul>'); inList = true; }
+      out.push(`<li>${inlineMd(li[1])}</li>`);
+      continue;
+    }
+    closeList();
+    out.push(`<p>${inlineMd(raw)}</p>`);
+  }
+  if (inCode) out.push('</code></pre>');
+  closeList();
+  return `<div class="preview-md">${out.join('\n')}</div>`;
+}
+
+function inlineMd(s) {
+  return esc(s)
+    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+}
+
+// 弹窗底部按钮：下载 + 关闭（下载复用原有 downloadActivityFile）
+function previewFoot(path) {
+  return `<button class="btn primary" data-act="preview-download" data-path="${esc(path)}">下载</button>
+    <button class="btn" data-close-modal>关闭</button>`;
+}
+
+// 找不到目录项时仍能显示文件信息（大小/时间留空）
+function previewMeta(path) {
+  const sub = actCtx ? actCtx.sub : '';
+  const full = sub ? `${sub}/${path.split('/').pop()}` : path;
+  const item = (actCtx && actCtx.entries || []).find(e => (sub ? `${sub}/${e.name}` : e.name) === full)
+    || (actCtx && actCtx.entries || []).find(e => e.name === path.split('/').pop());
+  return item
+    ? `大小 ${esc(fmtBytes(item.size || 0))} · 修改于 ${esc(fmtTime(item.mtime))}`
+    : '';
+}
+
+async function openPreview(path) {
+  if (!actCtx) return;
+  const name = String(path).split('/').pop() || path;
+  const ext = fileExt(path);
+
+  // 压缩包不预览：直接走原有下载逻辑
+  if (PREVIEW_ARCHIVE.includes(ext)) {
+    await downloadActivityFile(path);
+    return;
+  }
+
+  // 切换文件时先释放上一个 blob URL
+  if (previewUrl) { URL.revokeObjectURL(previewUrl); previewUrl = ''; }
+  openModal('预览 · ' + name, loading(), previewFoot(path), true);
+  const foot = previewFoot(path);
+
+  // Word / Excel：浏览器无法直接渲染，只给文件信息 + 下载入口
+  if (PREVIEW_OFFICE.includes(ext)) {
+    $('modalBody').innerHTML = `<div class="preview-tip">
+      <div class="preview-tip-title">${esc(name)}</div>
+      <p>浏览器不能直接预览 ${ext.toUpperCase()} 文件，请下载后用本地软件打开。</p>
+      <p class="muted">${previewMeta(path)}</p>
+    </div>`;
+    $('modalFoot').innerHTML = foot;
+    return;
+  }
+
+  const { projectName, dirname } = actCtx;
+  const url = `${API}/projects/${enc(projectName)}/activities/${enc(dirname)}/download?path=${enc(path)}`;
+
+  // md / txt 只需要文本，其他类型拿 blob 做对象 URL
+  const wantText = ext === 'md' || ext === 'markdown' || ext === 'txt';
+  try {
+    const r = await fetch(url, { headers: token ? { 'x-token': token } : {} });
+    if (!r.ok) {
+      let msg = String(r.status);
+      try { const d = await r.json(); msg = d.detail || msg; } catch { /* ignore */ }
+      throw new Error(msg);
+    }
+    // 用户可能在 fetch 期间已关掉弹窗
+    if ($('modal').classList.contains('hidden')) return;
+
+    if (PREVIEW_IMG.includes(ext)) {
+      const blob = await r.blob();
+      previewUrl = URL.createObjectURL(blob);
+      $('modalBody').innerHTML = `<div class="preview-img-wrap">
+        <img src="${previewUrl}" alt="${esc(name)}"></div>`;
+    } else if (ext === 'pdf') {
+      const blob = await r.blob();
+      previewUrl = URL.createObjectURL(blob);
+      $('modalBody').innerHTML = `<iframe class="preview-frame" src="${previewUrl}" title="${esc(name)}"></iframe>`;
+    } else if (wantText) {
+      const text = await r.text();
+      $('modalBody').innerHTML = ext === 'txt'
+        ? `<pre class="preview-pre">${esc(text)}</pre>`
+        : renderSimpleMd(text);
+    } else {
+      // 其他格式（doc/xls/ppt 等旧格式）一律提示下载
+      $('modalBody').innerHTML = `<div class="preview-tip">
+        <div class="preview-tip-title">${esc(name)}</div>
+        <p>浏览器不能直接预览该类型文件，请下载后打开。</p>
+        <p class="muted">${previewMeta(path)}</p>
+      </div>`;
+    }
+  } catch (e) {
+    if ($('modal').classList.contains('hidden')) return;
+    $('modalBody').innerHTML = `<div class="notice">预览失败：${esc(e.message)}</div>`;
+  }
+  $('modalFoot').innerHTML = foot;
 }
 
 async function deleteActivityFile(path) {
@@ -1448,7 +1601,7 @@ async function applyLlm() {
   const style = el('#llmStyle').value;
   const tpl = el('#llmTpl').value;
   const out = el('#llmOut').value.trim();
-  if (!tpl) { toast('请选择落盘模板', 'warn'); return; }
+  if (!tpl) { toast('请先选择落盘模板（弹窗顶部「落盘模板」）', 'warn'); return; }
 
   const data = {};
   for (const ta of els('[data-llm-key]')) {
@@ -1674,7 +1827,7 @@ async function applyCaptions() {
   })).filter(c => c.caption);
   if (!captions.length) { toast('还没有图注，先点「生成图注」', 'warn'); return; }
   const tpl = el('#capTpl') ? el('#capTpl').value : '';
-  if (!tpl) { toast('请选择落盘模板', 'warn'); return; }
+  if (!tpl) { toast('请先选择落盘模板（弹窗顶部「落盘模板」）', 'warn'); return; }
   el('#capMsg').innerHTML = '<span class="muted">落盘中…</span>';
   try {
     const r = await api(actBase() + '/captions/fill', {
@@ -2501,6 +2654,8 @@ document.addEventListener('click', async e => {
       return;
     }
     if (act === 'download') { e.preventDefault(); await downloadActivityFile(node.dataset.path); return; }
+    if (act === 'preview') { e.preventDefault(); await openPreview(node.dataset.path); return; }
+    if (act === 'preview-download') { await downloadActivityFile(node.dataset.path); return; }
     if (act === 'del-file') { await deleteActivityFile(node.dataset.path); return; }
     if (act === 'open-trash') { await openTrash(); return; }
     if (act === 'restore-file') { await restoreFromTrash(node.dataset.trash); return; }
