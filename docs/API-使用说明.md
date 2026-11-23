@@ -69,11 +69,16 @@ curl --cacert sw.crt https://<host>/sw-api/api/sw/capabilities
 
 ### 1.4 文件上传限制
 
-| 项 | 值 |
-|---|---|
-| 单文件上限 | **50 MB**（API 层）；nginx 允许 100 MB |
-| 允许扩展名 | `.docx .xlsx .doc .xls .pdf .jpg .jpeg .png .gif .bmp .webp .txt .md .zip .7z` |
-| 上传端点 | `POST /api/projects/{p}/activities/{a}/upload` |
+三条上传链路的上限不同，详见 **§11.7**。速查：
+
+| 链路 | 单文件 | 单次 | 条数 |
+|---|---|---|---|
+| 活动文件 `POST /api/projects/{p}/activities/{a}/upload` | 20 MB | — | — |
+| 照片 `POST /api/sw/photos/upload` | 20 MB | 120 MB | 60 张 |
+| 压缩包 `POST /api/sw/photos/upload-archive` | 500 MB | 解压后 2 GB | 5000 条 |
+
+活动文件允许扩展名：`.docx .xlsx .doc .xls .pdf .jpg .jpeg .png .gif .bmp .webp .txt .md .zip .7z`
+nginx `client_max_body_size` 是 100 MB，API 层更严，超限由 API 回 413。
 
 ### 1.5 超时
 
@@ -166,7 +171,7 @@ DELETE /api/sw/keys/{key_id}   # 吊销（软删，写 revoked_at）
 | `FILE_EXISTS` | 409 | 目标路径已有同名文件（/api/sw/run 生成时） |
 | `KEY_NOT_FOUND` | 404 | 要吊销的 API Key 不存在 |
 | `DUPLICATE_BATCH` | 409 | 24 小时内同活动+同日期+同场景已传过（照片） |
-| `TOO_MANY_FILES` | 400 | 单请求超 200 张（照片） |
+| `TOO_MANY_FILES` | 400 | 单请求超 60 张（照片，§11.7） |
 | `FILE_TOO_LARGE` | 413 | 单文件超限 |
 | `PAYLOAD_TOO_LARGE` | 413 | 整批上传总量超限（照片 500 MB / zip 1 GB） |
 | `IMAGE_TOO_LARGE` | 400 | 单图像素超过 8000 万（防解压炸弹） |
@@ -638,7 +643,7 @@ Content-Type: multipart/form-data
 | `activity` | ✅ | 活动目录名 |
 | `shot_date` | ✅ | 拍摄日期 `YYYY-MM-DD`，不得晚于今天 |
 | `scene` | 可选 | 场景，如「主会场」 |
-| `files` | ✅ | 同名字段重复 N 次，最多 200 张，单张 ≤50MB，整批 ≤500MB |
+| `files` | ✅ | 同名字段重复 N 次，**最多 60 张，单张 ≤20MB，整批 ≤120MB**（§11.7） |
 | `allow_duplicate` | 可选 | `true` 跳过 L2/L3 去重 |
 
 ```json
@@ -673,7 +678,7 @@ Content-Type: multipart/form-data
 压缩包**一级目录名即活动目录名**（支持前缀匹配，`11` 可匹配 `11-共治行动-第一期`）。
 
 预算（读取前按 zip 中央目录校验，超限直接 400/413，不解压）：
-压缩包 ≤1GB、条目 ≤5000、解压后总量 ≤2GB；单条压缩比 >200 且原始大小 >10MB
+压缩包 ≤500MB、条目 ≤5000、解压后总量 ≤2GB；单条压缩比 >200 且原始大小 >10MB
 视为可疑压缩炸弹，返回 `ARCHIVE_SUSPICIOUS`。
 
 **图片像素闸门同样生效**：逐条读取后、落盘前会做像素检查，
@@ -915,11 +920,19 @@ POST /api/projects/{name}/activities/{dirname}/trash/restore  # 恢复
 | 照片上传 | **20MB**（原 50） | **120MB**（原 500） | **60 张**（原 200） | 像素 8000 万 |
 | zip 上传 | **500MB**（原 1GB） | 解压后 2GB | 5000 条 | 压缩比 200x |
 
+收紧理由（2026-11-23）：项目方明确「那么多图片不上传」，一次活动实际照片
+在 50 张上下；单次几千张散图不是支持场景，超了应先筛选或打 zip 走归档。
+单文件 20MB 对活动材料足够——实测最大的计划书/总结报告在 600KB 量级，
+扫描件 PDF 也远小于 20MB。
+
+超限响应：API 回 `413`（`FILE_TOO_LARGE` / `PAYLOAD_TOO_LARGE` /
+`TOO_MANY_FILES`），不会留半截文件。
+
 ## 12. 已知限制
 
 | 限制 | 说明 |
 |---|---|
-| 活动目录内无删除 API | 只能删单个文件（移 `.trash`），不能删目录 |
+| 删除只到文件级 | 可删单个文件（软删到 `.trash`，见 §11.6）；**不能删整个活动目录** |
 | `tasks` 端点返回 501 | 无真实异步任务，所有操作同步完成 |
 | 照片只收 zip | `.7z`/`.rar` 需客户端先解压 |
 | 照片原图不保留 | 压到 2560px q95（约 1/3 体积） |
