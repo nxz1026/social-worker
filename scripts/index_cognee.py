@@ -110,6 +110,17 @@ def drop_md_with_twin(paths: list[Path]) -> list[Path]:
     return [p for p in paths if not (_is_md(p) and _twin(p) is not None)]
 
 
+# 明确不入知识库的材料（用户 2026-11-24：支出证明只存档）。
+# 注意这里按「文件名关键词」匹配，因为文件可能被改名带序号。
+# 支出证明是纯财务凭据，进图谱只会制造无关实体（单位名、金额）噪音。
+INDEX_EXCLUDE_KEYWORDS = ("支出证明",)
+
+
+def _excluded(path: Path) -> bool:
+    """文件名命中排除关键词就不入图。"""
+    return any(kw in path.name for kw in INDEX_EXCLUDE_KEYWORDS)
+
+
 def _visible(path: Path, base: Path) -> bool:
     """相对 base 的路径里有没有以 `.` 开头的段。
 
@@ -120,7 +131,9 @@ def _visible(path: Path, base: Path) -> bool:
         parts = path.relative_to(base).parts
     except ValueError:
         return False
-    return not any(part.startswith(".") for part in parts)
+    if any(part.startswith(".") for part in parts):
+        return False
+    return not _excluded(path)
 
 
 def _candidate_files(base: Path) -> list[Path]:

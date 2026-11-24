@@ -239,6 +239,13 @@ def _activity_mtime(act_dir: Path) -> float:
     return latest
 
 
+# 不在「生成材料」里出现的模板：生成出来也没用，只能人工按实际票据填
+_NO_GENERATE = {
+    "决算表": "需按实际票据人工填写，系统只做校验不生成",
+    "报销单": "需按实际票据人工填写，系统只做校验不生成",
+}
+
+
 @router.get("/api/templates")
 def api_templates(user=Depends(current_user)):
     """列模板库里的 docx/xlsx 及占位符。"""
@@ -254,9 +261,15 @@ def api_templates(user=Depends(current_user)):
         except Exception:
             # 单个模板损坏不该让整个列表 500
             placeholders = []
-        out.append({"name": p.stem,
+        name = p.stem
+        out.append({"name": name,
                     "kind": p.suffix.lower().lstrip("."),
-                    "placeholders": placeholders})
+                    "placeholders": placeholders,
+                    # 有些模板只用于「上传后校验」，不该出现在生成列表里：
+                    # 决算表与报销单必须由人按实际票据填写，系统生成出来的一次性
+                    # 都是空壳（2026-11-24 用户明确要求）。
+                    "fillable": name not in _NO_GENERATE,
+                    "reason": _NO_GENERATE.get(name, "")})
     return out
 
 

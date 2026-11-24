@@ -1512,7 +1512,10 @@ function prefillData(proj, detail, dirname) {
 async function openFillModal() {
   if (!actCtx) return;
   const { projectName, dirname, project, detail } = actCtx;
-  const tpls = await ensureTemplates();
+  const allTpls = await ensureTemplates();
+  // 决算表/报销单只用于「上传后校验」：系统生成出来都是空壳，必须人工按
+  // 实际票据填。后端在 /api/templates 用 fillable=false 标出来（2026-11-24）。
+  const tpls = allTpls.filter(t => t.fillable !== false);
   if (!tpls.length) { toast('模板库为空，请检查 templates/library', 'warn'); return; }
   const defaults = prefillData(project, detail, dirname);
   const options = tpls.map(t => `<option value="${esc(t.name)}">${esc(t.name)}（${esc(t.kind)}）</option>`).join('');
