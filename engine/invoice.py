@@ -13,6 +13,8 @@
 from __future__ import annotations
 
 import re
+
+from . import calc as _calc
 from pathlib import Path
 
 # 发票所在的活动子目录
@@ -26,8 +28,16 @@ IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 
 # 文件名里的四段：日期 / 票种 / 金额 / 发票号
 _DATE_NAME_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+# 归档序号前缀 + 日期：「12-1-20261104」「12-3-20261105」
+# 日期三种写法都要认：
+#   2026-11-04（标准） / 20261104（紧凑） / 12-1-20261104（归档序号+紧凑）
+_SEQ_DATE_RE = re.compile(r"^(?:\d{1,2}-\d{1,2}-)?(\d{4}-?\d{2}-?\d{2})$")
 _AMOUNT_NAME_RE = re.compile(r"^(\d+(?:\.\d+)?)\s*元$")
 _INVOICE_NO_RE = re.compile(r"^\d{20}$")
+# 定额发票常见 6~12 位票号，常写成「定额发票01786710」
+_LOOSE_NO_RE = re.compile(r"(?:定额发票|发票号?|NO|No)[:：]?(\d{6,20})")
+# 非发票类凭据：收据、采购订单、小票 —— 也算有效支出凭证
+_RECEIPT_WORDS = ("收据", "订单", "小票", "清单")
 
 # 正文里的金额：优先「壹仟壹佰玖拾圆整 ¥1190.00」，其次任意 ¥ 金额取最大
 _UPPER_AMOUNT_RE = re.compile(r"[¥￥]\s*([\d,]+\.\d{2})")
@@ -53,18 +63,39 @@ def _from_name(stem: str) -> dict:
     if len(parts) < 4:
         return {}
 
-    date = next((p for p in parts if _DATE_NAME_RE.match(p)), "")
+    # 真实票据名常带归档序号前缀（「12-1-20261104」「12-3-20261105」），
+    # 日期段本身还是 YYYY-MM-DD，先剥掉「NN-N-」再匹配
+    def _date_of(token: str) -> str:
+        m = _SEQ_DATE_RE.match(token)
+        if not m:
+            return ""
+        raw = m.group(1)
+        # 统一成 YYYY-MM-DD（20261104 → 2026-11-04）
+        if len(raw) == 8 and raw.isdigit():
+            return f"{raw[:4]}-{raw[4:6]}-{raw[6:]}"
+        return raw
+
+    date = next((_date_of(p) for p in parts if _date_of(p)), "")
+    # 票号：标准电子发票 20 位；定额发票常见 8 位，夹在「定额发票01786710」里。
+    # 收据 / 采购订单可能根本没有票号 —— 只要有日期和金额就认，票号留空。
     invoice_no = next((p for p in reversed(parts) if _INVOICE_NO_RE.match(p)), "")
+    if not invoice_no:
+        for p in reversed(parts):
+            m = _LOOSE_NO_RE.search(p)
+            if m:
+                invoice_no = m.group(1)
+                break
     amount_match = next((_AMOUNT_NAME_RE.match(p) for p in parts
                          if _AMOUNT_NAME_RE.match(p)), None)
-    if not (date and invoice_no and amount_match):
+    if not (date and amount_match):
         return {}
 
     amount_token = amount_match.group(0)
     # 票种（电子发票 / 增值税发票）不是商户，先剔掉
     kind = next((p for p in parts if "发票" in p), "")
+    # middle 不能含日期段本身（真实票据日期段带序号前缀，与 date 不等）
     middle = [p for p in parts
-              if p not in (date, invoice_no, amount_token, kind)]
+              if p not in (invoice_no, amount_token, kind) and _date_of(p) != date]
     if not middle:
         return {}
 
@@ -323,6 +354,46 @@ def _reimburse_total(act_dir: Path) -> tuple[float | None, str]:
         workbook.close()
 
 
+_UPPER_RE = re.compile(r"[零壹贰叁肆伍陆柒捌玖拾佰仟万亿元角分整]{2,}")
+
+
+def _norm_upper(text: str) -> str:
+    """归一化大写金额：去掉空格与「整」（340.90 既可写「…玖角整」也可「…玖角」）。"""
+    return re.sub(r"\s+", "", str(text or "")).replace("整", "")
+
+
+def _reimburse_upper(act_dir: Path) -> tuple[str | None, str]:
+    """从报销单里取「人民币大写」的值。找不到返回 (None, 说明)。"""
+    act = Path(act_dir)
+    matches = []
+    for prefix in REIMBURSE_PREFIXES:
+        matches.extend(sorted(act.glob(f"{prefix}-*.xlsx")))
+    if not matches:
+        matches = sorted(act.glob("报销单*.xlsx"))
+    if not matches:
+        return None, "报销单未找到"
+    try:
+        import openpyxl
+        wb = openpyxl.load_workbook(str(matches[0]), data_only=True)
+        for ws in wb.worksheets:
+            for row in ws.iter_rows():
+                for cell in row:
+                    if "大写" not in str(cell.value or ""):
+                        continue
+                    # 大写值通常在同一行右侧的某个单元格
+                    for other in row:
+                        if other.column <= cell.column:
+                            continue
+                        m = _UPPER_RE.search(str(other.value or ""))
+                        if m:
+                            wb.close()
+                            return m.group(0), matches[0].name
+        wb.close()
+    except Exception:
+        return None, "读取失败"
+    return None, "未找到大写栏"
+
+
 def cross_check(act_dir: Path) -> dict:
     """三表金额校验，返回决算 / 报销 / 发票三个口径与差异。
 
@@ -338,6 +409,20 @@ def cross_check(act_dir: Path) -> dict:
     invoice_total = round(sum(item["amount"] for item in parsed), 2) if parsed else None
 
     issues: list[str] = []
+    # 报销单里若有「人民币大写」，核对它与合计是否一致。
+    # 实测 13-爱邻议事会：合计 340.90，大写写「叁佰肆拾元玖角肆分」(340.94)，
+    # 差 0.04 却无人提示 —— 这是手填表格最常见的笔误。
+    if reimburse is not None:
+        upper, upper_src = _reimburse_upper(act_dir)
+        if upper:
+            try:
+                expected = _calc.rmb_upper(reimburse)
+            except Exception:
+                expected = ""
+            if expected and _norm_upper(upper) != _norm_upper(expected):
+                issues.append(
+                    f"报销单金额大写与合计不符：合计 {reimburse:g} 元应为"
+                    f"「{expected}」，实际写「{upper}」（{upper_src}）")
     if decision is None:
         issues.append(f"决算合计未取到：{decision_src}")
     if reimburse is None:

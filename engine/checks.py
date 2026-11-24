@@ -587,16 +587,19 @@ def merge_review_status(result: dict, reviews: dict) -> dict:
             return "ok"
         return str(it.get("status") or "")
 
+    # 「可交付」= 所有必需项都齐备（含人工签字确认的）。
+    # 原来还要求「每一项都有核对记录」，实测 45 个活动没有一个能满足
+    # （最高 10/14）—— 社工不会对缺文件的项逐项点核对，那条要求让
+    # deliverable 变成恒为 false 的死规则（2026-11-24 审计发现）。
+    #
+    # 判据必须与 complete 同源：都用 _effective_status。
+    # 曾经这里写成 in ("ok","partial")，把未签字的 partial 也算齐备，
+    # 于是出现 complete=False 却 deliverable=True 的自相矛盾。
     covered = sum(1 for it in required
-                  if _effective_status(it) in ("ok", "partial"))
-    # 「可交付」必须逐项判断：必需项既齐全、又**每一项**都有核对记录。
-    # 原来用 reviewed_count >= len(required) 做计数比较，而 reviewed_count
-    # 把 na 项也算进去 —— 只核对 13 个必需项 + 第 15 项「其他」（恒为 na）
-    # 就能凑够 14，把「可交付」点亮（审计 R-03，已复现）。
+                  if _effective_status(it) == "ok")
     reviewed_required = sum(1 for it in required if it.get("review"))
-    deliverable = (len(required) > 0
-                   and covered == len(required)
-                   and reviewed_required == len(required))
+    all_ok = all(_effective_status(it) == "ok" for it in required)
+    deliverable = len(required) > 0 and all_ok
 
     # 物理计数保持 check() 的原值（文件到底在不在）。
     # 曾经把 ok_count/missing_count 直接改成「签字后的有效状态」，后果是

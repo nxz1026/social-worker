@@ -198,7 +198,12 @@ def test_merge_adds_fields_and_counts(tmp_path):
 
 
 def test_deliverable_all_required_reviewed(tmp_path):
-    """所有必需项都核对过 → deliverable；抹掉一项 → False。"""
+    """deliverable = 必需项齐备（2026-11-24 起不再要求逐项核对）。
+
+    旧规则要求「每一项都有核对记录」，实测 45 个真实活动没有一个满足
+    （最高 10/14）——社工不会对缺文件的项逐项点核对，那条让 deliverable
+    变成恒为 false 的死规则。核对进度改由 reviewed_required_count 单独展示。
+    """
     d = _act(tmp_path)
     _full_act(d)
     required = _required_nos(d)
@@ -213,7 +218,9 @@ def test_deliverable_all_required_reviewed(tmp_path):
                             "reviewed_note": "", "signed": False}
                        for no in required[:-1]})
     r = checks.merge_review_status(checks.check(d), checks.read_reviews(d))
-    assert r["deliverable"] is False
+    # 齐备不变 → 仍可交付；只是核对进度少了一项
+    assert r["deliverable"] is True
+    assert r["reviewed_required_count"] == len(required) - 1
 
 
 # ---------- API ----------

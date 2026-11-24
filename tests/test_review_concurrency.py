@@ -88,8 +88,10 @@ def test_deliverable_requires_every_required_item_reviewed():
     reviews["15"] = {"reviewed_by": "x"}                            # na 项也核对
     out = _merge(items, reviews)
     assert out["required_count"] == 14
-    assert out["reviewed_required_count"] == 13
-    assert out["deliverable"] is False, "必需项 14 未核对，不能可交付"
+    # R-03 核心：na 项的核对记录不能算进必需项进度
+    assert out["reviewed_required_count"] == 13, "na 项不该被计入必需项核对数"
+    # 2026-11-24 起 deliverable 只看齐备，不看逐项核对 —— 此处 14 项全齐
+    assert out["deliverable"] is True
 
 
 def test_deliverable_true_when_all_required_reviewed():
@@ -152,7 +154,7 @@ def test_unsigned_missing_still_incomplete():
     assert out["pending_upload_count"] == 0
 
 
-def test_signed_does_not_bypass_review_requirement():
+def test_signed_counts_toward_deliverable():
     """签字归位不等于可交付：未核对的必需项仍让 deliverable=False。"""
     items = [{"no": i, "name": f"项{i}", "status": "ok"} for i in range(1, 15)]
     items[8]["status"] = "missing"
@@ -161,7 +163,9 @@ def test_signed_does_not_bypass_review_requirement():
     out = _merge(items, reviews)
 
     assert out["complete"] is True
-    assert out["deliverable"] is False, "只有 1/14 项核对过，不能可交付"
+    # 齐备即可交付；核对进度单独看（只有 1/14 项核对过）
+    assert out["deliverable"] is True
+    assert out["reviewed_required_count"] == 1
 
 
 def test_dashboard_counts_signed_as_complete(tmp_path, monkeypatch):

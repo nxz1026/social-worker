@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from . import projects
+from . import checks as checks_mod
 from .ingest import read_activity_yaml
 
 # 中国标准时间（UTC+8），服务器时区不可靠时也能拿到当天日期
@@ -298,6 +299,64 @@ def expand_plan_rows(data: dict, plan: dict,
             data[total] = _material_total(rows, limit)
 
 
+_BACKFILL_LABELS = {
+    "活动地点": ("活动地点", "地点", "地　点"),
+    "服务对象": ("服务对象", "对象", "对　象", "参与对象"),
+    "预计人数": ("预计参与人数", "预计人数", "参与人数"),
+    "实际人数": ("实际人数", "人数"),
+    "活动背景内容": ("活动背景",),
+    "活动目的内容": ("活动目的",),
+}
+
+
+def backfill_from_materials(act_dir: Path) -> dict:
+    """从已生成/已归档的计划书、总结报告里回读字段，补 activity.yaml 的空白。
+
+    activity.yaml 通常只有 code/时间/社工 几个键，地点、对象、人数、背景、
+    目的这些要么在 01-计划书 里（最早成稿），要么在 06-总结报告 里（实际发生）。
+    原来 build_data 只读 yaml，于是十几万的计划书生成出来这些格子全空
+    （2026-11-24 审计实测：活动13 生成件「活动地点：」后面什么都没有）。
+
+    只补 yaml 里没有的，不覆盖人工填过的值。读不到就返回空 dict。
+    """
+    act_dir = Path(act_dir)
+    if not act_dir.is_dir():
+        return {}
+    out: dict[str, object] = {}
+    # 计划书优先（计划数据），总结报告补实际人数
+    sources = [
+        (".docx", ("活动计划",), ("活动地点", "服务对象", "预计人数", "活动背景内容", "活动目的内容")),
+        (".docx", ("总结报告",), ("实际人数",)),
+    ]
+    for _ext, item_names, keys in sources:
+        path = None
+        for name in item_names:
+            path = checks_mod.find_first_file(act_dir, name)
+            if path is not None:
+                break
+        if path is None:
+            continue
+        try:
+            from . import markdown as _markdown
+            md = _markdown.docx_to_md(path)
+        except Exception:
+            continue
+        for key in keys:
+            if key in out:
+                continue
+            for label in _BACKFILL_LABELS.get(key, (key,)):
+                # 真实模板常用散空格对齐标签（「人　　数：」「对　　象：」），
+                # 所以把标签字符之间也允许空白
+                pattern = r"\s*".join(re.escape(ch) for ch in label)
+                m = re.search(rf"{pattern}\s*[：:]\s*([^\n|]{{1,80}})", md)
+                if m:
+                    value = m.group(1).strip()
+                    if value and "{{" not in value:
+                        out[key] = value
+                    break
+    return out
+
+
 def build_data(project_name: str, activity_dir: str,
                extra: dict | None = None, notes: list[str] | None = None,
                user: dict | None = None) -> dict:
@@ -309,6 +368,8 @@ def build_data(project_name: str, activity_dir: str,
     """
     project = _load_project(project_name)
     act_dir = _resolve_activity_dir(project_name, activity_dir)
+    # 从 01-计划书 / 06-总结报告 回读 yaml 里没有的字段
+    _backfill = backfill_from_materials(act_dir)
     activity = read_activity_yaml(act_dir) if act_dir.is_dir() else {}
 
     proj = project.get("project") if isinstance(project.get("project"), dict) else {}
@@ -358,10 +419,14 @@ def build_data(project_name: str, activity_dir: str,
         "活动时间_cn": _cn_date(activity.get("活动时间") or activity.get("time")
                                 or activity.get("date")),
         "活动简介": _text(activity.get("活动简介")) or _text(activity.get("简介")),
-        "活动地点": _text(activity.get("活动地点")) or _text(activity.get("place")),
-        "服务对象": _text(activity.get("服务对象")),
-        "预计人数": _count_text(activity.get("预计人数")),
-        "实际人数": _count_text(activity.get("实际人数")),
+        "活动地点": (_text(activity.get("活动地点")) or _text(activity.get("place"))
+                     or _text(_backfill.get("活动地点"))),
+        "服务对象": (_text(activity.get("服务对象"))
+                     or _text(_backfill.get("服务对象"))),
+        "预计人数": _count_text(activity.get("预计人数")
+                              or _backfill.get("预计人数")),
+        "实际人数": _count_text(activity.get("实际人数")
+                              or _backfill.get("实际人数")),
         "执行社工": _text(activity.get("执行社工")),
         "执行社工团队": _text(activity.get("执行社工团队")),
         "出纳": _text(activity.get("出纳")),
