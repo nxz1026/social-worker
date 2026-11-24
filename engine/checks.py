@@ -598,18 +598,26 @@ def merge_review_status(result: dict, reviews: dict) -> dict:
                    and covered == len(required)
                    and reviewed_required == len(required))
 
-    # 顶层完整性也按「签字确认后的有效状态」重算：
-    # 原本 complete 来自 check() 的 partial/missing 计数，签字后仍为 False，
-    # 用户点了签字活动依然显示未完成（本次要解决的问题）。
+    # 物理计数保持 check() 的原值（文件到底在不在）。
+    # 曾经把 ok_count/missing_count 直接改成「签字后的有效状态」，后果是
+    # 一个物理缺 8 项的活动，因为签字就显示「齐 14 / 缺 0 / 完成」，
+    # 对甲方交付判断是失真（2026-11-24 审计发现）。
+    # 现在物理与有效分开：*_count 是物理事实，effective_* 才是叠加人工确认后的。
     eff_ok = sum(1 for it in items if _effective_status(it) in ("ok", "partial"))
     eff_partial = sum(1 for it in items
                       if it.get("status") == "partial" and not it.get("signed"))
     eff_missing = sum(1 for it in items
                       if it.get("status") == "missing" and not it.get("signed"))
-    result["ok_count"] = eff_ok
-    result["partial_count"] = eff_partial
-    result["missing_count"] = eff_missing
+    result["effective_ok_count"] = eff_ok
+    result["effective_partial_count"] = eff_partial
+    result["effective_missing_count"] = eff_missing
+    # complete 仍按有效状态 —— 「签了字就算完成」是用户明确要的产品语义，
+    # 但必须同时能看到 effective_missing_count，不能只剩一个被修饰过的数。
     result["complete"] = eff_partial == 0 and eff_missing == 0
+    # 物理缺失但已签字的项数：界面上要能看到「这些其实是空着的」
+    result["signed_absent_count"] = sum(
+        1 for it in items
+        if it.get("status") == "missing" and it.get("signed"))
     result["items"] = items
     result["reviewed_count"] = reviewed_count
     # 必需项的核对数：deliverable 用的就是这个口径，前端展示也用它，

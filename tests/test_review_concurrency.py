@@ -64,7 +64,20 @@ def test_review_and_not_applicable_do_not_clobber(tmp_path):
 
 
 def _merge(items: list[dict], reviews: dict) -> dict:
-    return checks.merge_review_status({"items": items}, reviews)
+    """模拟 check() 的真实输出：物理计数由 items 现状算出。
+
+    2026-11-24 起 merge_review_status 不再覆盖物理计数（ok/partial/missing），
+    只额外给 effective_* 与 signed_absent_count —— 否则一个物理缺 8 项的活动
+    签个字就显示「齐 14 / 缺 0」，交付判断失真。
+    """
+    base = {
+        "items": items,
+        "ok_count": sum(1 for it in items if it["status"] == "ok"),
+        "partial_count": sum(1 for it in items if it["status"] == "partial"),
+        "missing_count": sum(1 for it in items if it["status"] == "missing"),
+        "na_count": sum(1 for it in items if it["status"] == "na"),
+    }
+    return checks.merge_review_status(base, reviews)
 
 
 def test_deliverable_requires_every_required_item_reviewed():
@@ -101,7 +114,7 @@ def test_signed_partial_counts_as_complete():
     out = _merge(items, reviews)
 
     assert out["complete"] is True
-    assert out["partial_count"] == 0
+    assert out["effective_partial_count"] == 0
     assert out["pending_upload_count"] == 1
     item8 = [it for it in out["items"] if it["no"] == 8][0]
     assert item8["pending_upload"] is True
@@ -118,8 +131,11 @@ def test_signed_missing_counts_as_complete():
     out = _merge(items, reviews)
 
     assert out["complete"] is True
-    assert out["missing_count"] == 0
+    assert out["effective_missing_count"] == 0
     assert out["pending_upload_count"] == 1
+    # 物理上仍然是 missing（文件确实没有），只是不再卡完成度
+    assert out["missing_count"] == 1
+    assert out["signed_absent_count"] == 1
 
 
 def test_unsigned_missing_still_incomplete():
@@ -132,6 +148,7 @@ def test_unsigned_missing_still_incomplete():
 
     assert out["complete"] is False
     assert out["missing_count"] == 1
+    assert out["effective_missing_count"] == 1
     assert out["pending_upload_count"] == 0
 
 

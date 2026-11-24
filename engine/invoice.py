@@ -240,6 +240,21 @@ def _docx_text(path: Path) -> str:
     return "\n".join(parts)
 
 
+def _doc_text(path: Path) -> str:
+    """读 .docx / .doc 的纯文本。.doc 走 soffice 转换（已有成熟实现）。
+
+    转换失败返回空串，由调用方按「取不到合计」处理，不让三表校验抛异常。
+    """
+    path = Path(path)
+    if path.suffix.lower() == ".docx":
+        return _docx_text(path)
+    try:
+        from . import markdown as _markdown
+        return _markdown.doc_to_md(path)
+    except Exception:
+        return ""
+
+
 def _decision_total(act_dir: Path) -> tuple[float | None, str]:
     """决算合计：08-*.docx 里「合计」后面的金额。
 
@@ -251,13 +266,15 @@ def _decision_total(act_dir: Path) -> tuple[float | None, str]:
     # 原来只 glob「08-*.docx」，遇到无前缀的决算表直接判成缺失，
     # 导致三表校验永远 amount_consistent=False（E2E 实测）。
     act = Path(act_dir)
-    matches = sorted(act.glob(f"{DECISION_PREFIX}-*.docx"))
+    # 真实数据里约四成是老的 .doc 格式（实测 40 个 .doc vs 86 个 .docx），
+    # 原来只 glob .docx，这些活动的决算合计永远取不到、三表校验永远不一致。
+    matches = sorted(act.glob(f"{DECISION_PREFIX}-*.doc*"))
     if not matches:
-        matches = sorted(act.glob("决算表*.docx"))
+        matches = sorted(act.glob("决算表*.doc*"))
     if not matches:
         return None, f"{DECISION_PREFIX}-决算表.docx / 决算表.docx"
 
-    text = _docx_text(matches[0])
+    text = _doc_text(matches[0])
     found = re.findall(r"合计[^0-9]*([\d.]+)", text)
     for raw in reversed(found):
         try:

@@ -97,7 +97,14 @@ function reviewText(it) {
 
 function checkSummary(check) {
   const verdict = check.complete ? '<span class="badge ok">完整</span>' : '<span class="badge warn">未完整</span>';
-  return `齐 ${check.ok_count} 项 · 待补 ${check.partial_count || 0} 项 · 缺 ${check.missing_count} 项 · 不适用 ${check.na_count} 项 ${verdict}`;
+  /* 物理计数（齐/待补/缺）直接来自后端，不叠加签字。
+   * 另起一个标记说明「有几项是靠签字补位的」—— 否则一个物理缺 8 项的
+   * 活动挂上签字后只显示「完整」，对交付判断是失真（2026-11-24 审计）。*/
+  const signedAbsent = Number(check.signed_absent_count || 0);
+  const gap = signedAbsent
+    ? ` <span class="badge warn" title="这些项没有文件，仅凭人工签字标记为完成">签字补位 ${signedAbsent}</span>`
+    : '';
+  return `齐 ${check.ok_count} 项 · 待补 ${check.partial_count || 0} 项 · 缺 ${check.missing_count} 项 · 不适用 ${check.na_count} 项 ${verdict}${gap}`;
 }
 
 function reviewSummary(check) {
