@@ -44,6 +44,26 @@ def readme_filename(dirname: str = "", project_name: str = "") -> str:
 # 活动目录里属于程序内部、不该出现在文件列表里的文件
 _INTERNAL_FILES = {"activity.yaml", README_NAME}
 
+# 判定「这个文件是不是我生成的导航页」的唯一口径。
+# 新增生成物时只要在这里登记，索引脚本与核对逻辑都会自动跳过，
+# 不需要各自维护一份关键词表（2026-11-24：因为两处各写一份、后缀写成
+# 下划线而实际是连字符，导致 45 个索引页仍被送进知识图谱）。
+_INDEX_MARKERS = ("-资料索引.md", "项目资料索引.md")
+_INDEX_DOCX_NAMES = {"活动目录.docx", "项目管理目录.docx"}
+
+
+def is_generated_nav(path: Path) -> bool:
+    """是不是本系统生成的导航/索引文件（活动索引 md、项目索引 md、目录 docx）。
+
+    这些文件的内容就是材料清单表（文件名 + 核对状态），没有业务知识，
+    文件名本身已由对应原件入图。任何「要不要索引/要不要核对」的判断
+    都应调用这个函数，不要自己写关键词。
+    """
+    name = Path(path).name
+    if any(name.endswith(m) for m in _INDEX_MARKERS):
+        return True
+    return name in _INDEX_DOCX_NAMES
+
 
 def _is_readme_file(name: str) -> bool:
     """是不是本模块生成的索引文件（含新的带前缀命名）。"""

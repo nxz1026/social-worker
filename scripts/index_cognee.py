@@ -28,7 +28,8 @@ sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(SCRIPT_DIR))
 
 from config import load_config  # noqa: E402
-from engine import cognee_index  # noqa: E402
+from engine import cognee_index
+from engine import readme as _readme  # noqa: E402
 from engine.markdown import file_to_md  # noqa: E402
 
 DOC_EXTS = {".docx", ".doc", ".xlsx", ".pdf"}
@@ -115,10 +116,21 @@ def drop_md_with_twin(paths: list[Path]) -> list[Path]:
 # 支出证明是纯财务凭据，进图谱只会制造无关实体（单位名、金额）噪音。
 INDEX_EXCLUDE_KEYWORDS = ("支出证明",)
 
-
+# 自动生成的索引/目录文件不入图：
+# - `_X-资料索引.md`（活动级）、`_X-项目资料索引.md`（项目级）：内容就是材料清单
+#   表，只有文件名和核对状态，没有业务知识；文件名已由各自 docx 入图
+# - `活动目录.docx` / `项目管理目录.docx`：同样是目录清单
+# 不入图能避免两类噪音：① 45 个活动索引里 30 个指向空目录；
+# ② 索引里的 [[链接]] 文本会在图谱里制造指向不存在节点的边。
 def _excluded(path: Path) -> bool:
-    """文件名命中排除关键词就不入图。"""
-    return any(kw in path.name for kw in INDEX_EXCLUDE_KEYWORDS)
+    """判定文件是否不入知识图谱。
+
+    导航/索引文件走 engine.readme.is_generated_nav() —— 单一口径，
+    新增生成物时只改那边一处，这里自动跟随，不必维护第二份规则。
+    """
+    if any(kw in path.name for kw in INDEX_EXCLUDE_KEYWORDS):
+        return True
+    return _readme.is_generated_nav(path)
 
 
 def _visible(path: Path, base: Path) -> bool:
