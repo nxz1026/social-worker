@@ -10,7 +10,7 @@ import pytest
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
-from engine.markdown import docx_to_md, file_to_md, xlsx_to_md  # noqa: E402
+from engine.markdown import docx_to_md, file_to_md, md_to_text, xlsx_to_md  # noqa: E402
 
 # 项目资料默认在生产目录；测试机没有时用 SOCIAL_WORK_PROJECTS 指到别处。
 PROJECTS = Path(os.environ.get("SOCIAL_WORK_PROJECTS",
@@ -47,3 +47,38 @@ def test_file_to_md_unsupported_returns_empty(tmp_path):
     path = tmp_path / "a.txt"
     path.write_text("hello", encoding="utf-8")
     assert file_to_md(path) == ""
+
+
+# ---------- .md：Obsidian 骨架直接入图（2026-11-24 用户要求 .md 也要索引） ----------
+
+def test_md_to_text_keeps_body(tmp_path):
+    path = tmp_path / "06-总结报告.md"
+    path.write_text("# 06-总结报告\n\n## 摘要\n\n本次活动共 18 人参与。",
+                    encoding="utf-8")
+    text = md_to_text(path)
+    assert "本次活动共 18 人参与" in text
+    assert "# 06-总结报告" in text
+
+
+def test_md_to_text_strips_front_matter_and_wikilinks(tmp_path):
+    path = tmp_path / "a.md"
+    path.write_text("---\ntype: docx\n---\n\n正文 [[项目A|亲邻惠里]] 与 [[活动B]]\n"
+                    "![[图片.png]]\n---\n结尾", encoding="utf-8")
+    text = md_to_text(path)
+    assert "type: docx" not in text, "YAML front-matter 不入正文"
+    assert "亲邻惠里" in text and "[[" not in text
+    assert "活动B" in text
+    assert "图片.png" not in text, "Obsidian 嵌入行不产生噪音"
+    assert "结尾" in text, "正文里的 --- 分割线不能连内容一起吃掉"
+
+
+def test_file_to_md_dispatches_markdown(tmp_path):
+    for suffix in (".md", ".markdown"):
+        path = tmp_path / f"x{suffix}"
+        path.write_text("正文内容", encoding="utf-8")
+        assert "正文内容" in file_to_md(path)
+
+
+def test_md_missing_file_raises(tmp_path):
+    with pytest.raises(RuntimeError):
+        md_to_text(tmp_path / "不存在.md")

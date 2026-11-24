@@ -44,14 +44,24 @@ pytestmark = pytest.mark.skipif(
 
 # 模板名 → (task, 该模板的 LLM 字段是否必填)
 # 判定依据见工单报告 A 步的 18 行判定表：
-#   需要 LLM 的 5 个模板中，活动通知的正文段没有对应 task 字段，列为待确认，不在此表。
+#   需要 LLM 的 5 个模板全部有 task 了。活动通知的正文段现在由 task `notice`
+#   生成「活动简介」一句（2026-11-24），它是**可选** LLM：正文段之外的
+#   时间/地点/对象/联系人都是纯数据，不勾 LLM 也能出文。
 COVERED = {
     "计划书": ("plan", True),
     "简报": ("brief", True),
     "总结报告": ("summary", True),
     "监督记录": ("supervision", True),
+    "活动通知": ("notice", False),
 }
 
+
+# 字段已在模板里以「派生占位符」形式出现，不需要 {{{{字段}}}} 本身。
+# 活动通知：正文段写的是 `{{{{活动简介_suffix}}}}`，它是 build_data 里由
+# 「活动简介」派生的（空值不补「，」），LLM 只产出「活动简介」。
+_DERIVED_PLACEHOLDERS = {
+    "活动简介": "活动简介_suffix",
+}
 
 # 由 activity.yaml / calc / 项目数据提供的字段，不归 LLM 生成
 _ACTIVITY_DATA_FIELDS = {
@@ -133,6 +143,11 @@ def test_template_placeholders_scanned(name):
                 assert hit, (
                     f"{name}.docx 缺少「{field}.{sub}」的占位符"
                     f"（应为 {expect}）")
+        elif field in _DERIVED_PLACEHOLDERS:
+            derived = _DERIVED_PLACEHOLDERS[field]
+            assert derived in found, (
+                f"{name}.docx 既没有 {{{{{field}}}}}，也没有派生占位符 "
+                f"{{{{{derived}}}}} —— task {task!r} 生成了也填不进去")
         else:
             assert field in found, (
                 f"{name}.docx 缺少占位符 {{{{{field}}}}} —— "
@@ -321,21 +336,29 @@ def test_frontend_map_only_points_at_real_tasks():
 
 
 def test_required_llm_contains_mapping_keys():
-    """REQUIRED_LLM 与 LLM_TASK_BY_TPL 的 key 必须一致，否则勾选框行为错乱：
-    只在一处有的模板，要么被静默降级成普通 fill，要么强制勾选但走错任务。"""
+    """REQUIRED_LLM 必须是 LLM_TASK_BY_TPL 的 key 的子集，否则勾选框行为错乱。
+
+    原来要求两者完全相等；活动通知加入后两者不再相等 —— 它是**可选** LLM
+    （2026-11-24 工单 B3 明确要求「REQUIRED_LLM 不要加活动通知」）。
+    真正要守的是：REQUIRED_LLM 里的模板必须有映射（否则强制勾选却走错任务），
+    且活动通知不能进 REQUIRED_LLM（否则用户没法关掉 LLM）。
+    """
     mapping = set(_parse_llm_task_map())
     required = set(_parse_required_llm())
-    assert mapping == required, (
-        f"两者不一致：只在 LLM_TASK_BY_TPL={sorted(mapping - required)}；"
-        f"只在 REQUIRED_LLM={sorted(required - mapping)}")
+    assert required <= mapping, (
+        f"REQUIRED_LLM 里有模板没有 LLM 映射：{sorted(required - mapping)}")
+    assert "活动通知" in mapping, "活动通知必须有 notice 映射，否则兜底成 plan"
+    assert "活动通知" not in required, "活动通知是可选 LLM，不该被强制勾选"
 
 
 def test_covered_table_matches_frontend():
-    """本文件 COVERED 的必填声明要与前端 REQUIRED_LLM 对齐。"""
+    """本文件 COVERED 的必填声明要与前端 REQUIRED_LLM 双向对齐。"""
     required = set(_parse_required_llm())
     for name, (_task, is_required) in COVERED.items():
         if is_required:
             assert name in required, f"{name} 在本文件声明必填，前端 REQUIRED_LLM 却没有"
+        else:
+            assert name not in required, f"{name} 在本文件声明可选，前端却强制勾选"
 
 
 # ---------- 计划书表格合并缺陷（2026-11-24 修） ----------

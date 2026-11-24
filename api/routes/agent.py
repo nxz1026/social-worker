@@ -47,6 +47,8 @@ _SW_TASK_TEMPLATE = {
     "plan": "计划书",
     "summary": "总结报告",
     "supervision": "监督记录",
+    # 活动通知只生成「活动简介」一句正文（engine/llm.py 的 notice task）
+    "notice": "活动通知",
 }
 
 

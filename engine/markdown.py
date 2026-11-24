@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
-"""文档转 Markdown：docx / doc / xlsx / pdf。
+"""文档转 Markdown：docx / doc / xlsx / pdf / md。
 
 只做本地转换，不调用任何外部服务：
   - docx：python-docx，按正文顺序输出段落与表格
   - xlsx：openpyxl，每个 sheet 一节，公式保留「公式 + 缓存值」
   - doc ：soffice 转成 docx 后再走 docx_to_md
   - pdf ：优先 pdftotext，其次 pypdf，最后 soffice 转 txt
+  - md  ：本身就是 Markdown，只去 front-matter 与 Obsidian 双链语法
 
 所有转换失败统一抛 RuntimeError，调用方据此跳过单个文件。
 """
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 import tempfile
@@ -293,12 +295,40 @@ def pdf_to_md(path: Path) -> str:
         f"PDF 转换失败：{path}：未找到 pdftotext / pypdf / soffice 任一可用工具")
 
 
+def md_to_text(path: Path) -> str:
+    """`.md` / `.markdown` 直接读正文（Obsidian 骨架本身就是 Markdown）。
+
+    去掉 YAML front-matter 与 `[[双链]]` 的方括号、`![[嵌入]]` 整行 —— 这些是
+    Obsidian 的导航语法，入图只会产生噪音边。正文原样保留。
+    """
+    path = Path(path)
+    if not path.is_file():
+        raise RuntimeError(f"文件不存在：{path}")
+    text = path.read_text(encoding="utf-8", errors="replace")
+    # 只去掉开头的 front-matter，正文里的 --- 分割线要保留
+    front = re.match(r"\A---\s*\n.*?\n---\s*\n", text, re.S)
+    if front:
+        text = text[front.end():]
+    lines: list[str] = []
+    for line in text.splitlines():
+        if line.strip().startswith("![["):      # 嵌入文件/图片，正文里没有内容
+            continue
+        lines.append(line)
+    text = "\n".join(lines)
+    # [[目标|别名]] → 别名；[[目标]] → 目标
+    text = re.sub(r"\[\[([^\]|]+)\|([^\]]+)\]\]", r"\2", text)
+    text = re.sub(r"\[\[([^\]]+)\]\]", r"\1", text)
+    return text.strip()
+
+
 # 后缀 → 转换器
 _CONVERTERS = {
     ".docx": docx_to_md,
     ".doc": doc_to_md,
     ".xlsx": xlsx_to_md,
     ".pdf": pdf_to_md,
+    ".md": md_to_text,
+    ".markdown": md_to_text,
 }
 
 

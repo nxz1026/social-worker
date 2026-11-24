@@ -215,3 +215,52 @@ def test_render_docx_ignores_underscore_keys(tmp_path):
     assert "_check" not in text
     assert "{{" not in text
     assert stats["missing"] == ["_check"]
+
+
+# --------------------------------------------------------------------------
+# 任务级字数硬约束（notice 的 max_chars / min_chars，2026-11-24）
+# --------------------------------------------------------------------------
+
+_NOTICE_OK = ("居民可带上家里快过期的食品包装袋，到现场跟社工和志愿者一起查标签、"
+              "学怎么看保质期，还能把自家的旧挂历、旧围巾换成同款新物件。")   # ~60 字
+
+
+def test_char_count_counts_punctuation_and_skips_whitespace():
+    assert llm._char_count("你好，世界。") == 6           # 标点也算
+    assert llm._char_count(" 你好 \n 世界 ") == 4          # 空白不算
+
+
+def test_notice_self_check_passes_in_range():
+    check = llm.self_check("notice", {"活动简介": _NOTICE_OK}, "务实")
+
+    assert 40 <= check["chars"] <= 120
+    assert check["ok"] is True, check["issues"]
+    assert check["score"] == 100
+
+
+def test_notice_self_check_rejects_over_120_chars():
+    """超过 120 字（含标点）算不合格 —— 这是用户要的「废话少」硬闸门。"""
+    long_text = _NOTICE_OK * 3
+    check = llm.self_check("notice", {"活动简介": long_text}, "务实")
+
+    assert check["chars"] > 120
+    assert check["ok"] is False
+    assert any("超过上限 120 字" in issue for issue in check["issues"])
+
+
+def test_notice_self_check_rejects_too_short():
+    check = llm.self_check("notice", {"活动简介": "居民可来换东西。"}, "务实")
+    assert check["ok"] is False
+    assert any("低于下限 40 字" in issue for issue in check["issues"])
+
+
+def test_task_check_merges_style_and_task_rules():
+    """文风 check 打底，任务级 chars 覆盖 word 口径（避免 900 字宽区间盖掉 120 字）。"""
+    check = llm.task_check("notice", "务实")
+    assert check["max_chars"] == 120 and check["min_chars"] == 40
+    assert "min_words" not in check and "max_words" not in check
+    assert "浓厚氛围" in check["forbidden"], "文风的违禁词仍然生效"
+
+    # 没有任务级硬约束的任务，保持文风原样
+    brief_check = llm.task_check("brief", "务实")
+    assert brief_check["min_words"] == 550 and "max_chars" not in brief_check

@@ -33,6 +33,10 @@ from engine.markdown import file_to_md  # noqa: E402
 
 DOC_EXTS = {".docx", ".doc", ".xlsx", ".pdf"}
 IMAGE_EXTS = {".jpg", ".jpeg", ".png"}
+# `.md` 是 Obsidian 骨架（由 docx 转出，如 01-计划书.docx + 01-计划书.md 成对存在）。
+# 用户 2026-11-24 要求 `.md` 也要能搜到，但成对入图会让同一内容重复建边 ——
+# 所以只在**没有同名原件**时才索引 .md（见 drop_md_with_twin）。
+MD_EXTS = {".md", ".markdown"}
 # 项目级固定目录。`其他/` 是「未命中归档清单」的资料落点（联络表、阶段成果等），
 # 上传端点会把它们放进去 —— 不索引就等于「存得下、搜不到」（2026-11-24 补）。
 FIXED_DIRS = (("方案", "方案"), ("协议", "协议"), ("报告", "报告"), ("其他", "其他"))
@@ -76,6 +80,57 @@ def _activity_code(activity_dir: Path) -> str:
     return str(data.get("code") or "") if isinstance(data, dict) else ""
 
 
+def _is_md(path: Path) -> bool:
+    return path.suffix.lower() in MD_EXTS
+
+
+def _twin(path: Path) -> Path | None:
+    """同一目录下的同名原件（docx/doc/xlsx/pdf），没有返回 None。
+
+    `01-计划书.md` 的原件是 `01-计划书.docx`。原件扩展名大小写不敏感：
+    实测有 `.DOCX` 残留，用 `with_suffix(".docx").is_file()` 会漏判。
+    """
+    stem = path.stem.lower()
+    for sibling in path.parent.iterdir():
+        if (sibling.is_file() and sibling != path
+                and sibling.stem.lower() == stem
+                and sibling.suffix.lower() in DOC_EXTS):
+            return sibling
+    return None
+
+
+def drop_md_with_twin(paths: list[Path]) -> list[Path]:
+    """去掉「有同名原件」的 .md，只保留原件；只有 .md 的才留 .md。
+
+    一个活动里 `01-计划书.docx` 与 `01-计划书.md` 通常成对存在（后者是前者转出的
+    Obsidian 骨架）。两个都送给 Cognee，同一份内容会重复入图、重复建边 ——
+    所以有原件就跳过 .md，没有原件才索引 .md。
+    规则按「同目录 + 同主名」判断，不同目录的同名文件互不影响。
+    """
+    return [p for p in paths if not (_is_md(p) and _twin(p) is not None)]
+
+
+def _visible(path: Path, base: Path) -> bool:
+    """相对 base 的路径里有没有以 `.` 开头的段。
+
+    `.trash/`（回收站）、`.preview/`（PDF 预览）、`.activity.lock` 这些不是资料，
+    入图只会重复或污染。与 engine/checks.py::_visible_files_under 同一口径。
+    """
+    try:
+        parts = path.relative_to(base).parts
+    except ValueError:
+        return False
+    return not any(part.startswith(".") for part in parts)
+
+
+def _candidate_files(base: Path) -> list[Path]:
+    """base 下可入图的文件：原件 + .md，跳过隐藏目录。"""
+    return [p for p in sorted(base.rglob("*"))
+            if p.is_file()
+            and _visible(p, base)
+            and p.suffix.lower() in DOC_EXTS | MD_EXTS]
+
+
 def scan_project(project_dir: Path) -> list[Item]:
     """扫单个项目的方案/协议/报告/活动，返回文档条目与照片清单条目。"""
     project = project_dir.name
@@ -85,29 +140,27 @@ def scan_project(project_dir: Path) -> list[Item]:
         base = project_dir / dirname
         if not base.is_dir():
             continue
-        for path in sorted(base.rglob("*")):
-            if path.is_file() and path.suffix.lower() in DOC_EXTS:
-                items.append(Item(project=project, kind=kind,
-                                  path=path, rel=path.relative_to(project_dir).as_posix()))
+        for path in drop_md_with_twin(_candidate_files(base)):
+            items.append(Item(project=project, kind=kind,
+                              path=path, rel=path.relative_to(project_dir).as_posix()))
 
     activity_root = project_dir / ACTIVITY_DIR
     if activity_root.is_dir():
         for act_dir in sorted(p for p in activity_root.iterdir() if p.is_dir()):
+            if act_dir.name.startswith("."):
+                continue
             code = _activity_code(act_dir)
-            for path in sorted(act_dir.rglob("*")):
-                if not path.is_file():
-                    continue
-                suffix = path.suffix.lower()
-                if suffix in DOC_EXTS:
-                    items.append(Item(
-                        project=project, kind="活动文档", path=path,
-                        rel=path.relative_to(project_dir).as_posix(),
-                        activity=act_dir.name, activity_code=code,
-                    ))
+            for path in drop_md_with_twin(_candidate_files(act_dir)):
+                items.append(Item(
+                    project=project, kind="活动文档", path=path,
+                    rel=path.relative_to(project_dir).as_posix(),
+                    activity=act_dir.name, activity_code=code,
+                ))
             images = [
                 p.relative_to(act_dir).as_posix()
                 for p in sorted(act_dir.rglob("*"))
-                if p.is_file() and p.suffix.lower() in IMAGE_EXTS
+                if p.is_file() and _visible(p, act_dir)
+                and p.suffix.lower() in IMAGE_EXTS
             ]
             if images:
                 items.append(Item(

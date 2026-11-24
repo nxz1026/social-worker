@@ -454,8 +454,9 @@ def test_scan_project按类型与扩展名筛选(ic, tmp_path):
     assert ("活动图片清单", "活动/A1") in got
     # 非入图扩展名一律不收
     assert all("说明.txt" not in rel for _, rel in got)
-    assert all("记录.md" not in rel for _, rel in got)
     assert all("动图.gif" not in rel for _, rel in got)
+    # .md 现在是入图类型了（2026-11-24 用户要求）：这条 .md 没有同名原件，要收
+    assert ("活动文档", "活动/A1/记录.md") in got
 
 
 def test_scan_project扩展名大小写不敏感(ic, tmp_path):
@@ -524,6 +525,118 @@ def test_item_text带元数据头(ic):
     body = ic.item_text(lst)
     assert "activity_code: C-1" in body
     assert "- x.jpg" in body and "共 1 张" in body
+
+
+# ---------- .md 索引与「有原件就跳过 .md」去重规则（2026-11-24） ----------
+
+def test_md扩展名被收录(ic):
+    """.md / .markdown 是入图类型；.txt 之类仍然不收。"""
+    assert {".md", ".markdown"} <= ic.MD_EXTS
+    assert ".md" not in ic.DOC_EXTS, "原件扩展名集合保持原样，.md 单独走 MD_EXTS"
+
+
+def test_drop_md_with_twin有原件跳过md(ic, tmp_path):
+    """成对存在（01-计划书.docx + 01-计划书.md）：只留原件。"""
+    (tmp_path / "01-计划书.docx").write_text("x", encoding="utf-8")
+    (tmp_path / "01-计划书.md").write_text("x", encoding="utf-8")
+    kept = ic.drop_md_with_twin(sorted(tmp_path.iterdir()))
+    assert [p.name for p in kept] == ["01-计划书.docx"]
+
+
+def test_drop_md_with_twin只有md时保留(ic, tmp_path):
+    """只有 .md 没有原件：索引 .md，否则这份内容就搜不到了。"""
+    (tmp_path / "06-总结报告.md").write_text("x", encoding="utf-8")
+    kept = ic.drop_md_with_twin(sorted(tmp_path.iterdir()))
+    assert [p.name for p in kept] == ["06-总结报告.md"]
+
+
+def test_drop_md_with_twin四种原件都算(ic, tmp_path):
+    """docx / doc / xlsx / pdf 任一存在都算「有原件」，都要压掉同名 .md。"""
+    for ext in (".docx", ".doc", ".xlsx", ".pdf"):
+        (tmp_path / f"原件{ext}").write_text("x", encoding="utf-8")
+        (tmp_path / "原件.md").write_text("x", encoding="utf-8")
+    (tmp_path / "只有md.md").write_text("x", encoding="utf-8")
+    names = {p.name for p in ic.drop_md_with_twin(sorted(tmp_path.iterdir()))}
+    assert "原件.md" not in names
+    assert names == {"原件.docx", "原件.doc", "原件.xlsx", "原件.pdf", "只有md.md"}
+
+
+def test_drop_md_with_twin原件大小写不敏感(ic, tmp_path):
+    """实测有 .DOCX 残留：with_suffix('.docx').is_file() 会漏判，必须 lower() 比较。"""
+    (tmp_path / "02-活动通知.DOCX").write_text("x", encoding="utf-8")
+    (tmp_path / "02-活动通知.md").write_text("x", encoding="utf-8")
+    kept = ic.drop_md_with_twin(sorted(tmp_path.iterdir()))
+    assert [p.name for p in kept] == ["02-活动通知.DOCX"]
+
+
+def test_drop_md_with_twin不同目录互不影响(ic, tmp_path):
+    """去重按「同目录 + 同主名」：别的目录有同名 docx 不算重复。"""
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    (tmp_path / "a" / "01-计划书.docx").write_text("x", encoding="utf-8")
+    (tmp_path / "b" / "01-计划书.md").write_text("x", encoding="utf-8")
+    kept = ic.drop_md_with_twin(sorted(p for p in tmp_path.rglob("*") if p.is_file()))
+    assert kept == [tmp_path / "a" / "01-计划书.docx",
+                    tmp_path / "b" / "01-计划书.md"]
+
+
+def test_scan_project_md去重落在活动目录(ic, tmp_path):
+    """真实扫描路径：活动里成对的 docx+md 只出一条，只有 md 的出一条。"""
+    act = tmp_path / "projects" / "P" / "活动" / "A1"
+    act.mkdir(parents=True)
+    (act / "01-计划书.docx").write_text("x", encoding="utf-8")
+    (act / "01-计划书.md").write_text("x", encoding="utf-8")
+    (act / "06-总结报告.md").write_text("x", encoding="utf-8")
+    rels = [i.rel for i in ic.scan_project(act.parent.parent) if not i.is_image_list]
+    assert "活动/A1/01-计划书.docx" in rels
+    assert "活动/A1/01-计划书.md" not in rels, "有同名原件，.md 不该入图"
+    assert "活动/A1/06-总结报告.md" in rels, "只有 .md 时必须入图"
+
+
+def test_scan_project_其他目录md也入图(ic, tmp_path):
+    """`其他/` 是非归档资料的落点，用户点名要进 Cognee，.md 同样适用去重规则。"""
+    base = tmp_path / "projects" / "P" / "其他" / "通讯录"
+    base.mkdir(parents=True)
+    (base / "联系人.xlsx").write_text("x", encoding="utf-8")
+    (base / "联系人.md").write_text("x", encoding="utf-8")
+    (base / "阶段成果.md").write_text("x", encoding="utf-8")
+    # base = projects/P/其他/通讯录 → 项目目录是 base.parent.parent
+    got = {i.rel for i in ic.scan_project(base.parent.parent) if i.kind == "其他"}
+    assert got == {"其他/通讯录/联系人.xlsx", "其他/通讯录/阶段成果.md"}
+
+
+def test_scan_project跳过隐藏目录(ic, tmp_path):
+    """`.trash/`（回收站）与 `.preview/`（PDF 预览）不是资料，不能重复入图。"""
+    act = tmp_path / "projects" / "P" / "活动" / "A1"
+    (act / ".trash" / "20261123-102148").mkdir(parents=True)
+    (act / ".preview").mkdir(parents=True)
+    (act / "01-计划书.docx").write_text("x", encoding="utf-8")
+    (act / ".trash" / "20261123-102148" / "01-计划书.docx").write_text("x", encoding="utf-8")
+    (act / ".preview" / "01-计划书-abcd.pdf").write_text("x", encoding="utf-8")
+    (act / ".activity.lock").write_text("x", encoding="utf-8")
+    (act / "11-活动照片资料").mkdir()
+    (act / "11-活动照片资料" / "1.jpg").write_text("x", encoding="utf-8")
+    (act / ".trash" / "2.jpg").write_text("x", encoding="utf-8")
+    # act = projects/P/活动/A1 → 项目目录是 act.parent.parent
+    items = ic.scan_project(act.parent.parent)
+    rels = [i.rel for i in items]
+    assert rels == ["活动/A1/01-计划书.docx", "活动/A1"]
+    assert items[-1].images == ["11-活动照片资料/1.jpg"]
+
+
+def test_真实项目树无重复条目(ic, tmp_path):
+    """整棵样例树扫一遍：同一份上传名不能出现两次（重复会重复建边）。"""
+    proj = _sample_tree(tmp_path) / "样例项目"
+    (proj / "其他").mkdir()
+    (proj / "其他" / "通讯录.docx").write_text("x", encoding="utf-8")
+    (proj / "其他" / "通讯录.md").write_text("x", encoding="utf-8")
+    (proj / "报告" / "只有md.md").write_text("x", encoding="utf-8")
+    items = ic.scan_project(proj)
+    names = [ic.upload_name(i) for i in items]
+    assert len(names) == len(set(names)), f"上传名重复：{names}"
+    assert "其他__通讯录.docx.md" in names
+    assert "其他__通讯录.md.md" not in names
+    assert "报告__只有md.md.md" in names
 
 
 # ======================================================================

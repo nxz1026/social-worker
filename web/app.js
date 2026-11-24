@@ -1542,7 +1542,9 @@ async function openFillModal() {
       ? phs.map(p => `<span class="chip">${esc(p)}</span>`).join('')
       : '<span class="muted">该模板没有占位符</span>';
     // 这些模板的内容段只能由 LLM 产出，不勾就是一片空白 → 强制勾选并置灰。
-    // 必须与 LLM_TASK_BY_TPL 的 key 完全一致：少了哪个，那个模板就会被静默降级成普通 fill。
+    // 必须是 LLM_TASK_BY_TPL 的 key 的子集：映射里有、这里没有 = 可选 LLM。
+    // 活动通知是可选 LLM（少量数据也能出文，正文段没有 LLM 也能用），
+    // 因此只在 LLM_TASK_BY_TPL 里注册 'notice'，**不加**到本列表（2026-11-24）。
     const REQUIRED_LLM = ['计划书', '简报', '总结报告', '监督记录'];
     const box = el('#fillUseLlm');
     if (box) {
@@ -1569,15 +1571,17 @@ async function openFillModal() {
   renderForm();
 }
 
-/* 模板名 → LLM 任务名。只有这四类模板有 LLM 内容段。
+/* 模板名 → LLM 任务名。这五类模板有 LLM 内容段。
    漏映射的模板会被下面的 `|| 'plan'` 兜底成 plan，生成出 13 个计划书字段，
    一个都填不进模板 —— 总结报告曾因此整篇留空（2026-11-24 查出）。
+   活动通知：只生成「活动简介」一句正文（task notice），可选 LLM。
    与 engine/llm.py 的 TASKS 及 api/routes/agent.py 的 _SW_TASK_TEMPLATE 保持一致。*/
 const LLM_TASK_BY_TPL = {
   '计划书': 'plan',
   '简报': 'brief',
   '总结报告': 'summary',
   '监督记录': 'supervision',
+  '活动通知': 'notice',
 };
 
 async function submitFill() {

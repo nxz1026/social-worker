@@ -210,7 +210,71 @@ TASKS: dict[str, dict] = {
             "不编造未提供的事实",
         ),
     },
+    # 活动通知：模板里只有一句正文段，其余（时间/地点/对象/联系人）都是数据。
+    # 只生成「活动简介」，由 build_data 补「，」后接在「进行{{活动名称}}」后面
+    # （写进 {{活动简介_suffix}}），所以只能写成承接活动名的补充句：
+    # 不能另起一段、不能重复活动名、**行首不要自己加「，」**（会变成「，，」）。
+    # 2026-11-24 用户要求：活动通知正文走 LLM，但废话要少。
+    "notice": {
+        "doc": "社区活动通知",
+        "intro": "只需要生成 1 个字段的正文，严格按下面骨架。"
+                 "只输出 JSON，不要任何解释：",
+        "fields": ("活动简介",),
+        "schema": {
+            "活动简介": "一句话补充说明，60~100 字（超过 120 字不合格），"
+                        "接在「将在X月X日进行（活动名称）」后面读得通顺，"
+                        "行首不要加逗号（程序会自动补「，」），"
+                        "写清居民到现场能做什么、为什么值得来：给一个能对上事实的"
+                        "具体去处或收获。只写这一句，不要标题、不要分点、不要罗列。",
+        },
+        "rules": (
+            "只写活动正文那一段（活动简介一句话），不要标题、不要分点、不要罗列；"
+            "不重复活动名称，也不重复时间、地点、参与对象（模板别处已经有了）",
+            "60~100 字，超过 120 字算不合格；写不够就把具体事项写清楚，"
+            "不要用形容词凑字数",
+            "不写「深入贯彻落实」「营造浓厚氛围」「打造新格局」「双向奔赴」"
+            "「赋能」「新标杆」「新引擎」这类口号和网络化套话",
+            "不编造具体人名、金额、政策文号；上面事实里没有的环节、成果、"
+            "福利（如赠品、证书、补贴）一律不写",
+            "直接说清：这是什么活动、居民能来做什么、为什么值得来",
+            "用陈述句，不用感叹号，不写「望广大社区居民朋友」「欢迎踊跃参加」"
+            "这类号召语（模板正文后面已有）",
+            "不要用「我们」开头或自称：模板正文已经写了「我们将在…进行…」，"
+            "接「我们在…」会重复。直接从活动内容写起（动词开头，如「现场设…」"
+            "「居民可…」），称呼居民用「居民」，不评价活动效果（活动还没开）",
+        ),
+        # 字数硬校验：由 self_check 按 chars 口径判定（见 task_check）
+        "max_chars": 120,
+        "min_chars": 40,
+    },
 }
+
+
+def task_check(task: str, style: str,
+               style_config: dict | None = None) -> dict:
+    """本次自检实际使用的 check 配置：文风 check 打底，任务级规则覆盖。
+
+    `max_chars` / `min_chars` 是**任务级字数硬约束**（按字符算，标点也算），
+    给「一段话必须控制在多少字内」这类任务用（如活动通知 120 字上限）。
+    文风的 min_words / max_words 是给整篇简报写的，套到一句话的任务上没意义，
+    所以任务声明了 chars 口径时，chars 优先于 words，避免宽区间把硬约束盖掉。
+    """
+    config = style_config if style_config is not None else load_style_config()
+    style_spec = (config.get("styles") or {}).get(str(style)) or {}
+    check = dict(style_spec.get("check") or {})
+    spec = _task_spec(task)
+    for key in ("min_chars", "max_chars"):
+        if spec.get(key) is not None:
+            check[key] = spec[key]
+    if check.get("max_chars") is not None or check.get("min_chars") is not None:
+        check.pop("min_words", None)
+        check.pop("max_words", None)
+    return check
+
+
+# 这些字段由 activity.build_data 补标点/前缀后接进模板，模型自己带的行首标点要去掉。
+# 目前只有活动通知的「活动简介」：写进 {{活动简介_suffix}} 时会补一个「，」。
+_STRIP_LEADING_PUNCT = {"活动简介"}
 
 
 class LLMError(RuntimeError):
@@ -480,6 +544,15 @@ def _word_count(text: str) -> int:
     return len(_CJK_RE.findall(text)) + len(_WORD_RE.findall(text))
 
 
+def _char_count(text: str) -> int:
+    """字符数：去掉所有空白后的长度，标点也算。
+
+    社工说的「60~100 字」是 Word 的字数统计口径（含标点），
+    所以任务级硬约束（max_chars / min_chars）按这个算，不按 _word_count。
+    """
+    return len(re.sub(r"\s+", "", text or ""))
+
+
 def self_check(task: str, result: dict, style: str,
                style_config: dict | None = None) -> dict:
     """检查生成结果是否符合文风要求。
@@ -490,17 +563,20 @@ def self_check(task: str, result: dict, style: str,
       "hits": {"required_all": [...命中...], "required_any": [...命中...]},
       "miss": {"required_all": [...缺...], "required_any": bool, "forbidden": [...命中违禁词...]},
       "words": int,
+      "chars": int,            # 去空白后的字符数（标点也算）
       "issues": [str, ...]     # 人读的问题列表
     }
 
     统计口径：把 result 里所有字符串值拼起来算（列表也要展开）。
-    字数按中文字符 + 英文单词计。
+    字数按中文字符 + 英文单词计；任务声明了 max_chars / min_chars 时改按字符计
+    （标点也算，见 _char_count），且以任务级硬约束为准。
     带 style_scope 的任务（如总结报告）文风只作用于少数段落，因此只统计那几段，
     也不做整篇字数判定——文风的字数区间是给整篇简报写的。
     """
     config = style_config if style_config is not None else load_style_config()
     style_spec = (config.get("styles") or {}).get(str(style)) or {}
-    check = style_spec.get("check") or {}
+    # 文风 check + 任务级硬约束（max_chars / min_chars），见 task_check()
+    check = task_check(task, style, style_config=config)
 
     scope = (_task_spec(task).get("style_scope")
              if str(task or "") in TASKS else None)
@@ -517,6 +593,10 @@ def self_check(task: str, result: dict, style: str,
     forbidden = [str(item) for item in check.get("forbidden") or []]
     min_words = check.get("min_words")
     max_words = check.get("max_words")
+    # 字符口径（标点也算）：给「一段话控制在 120 字内」这类硬约束用
+    min_chars = check.get("min_chars")
+    max_chars = check.get("max_chars")
+    chars = _char_count(text)
 
     hit_all = [item for item in required_all if item in text]
     hit_any = [item for item in required_any if item in text]
@@ -536,7 +616,14 @@ def self_check(task: str, result: dict, style: str,
     for item in hit_forbidden:
         issues.append(f"出现违禁词：{item}")
         score -= _PENALTY_FORBIDDEN
-    if check_words and min_words and words < int(min_words):
+    if check_words and max_chars and chars > int(max_chars):
+        # 超字数一律不合格：自检不通过才会触发重写（用户要求「废话少」）
+        issues.append(f"字数 {chars}，超过上限 {max_chars} 字（含标点）")
+        score -= _PENALTY_WORDS
+    elif check_words and min_chars and chars < int(min_chars):
+        issues.append(f"字数 {chars}，低于下限 {min_chars} 字（含标点）")
+        score -= _PENALTY_WORDS
+    elif check_words and min_words and words < int(min_words):
         issues.append(f"字数 {words}，低于下限 {min_words}")
         score -= _PENALTY_WORDS
     elif check_words and max_words and words > int(max_words):
@@ -550,6 +637,7 @@ def self_check(task: str, result: dict, style: str,
         "miss": {"required_all": miss_all, "required_any": any_missed,
                  "forbidden": hit_forbidden},
         "words": words,
+        "chars": chars,
         "issues": issues,
     }
 
@@ -709,12 +797,33 @@ def _normalize(task: str, data: dict) -> dict:
             continue
         value = data.get(field)
         text = str(value).strip() if value is not None else ""
+        if field in _STRIP_LEADING_PUNCT:
+            # build_data 会自己补「，」再接进正文段，模型再带一个就成「，，」
+            # （2026-11-24 实测：模型照 prompt 加了行首逗号）
+            text = text.lstrip("，,、；; ").strip()
         if not text:
             missing.append(field)
         out[field] = text
     if missing:
         raise LLMError(f"模型输出缺字段：{'、'.join(missing)}")
+    _enforce_max_chars(task, out)
     return out
+
+
+def _enforce_max_chars(task: str, out: dict) -> None:
+    """任务声明了 max_chars 时，归一化后超限直接判不合格（抛 LLMError 触发重试）。
+
+    超字数是最常见的「废话多」形态（活动通知尤其明显），不值得先落盘再靠重写救；
+    这里当场打回，与 self_check 同一口径（_char_count，标点也算）。
+    min_chars 不在这里卡：写短了还能靠 self_check 重写一次，直接打回会白费一次调用。
+    """
+    limit = _task_spec(task).get("max_chars")
+    if limit is None:
+        return
+    text = _collect_text(out)
+    chars = _char_count(text)
+    if chars > int(limit):
+        raise LLMError(f"字数 {chars}，超过上限 {limit} 字（含标点）：{text[:120]}")
 
 
 def _generate(task: str, prompt: str) -> dict:

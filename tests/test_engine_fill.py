@@ -250,3 +250,29 @@ def test_render_rejects_unknown_suffix(tmp_path):
         pass
     else:
         raise AssertionError("未知后缀应当抛 ValueError")
+
+
+# ---------- 活动通知：{{活动简介_suffix}} 派生规则（2026-11-24） ----------
+
+def test_build_data_活动简介_suffix补逗号_无简介为空(tmp_path):
+    """没有「活动简介」时不补逗号，避免「…进行X活动，。现进行…」。"""
+    data = activity.build_data("不存在的项目", str(tmp_path))
+    assert data["活动简介_suffix"] == ""
+
+    data = activity.build_data("不存在的项目", str(tmp_path),
+                               extra={"活动简介": "居民可到现场学选菜。"})
+    assert data["活动简介_suffix"] == "，居民可到现场学选菜"
+
+
+def test_build_data_活动简介自带句号不重复(tmp_path):
+    """LLM 生成的简介是一整句带句号：先去掉句末标点再接「，」。
+
+    否则模板「{{活动简介_suffix}}。现进行活动通知」会渲染成「……依据。。现进行」
+    （2026-11-24 接 LLM 后实测踩到）。
+    """
+    for raw in ("居民可现场跟社工学挑菜。", "居民可现场跟社工学挑菜",
+                "居民可现场跟社工学挑菜。。。", "居民可现场跟社工学挑菜；",
+                "居民可现场跟社工学挑菜，"):
+        data = activity.build_data("不存在的项目", str(tmp_path),
+                                   extra={"活动简介": raw})
+        assert data["活动简介_suffix"] == "，居民可现场跟社工学挑菜", raw

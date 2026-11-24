@@ -405,8 +405,12 @@ def build_data(project_name: str, activity_dir: str,
     data["活动编号"] = data.get("项目编号")
 
     # 活动简介是可选的：有内容才补「，」前缀，避免生成「…进行X活动，。现进行…」
+    # 简介自带句末标点时（LLM 生成的都是一整句），要先去掉再接「，」，
+    # 否则模板里「{{活动简介_suffix}}。现进行活动通知」会渲染成「……。 。现进行」
+    # （2026-11-24 活动通知接 LLM 后实测踩到）。
     if not data.get("活动简介"):
         data["活动简介_suffix"] = ""
     else:
-        data["活动简介_suffix"] = "，" + str(data["活动简介"])
+        body = re.sub(r"[。．.；;，,！!？?、\s]+$", "", str(data["活动简介"]))
+        data["活动简介_suffix"] = "，" + body if body else ""
     return data

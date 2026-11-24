@@ -204,3 +204,80 @@ def test_supervision_prompt_has_rules_and_facts():
 def test_supervision_normalize_requires_content():
     with pytest.raises(llm.LLMError, match="缺字段：活动内容"):
         llm._normalize("supervision", {"活动内容": "  "})
+
+
+# --------------------------------------------------------------------------
+# notice：活动通知正文（2026-11-24 用户要求「冷化正文 + 废话少」）
+# --------------------------------------------------------------------------
+
+def test_notice_task_shape():
+    """只生成「活动简介」一个字段，字数写死在任务上（字符口径）。"""
+    spec = llm.TASKS["notice"]
+
+    assert spec["doc"] == "社区活动通知"
+    assert tuple(spec["fields"]) == ("活动简介",)
+    assert "60~100" in spec["schema"]["活动简介"]
+    assert spec["max_chars"] == 120
+    assert spec["min_chars"] == 40
+
+
+def test_notice_rules_cover_hard_constraints():
+    """工单 C 的六条硬约束一条都不能少（措辞可调整，意思不能弱）。"""
+    rules = "\n".join(llm.TASKS["notice"]["rules"])
+
+    assert "只写活动正文那一段" in rules and "不要分点" in rules
+    assert "60~100 字" in rules and "120 字" in rules
+    for slogan in ("贯彻落实", "浓厚氛围", "新格局", "双向奔赴"):
+        assert slogan in rules, f"禁口号里漏了「{slogan}」"
+    assert "不重复活动名称" in rules
+    assert "不编造具体人名、金额、政策文号" in rules
+    assert "这是什么活动、居民能来做什么、为什么值得来" in rules
+
+
+def test_notice_prompt_renders_rules_facts_and_schema():
+    facts = {"活动名称": "共治行动（第一期）", "活动时间_cn": "二〇二六年十一月十日",
+             "活动地点": "民乐北巷", "服务对象": "院落居民"}
+    prompt = llm.build_prompt("notice", facts, "务实")
+
+    assert '"活动简介"' in prompt
+    assert "- 活动地点：民乐北巷" in prompt
+    assert "60~100 字" in prompt
+    # 结尾那段是模型最先参照的，字数硬约束要在里面
+    # 末条规则：禁止「我们」自称 —— 模板正文已有「我们将在…」，接「我们在…」会重复
+    # （2026-11-24 实测生成「…进行志愿服务，我们在菜市设好…」抓到的重复）。
+    tail = prompt.rstrip()[-160:]
+    assert "不要用「我们」开头或自称" in tail
+    assert "不评价活动效果" in tail
+
+
+def test_notice_normalize_keeps_only_简介():
+    """模型多给的字段一律丢掉（模板只吃 活动简介）。"""
+    out = llm._normalize("notice", {"活动简介": "  居民可现场学换季选菜。 ",
+                                    "标题": "多余字段"})
+    assert out == {"活动简介": "居民可现场学换季选菜。"}
+
+
+def test_notice_normalize_rejects_over_max_chars():
+    """超过 120 字在归一化阶段就打回（触发重试），不是先落盘再救。"""
+    text = "居民可以到现场参加活动，学习实用的生活知识。" * 8      # 远超 120 字
+    with pytest.raises(llm.LLMError, match="超过上限 120 字"):
+        llm._normalize("notice", {"活动简介": text})
+
+
+def test_notice_normalize_allows_100_chars():
+    """100 字正好在区间内，不能被打回。"""
+    text = "居民可现场学换季选菜。" * 10
+    assert 100 <= llm._char_count(text) <= 120
+    assert llm._normalize("notice", {"活动简介": text})["活动简介"] == text
+
+
+def test_notice_normalize_strips_leading_comma():
+    """build_data 会补「，」再接进正文段：模型自带的行首逗号必须去掉，
+    否则生成「进行X活动，，居民可……」（2026-11-24 实测踩到）。"""
+    out = llm._normalize("notice", {"活动简介": "，居民可带上旧物到现场交换。"})
+    assert out["活动简介"] == "居民可带上旧物到现场交换。"
+    out2 = llm._normalize("notice", {"活动简介": "、居民可到现场登记诉求。"})
+    assert out2["活动简介"] == "居民可到现场登记诉求。"
+    # 句中标点不动
+    out3 = llm._normalize("notice", {"活动简介": "居民可到现场，登记诉求。"})
+    assert out3["活动简介"] == "居民可到现场，登记诉求。"
