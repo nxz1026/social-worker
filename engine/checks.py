@@ -50,14 +50,25 @@ OTHER_ITEM = {"no": 15, "name": "其他"}
 # 但 Web 界面按模板原名生成的是「计划书.docx」，真实活动目录里两种并存，
 # 且前缀后还可能带活动名（01-20261105xx活动计划书.docx）。
 # 所以查找顺序是：先按 前缀+关键词 精确找，再退到「无前缀的关键词」。
+# 注意：键必须与 CHECKLIST 的 name 完全一致，否则 _loose_find 查不到词根
+# （2026-11-24 实测：缺「签到表」，导致误传位置的签到表被判 missing）。
 _NAME_WORDS = {
     "活动计划": ("计划书", "活动计划"),
-    "总结报告": ("总结报告",),
-    "决算表": ("决算表",),
-    "简报": ("简报",),
     "活动通知": ("活动通知", "通知"),
+    "签到表": ("签到表", "签到"),
     "满意度测评汇总表": ("满意度测评汇总表", "满意度"),
-    "监督记录表": ("监督记录",),
+    "总结报告": ("总结报告",),
+    "简报": ("简报",),
+    "决算表": ("决算表",),
+    "监督记录表": ("监督记录", "监督"),
+    "报销单": ("报销单",),
+    # 「物资照片」这一项：用户常把「物资领取表」「物品领取表」当作物料证明传上来
+    "物资照片": ("物资", "物品", "领取表"),
+    "活动照片": ("照片", "图片"),
+    "发票照片": ("发票",),
+    "其他佐证": ("佐证", "证明", "资质"),
+    "满意度测评表": ("满意度",),
+    # 项目级资料用（不在 15 项内，但 loose_find 可能被复用）
     "物资领取表": ("物资领取",),
     "劳务领取表": ("劳务领取",),
 }
@@ -231,9 +242,55 @@ def _match_signed_photo(item: dict, act_dir: Path,
             return None, f"仅有未签字 docx：{name}，缺签字扫描件", "partial"
         return None, f"有 {name}，缺签字扫描件", "partial"
 
+    # 规范位置没找到：放宽到全目录按关键词找（用户常把扫描件误传进别的目录）
+    loose_signed = _loose_find(item, act_dir, SIGNED_EXT)
+    if loose_signed:
+        return (loose_signed[0],
+                f"命中 {_rel_label(loose_signed[0], act_dir)}"
+                f"（位置不规范，建议改名 {_prefixes(item)[0]}{item['name']}）", "ok")
+
     if item["no"] == 14:
         return None, "未找到含「满意度」的签字照片/PDF", "missing"
     return None, f"未找到 {'/'.join(_prefixes(item))} 开头的签字照片/PDF", "missing"
+
+
+def _loose_find(item: dict, act_dir: Path,
+                kinds: tuple[str, ...]) -> list[Path]:
+    """规范位置没找到时的兜底：全目录按关键词找，不限位置。
+
+    用户会把材料传到别的目录里（实测 2026-11-24：签到表.pdf 和
+    物品领取表.pdf 都被放进 11-活动照片资料/），按「根目录+序号前缀」
+    硬判就会误报缺失。这里放宽到「只要在活动目录里、名对得上就算」，
+    但结果带「位置不规范」标记，提醒归档结构该整理。
+    """
+    words = _NAME_WORDS.get(item["name"], ())
+    if not words:
+        return []
+    # .md 是 Obsidian 骨架（由 docx 转出），不是原始材料，绝不能当凭证
+    skip = {".md", ".markdown"}
+    item_name = str(item["name"])
+    out: list[Path] = []
+    for path in _visible_files_under(act_dir):
+        suffix = path.suffix.lower()
+        if suffix not in kinds or suffix in skip:
+            continue
+        # 「序号-项名.docx」这种是有人把模板另存了一份，不是实拍材料。
+        # 只拦这种格式，不能拦「签到表.pdf」——那是真扫描件。
+        if path.stem.startswith(tuple(_item_prefixes(item))) \
+                and item_name in path.stem:
+            continue
+        if any(w in path.name for w in words):
+            out.append(path)
+    # 原始材料优先：去掉 .md 后可能剩下多个，按「非 .md > .md」排序
+    return out
+
+
+def _rel_label(path: Path, act_dir: Path) -> str:
+    """相对活动目录的路径标签，用于「位置不规范」提示。"""
+    try:
+        return path.relative_to(act_dir.resolve()).as_posix()
+    except ValueError:
+        return path.name
 
 
 def _match(item: dict, entries: list[Path],
@@ -254,6 +311,10 @@ def _match(item: dict, entries: list[Path],
         found = [p for p in hits if p.is_file()]
         if found:
             return found[0], f"命中 {found[0].name}", "ok"
+        loose = _loose_find(item, act_dir, ANY_FILE_EXT)
+        if loose:
+            return (loose[0], f"命中 {_rel_label(loose[0], act_dir)}"
+                              f"（位置不规范，建议放活动根目录）", "ok")
         return None, f"未找到 {'/'.join(prefixes)} 开头的文件", "missing"
 
     if kind in ("xlsx", "docx"):
@@ -261,6 +322,10 @@ def _match(item: dict, entries: list[Path],
         found = [p for p in hits if p.is_file() and p.suffix.lower() == suffix]
         if found:
             return found[0], f"命中 {found[0].name}", "ok"
+        loose = _loose_find(item, act_dir, (suffix,))
+        if loose:
+            return (loose[0], f"命中 {_rel_label(loose[0], act_dir)}"
+                              f"（位置不规范，建议放活动根目录）", "ok")
         return None, f"未找到 {'/'.join(prefixes)} 开头的 {suffix} 文件", "missing"
 
     if kind == "dir_or_file":
@@ -273,6 +338,12 @@ def _match(item: dict, entries: list[Path],
     # 以下三种都要求是目录
     dirs = [p for p in hits if p.is_dir()]
     if not dirs:
+        # 兜底：用户可能没建 10-/12-/13- 目录，而是把材料散放在别处
+        # （2026-11-24：物品领取表.pdf 被放进 11-活动照片资料/）
+        loose = _loose_find(item, act_dir, ANY_FILE_EXT)
+        if loose:
+            return (loose[0], f"命中 {_rel_label(loose[0], act_dir)}"
+                              f"（未建 {prefixes[0]} 目录，建议按项建目录归档）", "ok")
         return None, f"未找到 {'/'.join(prefixes)} 开头的目录", "missing"
 
     if kind == "dir_with_media":
