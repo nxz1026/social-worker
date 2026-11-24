@@ -228,6 +228,7 @@ curl -H "Authorization: Bearer sk-sw-xxx" \
  "files":[{"name":"01-计划书-共治行动.docx","size":12345,"mtime":"..."}],
  "dirs":[{"name":"11-活动照片资料","count":31}],
  "check":{"ok_count":13,"partial_count":1,"missing_count":0,"na_count":1,"complete":false,
+          "effective_ok_count":14,"signed_absent_count":0,
           "items":[{"no":1,"name":"活动计划","status":"ok","detail":"命中 01-...docx"}]}}
 ```
 
@@ -243,20 +244,36 @@ curl -H "Authorization: Bearer sk-sw-xxx" \
 | `reviewed_required_count` | **必需项里**已核对的项数 |
 | `reviewed_count` | 所有已核对项数（含 na 项，仅供统计） |
 | `signed_count` | 已签字项数 |
-| `deliverable` | 必需项既齐全、且**每一项**都有核对记录才为 `true` |
+| `deliverable` | 必需项全部**齐备**（含签字确认的）即为 `true`，与 `complete` 同源 |
 | `pending_upload_count` | 已人工签字确认、但文件还没上传的项数 |
+| `effective_ok_count` / `effective_partial_count` / `effective_missing_count` | 叠加人工签字后的**有效**计数 |
+| `signed_absent_count` | 物理缺失但已签字的项数 |
 
-**签字确认即视为齐备**（2026-11-23）：文件缺失（`missing`）或只有未签字
-docx（`partial`）的项，只要人工点了「签字」，就按齐备计入 `complete` 与
-`ok_count`，活动可以正常完成 —— 因为缺的文件本身是待上传状态，不该卡住
-完成度。但 `pending_upload_count` 会记下这些项，界面显示「待补文件」提醒，
-`item.pending_upload=true`，审计日志照常记录 `review_material`。
+### 物理计数 vs 有效计数（2026-11-24 起）
 
-`deliverable` 仍需逐项核对，签字归位不等于可交付。
+`ok_count` / `partial_count` / `missing_count` **永远是物理事实**——文件到底在不在。
 
-**`deliverable` 用 `reviewed_required_count` 判定，不是 `reviewed_count`。**
-`na` 项（第 15 项「其他」恒为 na）即使有核对记录也不计入交付判据 ——
-否则「13/14 必需项核对 + na 项凑数」会被误判为可交付（审计 R-03）。
+签字只影响 `effective_*` 与 `complete`：
+
+| 场景 | `ok_count` | `effective_ok_count` | `complete` |
+|---|---|---|---|
+| 文件在 | +1 | +1 | — |
+| 文件缺、已签字 | 不变 | +1 | 可完成 |
+| 文件缺、未签字 | 不变 | 不变 | 不能完成 |
+
+实测 惠民01-走访调研：物理 `ok=5 missing=8`，有效 `ok=13 missing=1`，
+`signed_absent_count=7`。**这份活动有 7 项没有文件、只靠签字标记**，界面用
+橙色「签字补位 7」标出，不给「完整」二字盖过去。
+
+历史上曾把 `ok_count` 直接改成有效值，导致物理缺 8 项的活动显示「齐 14 / 缺 0」，
+对甲方交付判断是失真。
+
+`deliverable` 与 `complete` **同源**（都基于 `_effective_status == ok`）。
+曾出现两者判据不同（一个把 `partial` 算齐备、另一个不算），
+导致 `complete=False` 却 `deliverable=True` 的自相矛盾。
+
+**`reviewed_required_count` 只数必需项**（`na` 项即使有核对记录也不计入）——
+否则「13/14 必需项核对 + na 项凑数」会错位（审计 R-03）。
 
 ### 4.3.1 标记核对 / 签字
 
@@ -436,6 +453,17 @@ curl -X POST -H "Authorization: Bearer sk-sw-xxx" -H "Content-Type: application/
 | | **缺字段清空**（2026-11-23）：成品里绝不留 `{{占位符}}`；缺了什么只在 `missing` 里报告 |
 | | **默认命名带序号**（2026-11-23）：不给 `output` 时按「序号-模板名」命名，如 `01-计划书.docx` |
 
+**不可生成的模板**（`api/shared/paths.py` 的 `NO_GENERATE`）：
+
+| 模板 | 原因 |
+|---|---|
+| 决算表 | 需按实际票据人工填写，系统只做校验不生成 |
+| 报销单 | 同上 |
+
+`GET /api/templates` 每项返回 `fillable` + `reason`；`POST .../fill`、
+`POST .../llm-fill`、`POST /api/sw/run` **三个入口都会 400 拒绝**——
+只在界面隐藏不够，API 仍能造出空壳让人拿去归档。
+
 **模板 → 默认文件名**（`api/shared/paths.py` 的 `TEMPLATE_SERIAL`）：
 
 | 模板 | 默认名 | 模板 | 默认名 |
@@ -544,10 +572,75 @@ docx 额外做一步：**填完变空的顶层段落直接删除**（例如整�
 |---|---|---|
 | md 骨架 | 后端在每个 office 文件上带 `mirror=<对应 md 名>`，被引用的 md 隐藏 | md 是给 Obsidian 与关系图谱用的，和 docx/xlsx 混在一起太乱 |
 | 内部元数据 | `activity.yaml` / `_photos.json` / `scores.json` | 不是给用户看的 |
-| 生成的索引 | `_X-资料索引.md` | 自动生成的目录清单 |
+| 生成的索引 | `_X-资料索引.md` / `_X-项目资料索引.md` | 自动生成的目录清单，只有文件名和核对状态 |
+| 目录清单 | `活动目录.docx` / `项目管理目录.docx` | 同上 |
+| 财务凭据 | 文件名含「支出证明」 | 纯金额与单位名，进图谱只制造噪音 |
+| 隐藏目录 | `.trash/` `.preview/` 等 `.` 开头路径 | 回收站与预览缓存，含同名副本 |
+
+判定收敛在 `engine/readme.py::is_generated_nav()` **一处**，
+索引脚本引用它——新增生成物只改那边，不必维护第二份规则。
+`tests/test_index_exclusion.py` 有一条
+`test_readme_filename_still_matches_marker`，改命名规则时会失败提醒同步。
+
+**`.md` 去重**：同目录有同名 `.docx/.doc/.xlsx/.pdf` 时跳过 `.md`
+（Obsidian 骨架，内容由原件代表）；只有 `.md` 没有原件时才索引。
 
 **只有「有对应 office 文件的 md」被隐藏**；纯 md（无同名 docx/xlsx）照常显示。
 office 文件名后面的 `↗ md` 徽标仍保留，鼠标悬停能看到对应的 md 名。
+
+## 5.5.5 字段回读（生成材料不再空壳）
+
+`activity.yaml` 通常只有 `code` / `活动时间` / 执行社工 几个键，
+地点、对象、人数、背景、目的都**不在里面**——但在已归档的计划书和总结报告里。
+
+`build_data` 生成前会调 `backfill_from_materials()` 从原件回读：
+
+| 来源 | 回读字段 |
+|---|---|
+| `01-计划书`（首份） | 活动地点、服务对象、预计人数、活动背景内容、活动目的内容 |
+| `06-总结报告` | 实际人数 |
+
+**优先级：`activity.yaml` > 原件回读**，人工填过的值不被覆盖。
+
+标签匹配允许字符间有散空格（真实模板用 `人　　数：` `对　　象：` 全角对齐）。
+
+实测 13-爱邻议事会：回读前四项全空，回读后
+`世纪光华物业二楼党群办公室 / 社区议事代表… / 11 / 11`。
+
+## 5.5.6 三表校验（决算 / 报销 / 发票）
+
+```http
+POST /api/projects/{name}/activities/{dirname}/invoice/scan    # 校验并返回结果
+POST /api/projects/{name}/activities/{dirname}/invoice/report  # 写明细表
+```
+
+三份材料交叉比对，返回中文键：
+
+| 字段 | 含义 |
+|---|---|
+| `决算` / `报销` / `发票` | `{value, source, count}`，各自合计金额与来源 |
+| `diff` | `{"决算-报销": 0.0, "报销-发票": 260.9}` |
+| `amount_consistent` | 三表金额是否两两相等 |
+| `evidence_valid` | 票据证据是否可信（格式/金额冲突） |
+| `issues` | 中文问题清单，直接展示给用户 |
+
+**支持的票据格式**（2026-11-24 补）：
+
+| 类型 | 命名示例 | 说明 |
+|---|---|---|
+| 标准电子发票 | `2026-11-13_电子发票_160元_听澜集益_茶饮服务_26512000005052287086` | 20 位票号 |
+| 定额发票 | `12-1-20261104_联园水果店_水果收据及定额发票01786710_100.00元_...` | 8 位票号 |
+| 收据 / 采购订单 | `12-3-20261105_..._毛线采购订单_恒源祥_37.90元` | 无票号也认 |
+
+日期支持三种写法：`2026-11-04` / `20261104` / `12-1-20261104`（归档序号前缀）。
+**有日期 + 金额即可提取**，票号缺失不阻断。
+
+**决算表 `.doc` 也支持**：真实数据约四成是老 `.doc`，走 soffice 转换后解析
+（原先只认 `.docx`，这些活动的三表校验永远 `amount_consistent=False`）。
+
+**金额大写校验**：报销单若有「人民币大写」栏，按合计金额转大写比对，
+不一致写进 `issues`。实测 13-爱邻议事会：合计 340.90，大写写
+「叁佰肆拾元玖角肆分」(340.94)，差 0.04 被检出。
 
 ## 5.5.6 自动整理（材料归位）
 
@@ -567,6 +660,16 @@ POST /api/projects/{name}/activities/{dirname}/tidy   # 执行 {"actions":[...]}
 | 目标名被占用 | 不覆盖，加 `-2` 后缀 |
 
 只搬动和改名，**不改内容**；同名 `.md` 骨架跟着搬。执行前必定先出方案给用户确认。
+
+**三种不搬的情况**（2026-11-24 补，前两种原来会破坏数据）：
+
+| 情况 | 原因 |
+|---|---|
+| 已在 `03-签到表/` 这类**编号目录**内 | 多页扫描件放目录里是正常做法，文件不必再带序号 |
+| 同目录有 **≥2 份同类扫描件**（成套件） | 单搬一份会把整套拆散（实测 10 份问卷只搬第 7 份） |
+| 已带补充编号 `21-`~`27-` | 那是补充编号，本身就规范 |
+
+补齐后全仓 45 个活动的待整理动作数为 **0**——文件原本就在合理位置。
 
 实测：`11-活动照片资料/签到表.pdf` → `03-签到表.pdf`（`.md` 一并搬）。
 

@@ -239,11 +239,7 @@ def _activity_mtime(act_dir: Path) -> float:
     return latest
 
 
-# 不在「生成材料」里出现的模板：生成出来也没用，只能人工按实际票据填
-_NO_GENERATE = {
-    "决算表": "需按实际票据人工填写，系统只做校验不生成",
-    "报销单": "需按实际票据人工填写，系统只做校验不生成",
-}
+from api.shared.paths import NO_GENERATE as _NO_GENERATE  # noqa: E402
 
 
 @router.get("/api/templates")

@@ -34,21 +34,48 @@ def _target_name(item: dict, src: Path) -> str:
 _EXTRA_SEQ = {"21-", "22-", "23-", "24-", "25-", "26-", "27-"}
 
 
+_SET_EXTS = {".jpg", ".jpeg", ".png", ".pdf"}
+
+
+def _is_part_of_set(src: Path, threshold: int = 2) -> bool:
+    """文件是否属于「同目录下有多份同类扫描件」的成套件。
+
+    扫描件（签到表多页、问卷多份）成套归档才有意义，单拆一份出去等于破坏
+    原始顺序。判定：同目录下同扩展名的文件 >= threshold 份。
+    """
+    if src.suffix.lower() not in _SET_EXTS:
+        return False
+    try:
+        peers = [f for f in src.parent.iterdir()
+                 if f.is_file() and f.suffix.lower() == src.suffix.lower()
+                 and not f.name.startswith(".")]
+    except OSError:
+        return False
+    return len(peers) >= threshold
+
+
 def _has_valid_ext_seq(src: Path) -> bool:
     """文件名是否已带清单外的合法补充编号。"""
     return any(src.name.startswith(seq) for seq in _EXTRA_SEQ)
 
 
 def _is_canonical(path: Path, act_dir: Path, item: dict) -> bool:
-    """是否已经在规范位置 + 规范名。"""
+    """是否已经在规范位置。
+
+    两种都算规范，不该搬：
+    1. 在活动根目录且文件名带该项序号（03-签到表.pdf）
+    2. 在**该项自己的编号目录**里（03-签到表/…jpg）—— 扫描件多页时放目录里
+       是正常做法，文件不需要再带序号
+    """
     try:
         rel = path.relative_to(act_dir.resolve())
     except ValueError:
         return False
-    if len(rel.parts) != 1:
-        return False                       # 不在根目录
     prefixes = checks._item_prefixes(item)
-    return any(rel.name.startswith(p) for p in prefixes)
+    if len(rel.parts) == 1:
+        return any(rel.name.startswith(p) for p in prefixes)
+    # 在「<序号><项名>/」目录内
+    return len(rel.parts) >= 2 and any(rel.parts[0].startswith(p) for p in prefixes)
 
 
 def plan(act_dir: Path) -> dict:
@@ -93,6 +120,13 @@ def plan(act_dir: Path) -> dict:
         if _has_valid_ext_seq(src):
             skipped.append({"item": item["no"], "from": rel,
                             "reason": f"已带补充编号 {src.name[:3]}，保持原样"})
+            continue
+        # 成套件不拆：文件在别的目录里，且该目录还有同类扫描件时，
+        # 单独搬一份出去会把整套拆散（实测 04-满意度调查表资料/ 有 10 份问卷，
+        # 原逻辑只搬第 7 份到根目录，其余 9 份留在原地）。
+        if src.parent != act_dir and _is_part_of_set(src):
+            skipped.append({"item": item["no"], "from": rel,
+                            "reason": "成套扫描件的一部分，整体保持原样"})
             continue
         dst_name = _target_name(item, src)
         if dst_name in taken or (act_dir / dst_name).exists():

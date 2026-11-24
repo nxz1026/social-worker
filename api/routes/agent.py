@@ -82,13 +82,21 @@ def _sw_activity_dir(project: str, activity: str, user, *, write: bool) -> tuple
 
 
 def _sw_template(name: str) -> Path:
+    from api.shared.paths import NO_GENERATE
+
     try:
-        return find_template(name)
+        tpl = find_template(name)
     except HTTPException as exc:
         if exc.status_code == 404:
             raise ApiError(404, "TEMPLATE_NOT_FOUND", str(exc.detail),
                            "调 GET /api/templates 查看可用模板")
         raise ApiError(400, "VALIDATION", str(exc.detail))
+    # 决算表/报销单必须人工按实际票据填，生成出来是空壳
+    reason = NO_GENERATE.get(tpl.stem)
+    if reason:
+        raise ApiError(400, "TEMPLATE_NOT_GENERATABLE",
+                       f"该模板不支持生成：{tpl.stem}", reason)
+    return tpl
 
 
 def _sw_preview(path: Path, limit: int = 500) -> str:

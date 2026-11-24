@@ -128,10 +128,9 @@ def env(tmp_path, monkeypatch):
     doc.add_paragraph("项目：{{项目名称}}")
     doc.add_paragraph("编号：{{项目编号}}")
     doc.add_paragraph("自定义：{{自定义}}")
-    doc.save(str(lib / "决算表.docx"))
-    brief = Document()
-    brief.add_paragraph("简报：{{自定义}}")
-    brief.save(str(lib / "简报.docx"))
+    # 原来这里还有一次同名保存（brief → 简报.docx），把上面 3 个占位符覆盖成
+    # 只剩 1 个；决算表改成简报后就暴露了这个重复写入。
+    doc.save(str(lib / "简报.docx"))
     monkeypatch.setattr(app._projects, "PROJECTS_ROOT", root)
     monkeypatch.setattr(app, "ROOT", tmp_path)
     monkeypatch.setattr("api.state.ROOT", tmp_path)
@@ -209,7 +208,7 @@ def test_capabilities_no_auth():
 def test_readonly_project_write_403_readonly(env):
     with pytest.raises(app.ApiError) as exc:
         agent_routes.api_sw_run(
-            {"project": "惠民项目", "activity": ACT, "template": "决算表"},
+            {"project": "惠民项目", "activity": ACT, "template": "简报"},
             Req(), None, READONLY_EDITOR)
     assert exc.value.status_code == 403
     assert exc.value.code == "READONLY"
@@ -220,7 +219,7 @@ def test_cross_project_403_forbidden(env):
                 "projects": {"huadu": "write"}, "auth_type": "api_key"}
     with pytest.raises(app.ApiError) as exc:
         agent_routes.api_sw_run(
-            {"project": "惠民项目", "activity": ACT, "template": "决算表"},
+            {"project": "惠民项目", "activity": ACT, "template": "简报"},
             Req(), None, outsider)
     assert exc.value.code == "FORBIDDEN"
 
@@ -258,25 +257,25 @@ def test_can_write_and_check_project(env):
 
 def test_run_template_writes_file(env):
     out = agent_routes.api_sw_run(
-        {"project": "惠民项目", "activity": ACT, "template": "决算表",
-         "data": {"自定义": "测试值"}, "output": "08-决算表.docx"},
+        {"project": "惠民项目", "activity": ACT, "template": "简报",
+         "data": {"自定义": "测试值"}, "output": "07-简报.docx"},
         Req(), None, ADMIN)
-    dst = env / "惠民项目" / "活动" / ACT / "08-决算表.docx"
+    dst = env / "惠民项目" / "活动" / ACT / "07-简报.docx"
     assert dst.is_file()
     assert out["ok"] is True
-    assert out["path"] == f"活动/{ACT}/08-决算表.docx"
+    assert out["path"] == f"活动/{ACT}/07-简报.docx"
     assert out["filled"] >= 3
     assert "测试值" in out["preview"]
 
 
 def test_run_template_dry_run_does_not_write(env):
     out = agent_routes.api_sw_run(
-        {"project": "惠民项目", "activity": ACT, "template": "决算表",
+        {"project": "惠民项目", "activity": ACT, "template": "简报",
          "dry_run": True},
         Req(), None, ADMIN)
     assert out["dry_run"] is True
-    assert out["path"] == f"活动/{ACT}/08-决算表.docx"   # 默认名带序号
-    assert not (env / "惠民项目" / "活动" / ACT / "决算表.docx").exists()
+    assert out["path"] == f"活动/{ACT}/07-简报.docx"   # 默认名带序号
+    assert not (env / "惠民项目" / "活动" / ACT / "简报.docx").exists()
 
 
 def test_run_task_uses_llm_and_default_template(env, monkeypatch):
@@ -298,7 +297,7 @@ def test_run_template_missing_code_is_code_missing(env):
         encoding="utf-8")
     with pytest.raises(app.ApiError) as exc:
         agent_routes.api_sw_run(
-            {"project": "惠民项目", "activity": ACT, "template": "决算表"},
+            {"project": "惠民项目", "activity": ACT, "template": "简报"},
             Req(), None, ADMIN)
     assert exc.value.code == "CODE_MISSING"
 

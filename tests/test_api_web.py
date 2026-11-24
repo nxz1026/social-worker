@@ -243,15 +243,15 @@ def test_templates_returns_15(tmp_path, monkeypatch):
 
 def test_fill_writes_output(tmp_path, projects_root, monkeypatch):
     lib = _template_root(tmp_path)
-    _docx_template(lib / "决算表.docx", [])
+    _docx_template(lib / "简报.docx", [])
     monkeypatch.setattr(app, "ROOT", tmp_path)
     monkeypatch.setattr("api.state.ROOT", tmp_path)
     act = _activity(projects_root, "惠民项目", "01-走访调研-第一期")
 
     out = api_activity_fill(
         "惠民项目", "01-走访调研-第一期",
-        {"template": "决算表", "data": {"合计金额": "1000"},
-         "output": "08-决算表.docx"},
+        {"template": "简报", "data": {"合计金额": "1000"},
+         "output": "07-简报.docx"},
         _Req(), ADMIN, None)
 
     dst = act / out["path"]
@@ -263,7 +263,7 @@ def test_fill_writes_output(tmp_path, projects_root, monkeypatch):
 
 def test_fill_without_code_400(tmp_path, projects_root, monkeypatch):
     lib = _template_root(tmp_path)
-    _docx_template(lib / "决算表.docx", [])
+    _docx_template(lib / "简报.docx", [])
     monkeypatch.setattr(app, "ROOT", tmp_path)
     monkeypatch.setattr("api.state.ROOT", tmp_path)
     act = _activity(projects_root, "惠民项目", "01-走访调研-第一期")
@@ -271,7 +271,7 @@ def test_fill_without_code_400(tmp_path, projects_root, monkeypatch):
 
     with pytest.raises(app.HTTPException) as exc:
         api_activity_fill("惠民项目", "01-走访调研-第一期",
-                              {"template": "决算表"}, _Req(), ADMIN, None)
+                              {"template": "简报"}, _Req(), ADMIN, None)
     assert exc.value.status_code == 400
 
 
@@ -336,7 +336,7 @@ def test_template_name_traversal_400(tmp_path, projects_root, monkeypatch):
     _activity(projects_root, "惠民项目", "01-走访调研-第一期")
     with pytest.raises(app.HTTPException) as exc:
         api_activity_fill("惠民项目", "01-走访调研-第一期",
-                              {"template": "../决算表"}, _Req(), ADMIN, None)
+                              {"template": "../简报"}, _Req(), ADMIN, None)
     assert exc.value.status_code == 400
 
 

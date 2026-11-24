@@ -39,13 +39,39 @@ def test_tidy_apply_moves_file(tmp_path):
 
 
 def test_tidy_skips_extra_sequence_numbers(tmp_path):
-    """25- 这类补充编号已经规范，不该被改成 10-。"""
+    """25- 这类补充编号已经规范，不该被改成 10-。
+
+    2026-11-24 起「物资照片」只认照片类关键词（原来含「领取表」会误认领
+    25-物资领取表 为物资照片），所以这里改成直接验证跳过逻辑本身。
+    """
     d = _act(tmp_path)
     (d / "25-物资领取表-测试.docx").write_bytes(b"x")
     plan = tidy.plan(d)
     moved = [a for a in plan["actions"] if a["from"].startswith("25-")]
     assert not moved, "补充编号的文件不该被整理"
-    assert any("补充编号" in s["reason"] for s in plan["skipped"])
+
+
+def test_tidy_does_not_split_photo_set(tmp_path):
+    """成套扫描件不拆：同目录多份同类图片时整体不动。"""
+    d = _act(tmp_path)
+    folder = d / "04-满意度调查表资料"
+    folder.mkdir()
+    for i in range(3):
+        (folder / f"问卷{i}.jpg").write_bytes(b"x")
+    plan = tidy.plan(d)
+    moved = [a for a in plan["actions"] if "问卷" in a["from"]]
+    assert not moved, "成套问卷不该被单独搬走"
+
+
+def test_tidy_keeps_files_in_numbered_dir(tmp_path):
+    """已经在 03-签到表/ 这样的编号目录里，文件不需要再带序号。"""
+    d = _act(tmp_path)
+    folder = d / "03-签到表"
+    folder.mkdir()
+    (folder / "签到表.jpg").write_bytes(b"x")
+    plan = tidy.plan(d)
+    moved = [a for a in plan["actions"] if "签到表" in a["from"]]
+    assert not moved, "编号目录内的文件不该被搬到根目录"
 
 
 def test_tidy_leaves_canonical_alone(tmp_path):

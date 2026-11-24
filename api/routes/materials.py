@@ -158,6 +158,18 @@ def api_set_review(name: str, dirname: str, body: dict, request: Request,
     return {"ok": True, "item": item_no, "record": record}
 
 
+def _reject_no_generate(tpl: Path) -> None:
+    """决算表/报销单不允许生成 —— 必须人工按实际票据填。
+
+    只在界面过滤不够：/fill 与 /api/sw/run 仍能生成空壳，
+    用户拿去归档就是一份废纸（2026-11-24 审计实测）。
+    """
+    from api.shared.paths import NO_GENERATE
+    reason = NO_GENERATE.get(tpl.stem)
+    if reason:
+        raise HTTPException(400, f"该模板不支持生成：{tpl.stem} —— {reason}")
+
+
 @router.post("/api/projects/{name}/activities/{dirname}/fill")
 def api_activity_fill(name: str, dirname: str, body: dict, request: Request,
                       user=Depends(require_write), conn=Depends(db)):
@@ -167,6 +179,7 @@ def api_activity_fill(name: str, dirname: str, body: dict, request: Request,
     activity_require_code(act_dir)
 
     tpl = find_template(body.get("template"))
+    _reject_no_generate(tpl)
     extra = body.get("data") or {}
     if not isinstance(extra, dict):
         raise HTTPException(400, "data 必须是对象")
@@ -319,6 +332,7 @@ def api_activity_llm_fill(name: str, dirname: str, body: dict, request: Request,
     if not task:
         raise HTTPException(400, "缺 task")
     tpl = find_template(body.get("template"))
+    _reject_no_generate(tpl)
     style = str(body.get("style") or "")
     dst = fill_output(act_dir, body, tpl)
 
