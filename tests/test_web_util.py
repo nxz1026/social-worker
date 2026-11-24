@@ -454,3 +454,29 @@ def test_project_code_hint():
 def test_project_code_hint_null_and_zero_month():
     assert _node("projectCodeHint(null)") == "未配置立项月"
     assert _node("projectCodeHint({code_rules:{establish_month:0}})") == "未配置立项月"
+
+
+def test_render_sidebar_does_not_force_show_app():
+    """renderSidebar 不能无条件 showApp()。
+
+    2026-11-24 实测：登录页可见时调 renderSidebar，主界面被强行打开，
+    用户输错密码却「登录进来了」。任何渲染函数都不该控制会话可见性。
+    """
+    from pathlib import Path
+    src = (Path(__file__).resolve().parent.parent / "web" / "app.js").read_text(
+        encoding="utf-8")
+    i = src.index("async function renderSidebar()")
+    j = src.index("function updateActiveNav", i)
+    body = src[i:j]
+    assert "if (me) showApp();" in body, "主界面显隐必须受会话状态约束"
+    assert "\n  showApp();\n" not in body, "不能无条件调用 showApp()"
+
+
+def test_login_failure_returns_to_login_page():
+    """登录失败要回到登录页，防止残留主界面。"""
+    from pathlib import Path
+    src = (Path(__file__).resolve().parent.parent / "web" / "app.js").read_text(
+        encoding="utf-8")
+    i = src.index("$('loginForm').addEventListener")
+    seg = src[i:i + 1200]
+    assert "logoutLocal()" in seg, "登录失败分支必须调 logoutLocal() 回到登录页"

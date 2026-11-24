@@ -245,7 +245,11 @@ async function renderSidebar() {
       `<a class="nav-link" data-nav="users" href="#/admin/users"><span>用户</span></a>
        <a class="nav-link" data-nav="audit" href="#/admin/audit"><span>审计</span></a>`,
       '#/admin/users')}`;
-  showApp();
+  // 这里原来无条件调用 showApp()，后果是：只要在登录页可见时有任何路径碰到
+  // renderSidebar（遗留的异步回调、失败的登录请求收尾等），主界面就被强行
+  // 打开——用户输错密码却"进来了"（2026-11-24 实测复现）。
+  // 主界面显隐只由登录流程（boot / 登录成功）显式控制，渲染函数不碰它。
+  if (me) showApp();
   updateActiveNav(parseHash().parts);
 }
 
@@ -3172,6 +3176,8 @@ $('loginForm').addEventListener('submit', async e => {
     await route();
   } catch (err) {
     $('loginErr').textContent = err.message || '登录失败';
+    // 登录失败必须回到登录页：哪怕此时已有别的路径把主界面打开了
+    logoutLocal();
   } finally {
     btn.disabled = false;
   }
