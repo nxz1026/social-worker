@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from . import ylock as _ylock
 
+import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -30,10 +31,14 @@ CHECKLIST = [
     {"no": 1, "name": "活动计划", "prefix": "01-", "kind": "file"},
     {"no": 2, "name": "活动通知", "prefix": "02-", "kind": "file"},
     {"no": 3, "name": "签到表",   "prefix": "03-", "kind": "signed_photo"},
-    {"no": 4, "name": "满意度测评汇总表", "prefix": "05-", "kind": "file"},
+    # 满意度测评要等满意度调查 PDF 上传后再统计填分，空表是正常的中间态，
+    # 但不能算齐备 —— 走 file_with_numbers（至少 1 个数值单元格才算统计过）
+    {"no": 4, "name": "满意度测评汇总表", "prefix": "05-", "kind": "file_with_numbers"},
     {"no": 5, "name": "总结报告", "prefix": "06-", "kind": "file"},
     {"no": 6, "name": "简报",     "prefix": "07-", "kind": "file"},
-    {"no": 7, "name": "决算表",   "prefix": "08-", "kind": "file"},
+    # 决算表必须有真实金额与数量：测试时自动生成但没填数据的副本会残留
+    # {{物品名称_1}} 占位符，这种不能算齐备（2026-11-24 实测踩到）
+    {"no": 7, "name": "决算表",   "prefix": "08-", "kind": "file_with_numbers"},
     {"no": 8, "name": "监督记录表", "prefix": "09-", "kind": "signed_photo"},
     {"no": 9, "name": "报销单",   "prefixes": ["09-", "21-"], "kind": "xlsx"},
     {"no": 10, "name": "物资照片", "prefix": "10-", "kind": "dir_with_media"},
@@ -293,6 +298,56 @@ def _rel_label(path: Path, act_dir: Path) -> str:
         return path.name
 
 
+_NUMBER_RE = re.compile(r"[\d,]+(?:\.\d+)?")
+
+
+def _content_stats(path: Path) -> tuple[int, int]:
+    """返回 (残留占位符数, 纯数字单元格数)。读不了返回 (-1, -1)。
+
+    用于「文件存在不等于内容填了」的场景：决算表残留 {{物品名称_1}} 说明
+    是空模板副本；满意度测评全空说明还没统计。
+    """
+    suffix = path.suffix.lower()
+    try:
+        if suffix == ".docx":
+            from docx import Document
+            doc = Document(str(path))
+            placeholder = numbers = 0
+            for table in doc.tables:
+                for row in table.rows:
+                    for cell in row.cells:
+                        text = cell.text.strip()
+                        if "{{" in text:
+                            placeholder += 1
+                        elif _NUMBER_RE.fullmatch(text):
+                            numbers += 1
+            for para in doc.paragraphs:
+                if "{{" in para.text:
+                    placeholder += 1
+            return placeholder, numbers
+        if suffix == ".xlsx":
+            import openpyxl
+            wb = openpyxl.load_workbook(str(path), data_only=True)
+            placeholder = numbers = 0
+            for ws in wb.worksheets:
+                for row in ws.iter_rows():
+                    for cell in row:
+                        val = cell.value
+                        if isinstance(val, str):
+                            if "{{" in val:
+                                placeholder += 1
+                            elif _NUMBER_RE.fullmatch(val.strip()):
+                                numbers += 1
+                        elif isinstance(val, (int, float)):
+                            numbers += 1
+            wb.close()
+            return placeholder, numbers
+    except Exception:
+        return -1, -1
+    return -1, -1
+
+
+
 def _match(item: dict, entries: list[Path],
            act_dir: Path) -> tuple[Path | None, str, str]:
     """按 kind 判定一项是否命中，返回 (命中的路径, 说明, 状态)。
@@ -316,6 +371,26 @@ def _match(item: dict, entries: list[Path],
             return (loose[0], f"命中 {_rel_label(loose[0], act_dir)}"
                               f"（位置不规范，建议放活动根目录）", "ok")
         return None, f"未找到 {'/'.join(prefixes)} 开头的文件", "missing"
+
+    if kind == "file_with_numbers":
+        # 文件在，但要看内容填没填 —— 只认根目录命中优先，其次宽松兜底
+        candidates = [p for p in hits if p.is_file()]
+        if not candidates:
+            candidates = _loose_find(item, act_dir, ANY_FILE_EXT)
+        if not candidates:
+            return None, f"未找到 {'/'.join(prefixes)} 开头的文件", "missing"
+        target = candidates[0]
+        placeholder, numbers = _content_stats(target)
+        if placeholder < 0:
+            return target, f"命中 {target.name}（无法解析内容，按已填处理）", "ok"
+        if placeholder > 0:
+            return (target,
+                    f"{target.name} 仍是空模板（残留 {placeholder} 个占位符，需填数据）",
+                    "partial")
+        if numbers == 0:
+            return (target,
+                    f"{target.name} 还没有数值内容（待填/待统计）", "partial")
+        return target, f"命中 {target.name}（{numbers} 项数据）", "ok"
 
     if kind in ("xlsx", "docx"):
         suffix = "." + kind

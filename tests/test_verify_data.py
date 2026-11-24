@@ -249,15 +249,23 @@ def _assert_check_shape(result: dict) -> None:
 
 @REAL_SKIP
 def test_real_checks_structure_and_counts():
-    """真实活动：15 项结构、计数和为 15、complete 等价关系；实测 13/1/0/1。"""
+    """真实活动：15 项结构、计数和为 15、complete 等价关系。
+
+    2026-11-24 起「文件存在」不再等于「内容填了」：决算表残留 {{...}}
+    或满意度测评表全空都判 partial。这个活动的满意度测评汇总表确实没填
+    数值，因此 ok 从 13 降到 12、partial 从 1 升到 2。
+    """
     result = checks.check(REAL_ACT)
 
     _assert_check_shape(result)
-    assert result["ok_count"] == 13
-    assert result["partial_count"] == 1
+    assert result["ok_count"] == 12
+    assert result["partial_count"] == 2
     assert result["missing_count"] == 0
     assert result["na_count"] == 1
     assert result["complete"] is False
+    # 两项 partial 必须是「有文件但没填内容」，不是文件缺失
+    partials = {it["no"] for it in result["items"] if it["status"] == "partial"}
+    assert partials == {4, 8}, f"partial 项应含满意度测评表(4)与监督记录(8)，实际 {partials}"
 
 
 def test_checks_complete_activity(tmp_path):
