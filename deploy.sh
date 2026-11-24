@@ -32,8 +32,14 @@ for d in "${DIRS[@]}"; do
     src="$REPO/$d"
     [ -d "$src" ] || { echo "  跳过 $d（不存在）"; continue; }
     echo "-- $d"
+    # config/ 里有部署机专属数据（飞书凭据、通知 webhook、server_endpoint），
+    # 全量覆盖会把生产配置冲掉。2026-11-24 实测：生产 config/api.yaml 的
+    # upload.max_mb 曾被开发仓的旧值覆盖回 50。含凭据/主机信息的文件一律不同步，
+    # 只同步纯代码用的配置。
     rsync -a --itemize-changes $DRY \
         --exclude '__pycache__' --exclude '*.pyc' --exclude '*.bak-*' \
+        --exclude 'feishu-flow.yaml' --exclude 'notify.yaml' \
+        --exclude 'server_endpoint.txt' --exclude 'api.yaml' \
         "$src/" "$PROD/$d/"
 done
 
