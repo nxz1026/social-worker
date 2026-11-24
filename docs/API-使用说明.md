@@ -607,6 +607,34 @@ office 文件名后面的 `↗ md` 徽标仍保留，鼠标悬停能看到对应
 实测 13-爱邻议事会：回读前四项全空，回读后
 `世纪光华物业二楼党群办公室 / 社区议事代表… / 11 / 11`。
 
+## 5.5.5b 活动编号：补写 / 自动分配
+
+活动缺 `code` 时所有生成接口返回 400 `CODE_MISSING`。三个修编号的入口：
+
+```http
+PATCH /api/projects/{name}/activities/{dirname}/code
+      {"code": "CDYJR2026008-C-1111004"}      # 显式指定
+      {"auto": true}                          # 按项目规则自动生成
+POST  /api/projects/{name}/activities/backfill-code
+      {"dry_run": true}                       # 预演；false 才真写
+```
+
+`backfill-code` 扫本项目下所有缺 code 的活动，按编号规则批量补齐，
+预演模式返回 `would_fill` 列表。
+
+**`PATCH .../activities/{dirname}` 是重命名端点**（`new_name` 必填），
+不能用来改编号——这是 2026-11-24 客户端踩的坑，已把 `CODE_MISSING`
+的 hint 改指向 `/code`。
+
+**新建活动自动带编号**：`POST .../activities/split` 建目录时会写最小
+`activity.yaml`（含 code + `status: created`），不再产出无编号活动。
+编号生成失败不阻断建目录，可事后用 `/code` 补。
+
+**`act_year` 口径**：编号格式只存活动年**个位**（`act_year % 10`），
+所以 `parsed.act_year` 是 `6` 不是 `2026`——这是格式约束不是截断。
+API 另返回 `act_year_full`（完整年份）与 `act_year_note` 说明。
+传 `2026` / `26` / `0`（取当前年）三种写法都接受。
+
 ## 5.5.6 三表校验（决算 / 报销 / 发票）
 
 ```http

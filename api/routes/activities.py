@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import re
+
 from fastapi import APIRouter, Depends, HTTPException
 
 from api.deps import current_user, require_project_write
@@ -19,6 +21,14 @@ router = APIRouter()
 # 会循环 import，所以这里做函数内延迟 import。
 
 @router.post("/api/projects/{name}/activities/split")
+def _bump_serial(code: str) -> str:
+    """把编号末尾 4 位流水号 +1，用于同批去重。"""
+    head, tail = code[:-4], code[-4:]
+    if tail.isdigit():
+        return f"{head}{int(tail) + 1:04d}"
+    return code
+
+
 def api_split_activities(name: str, body: dict, user=Depends(current_user)):
     """按 indicators 建活动目录。body: {"dry_run": true/false}，默认只预演。"""
     meta = project_meta_or_404(name)
@@ -41,7 +51,29 @@ def api_split_activities(name: str, body: dict, user=Depends(current_user)):
             "would_skip": [d for d in planned_names if d in existing],
         }
 
-    created = _activities.create_activity_dirs(project_dir, planned)
+    # 建目录时顺手写最小 activity.yaml（含 code），避免产出「无编号活动」——
+    # 那种活动所有生成接口都会报 CODE_MISSING，且修复只能直接改磁盘。
+    from api.routes.projects import _existing_codes, api_project_code
+
+    def _code_maker(item: dict, used: set[str]) -> str | None:
+        dirname = str(item.get("dirname") or "")
+        act_type = 1
+        act_month = data.get("_default_month") or 1
+        m = re.search(r"-(\d{2})-", dirname)
+        if m:
+            act_month = int(m.group(1))
+        try:
+            generated = api_project_code(name, act_type=act_type,
+                                         act_month=act_month, user=user)
+        except Exception:
+            return None
+        code = str((generated or {}).get("code") or "").strip()
+        # 同一批里流水号会重复（后端只按磁盘已有编号算），这里做一次去重
+        while code and code in used:
+            code = _bump_serial(code)
+        return code or None
+
+    created = _activities.create_activity_dirs(project_dir, planned, code_maker=_code_maker)
     created_set = set(created)
     return {
         "dry_run": False,

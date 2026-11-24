@@ -156,7 +156,8 @@ def _sw_run_impl(body: dict, request: Request, conn, user) -> dict:
         activity_require_code(act_dir)
     except HTTPException as exc:
         raise ApiError(400, "CODE_MISSING", str(exc.detail),
-                       "先在 activity.yaml 配置 code，或调 PATCH 活动接口补编号")
+                       "调 PATCH /api/projects/{p}/activities/{a}/code 补编号"
+                       "（传 code 显式指定，或传 auto=true 按项目规则自动生成）")
 
     if task:
         # task 走 LLM 时仍要落到某个模板；不传 template 就按任务给默认模板

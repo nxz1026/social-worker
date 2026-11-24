@@ -199,6 +199,11 @@ def api_project_code(name: str, act_type: int, act_month: int,
     if act_types and act_type not in set(act_types.values()):
         raise HTTPException(400, f"活动类型号 {act_type} 不在项目配置里")
     year = project_year(name)
+    # act_year 传 0/不传 → 取当前年；传完整年份（2026）或两位年份（26）都接受。
+    # 编号里只存活动年的**个位**（格式约束），所以 parsed.act_year 是个位数；
+    # 为免调用方误以为「2026 被截断」，返回时另给 act_year_full。
+    if act_year and act_year < 100:
+        act_year = 2000 + int(act_year)
     act_year = _act_year(act_month, act_year or None)
     if not serial:
         serial = _coding.next_serial(_existing_codes(meta), act_type=act_type,
@@ -210,4 +215,7 @@ def api_project_code(name: str, act_type: int, act_month: int,
         parsed = _coding.parse_code(code)
     except ValueError as exc:
         raise HTTPException(400, str(exc))
-    return {"code": code, "parsed": parsed}
+    # parsed.act_year 是编号里的个位；补一个完整年份，避免「2026→6」被当成 bug
+    result = {"code": code, "parsed": {**parsed, "act_year_full": act_year,
+                                       "act_year_note": "编号只存活动年个位，act_year_full 为完整年份"}}
+    return result

@@ -2,16 +2,19 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime
 from pathlib import Path
 
 import yaml
 from fastapi import APIRouter, Depends, HTTPException, Request
 
-from api.deps import current_user, db, project_access, require_write
+from api.deps import (current_user, db, project_access, require_project_write,
+                      require_write)
 from api.shared import audit as _audit_mod
 from api.shared.domain import (activity_meta_or_404, activity_require_code,
-                               find_template)
+                               activity_yaml_data, find_template,
+                               project_meta_or_404)
 from api.shared.paths import fill_output, safe_rel_path
 from engine import activity as _activity
 from engine import caption as _caption
@@ -106,6 +109,115 @@ def api_set_na(name: str, dirname: str, body: dict,
     from engine import ylock as _ylock
     _ylock.update_yaml(act_dir / _ingest.ACTIVITY_YAML, _mutate, lock_dir=act_dir)
     return {"ok": True, "not_applicable": sorted(nos)}
+
+
+@router.patch("/api/projects/{name}/activities/{dirname}/code")
+def api_set_activity_code(name: str, dirname: str, body: dict,
+                          user=Depends(require_write)):
+    """补写 / 修改活动编号。body: {"code": "CDYJR2026008-C-1111002"}。
+
+    原来 activity.yaml 的 code 没有任何写入入口：生成材料时若缺 code 就返回
+    CODE_MISSING，而提示里指的 PATCH 活动端点其实是重命名端点，强依赖
+    new_name —— 按提示操作必然失败，活动一旦进入无编号状态就无法自愈
+    （2026-11-24 客户端实测 16 个候选字段全部写不进去）。
+
+    只改 code 一个字段，与 not_applicable / reviews 共用同一把活动锁。
+    传空串或不传 code 且带 auto=true 时，按项目编号规则自动生成一个。
+    """
+    act_dir, _meta = activity_meta_or_404(name, dirname, user, write=True)
+    code = str((body or {}).get("code") or "").strip()
+
+    if not code:
+        if not (body or {}).get("auto"):
+            raise HTTPException(400, "code 不能为空（或传 auto=true 自动生成）")
+        # 自动生成：复用项目编号规则。活动类型取项目 yaml 里登记的
+        # act_types（按活动目录名的关键词匹配），推不出就用第 1 类。
+        from api.routes.projects import api_project_code
+        act = activity_yaml_data(act_dir)
+        guess_month = 1
+        raw_time = str(act.get("活动时间") or "")
+        m = re.search(r"-(\d{2})-", raw_time)
+        if m:
+            guess_month = int(m.group(1))
+        generated = api_project_code(name, act_type=1, act_month=guess_month,
+                                     user=user)
+        code = str((generated or {}).get("code") or "").strip()
+        if not code:
+            raise HTTPException(400, "自动生成编号失败，请显式传 code")
+
+    # 编号格式校验：至少 6 位、含字母或数字，不含路径分隔符
+    if len(code) < 6 or "/" in code or "\\" in code:
+        raise HTTPException(400, f"编号格式非法：{code}")
+
+    def _mutate(data: dict) -> dict:
+        data["code"] = code
+        if not str(data.get("status") or "").strip():
+            data["status"] = "imported"
+        return data
+
+    from engine import ylock as _ylock
+    _ylock.update_yaml(act_dir / _ingest.ACTIVITY_YAML, _mutate, lock_dir=act_dir)
+    return {"ok": True, "code": code}
+
+
+@router.post("/api/projects/{name}/activities/backfill-code")
+def api_backfill_codes(name: str, body: dict, user=Depends(require_write)):
+    """给本项目里缺 code 的活动批量补编号。
+
+    body: {"dry_run": true/false}（默认只预演）
+    存量里有一批活动是旧版 split 建的、没有 activity.yaml，
+    全部生成接口都报 CODE_MISSING。本接口按项目编号规则补齐。
+    """
+    meta = project_meta_or_404(name)
+    require_project_write(user, meta)
+    project_dir = Path(_projects.PROJECTS_ROOT) / name
+    act_root = project_dir / "活动"
+    if not act_root.is_dir():
+        raise HTTPException(404, f"项目下没有活动目录：{name}")
+
+    pending: list[tuple[str, Path, dict]] = []
+    for d in sorted(act_root.iterdir()):
+        if not d.is_dir() or d.name.startswith("."):
+            continue
+        act = activity_yaml_data(d)
+        if str(act.get("code") or "").strip():
+            continue
+        pending.append((d.name, d, act))
+
+    if bool((body or {}).get("dry_run", True)):
+        return {"dry_run": True, "would_fill": [n for n, _d, _a in pending]}
+
+    from api.routes.projects import api_project_code
+    filled: list[dict] = []
+    used: set[str] = set()
+    for dirname, act_dir, act in pending:
+        act_month = 1
+        m = re.search(r"-(\d{2})-", str(act.get("活动时间") or ""))
+        if m:
+            act_month = int(m.group(1))
+        try:
+            code = str((api_project_code(name, act_type=1, act_month=act_month,
+                                         user=user) or {}).get("code") or "")
+        except Exception:
+            continue
+        while code and code in used:
+            head, tail = code[:-4], code[-4:]
+            code = f"{head}{int(tail) + 1:04d}" if tail.isdigit() else code
+        if not code:
+            continue
+        used.add(code)
+
+        def _mutate(data: dict, _code: str = code) -> dict:
+            data["code"] = _code
+            if not str(data.get("status") or "").strip():
+                data["status"] = "imported"
+            return data
+
+        from engine import ylock as _ylock
+        _ylock.update_yaml(act_dir / _ingest.ACTIVITY_YAML, _mutate, lock_dir=act_dir)
+        filled.append({"activity": dirname, "code": code})
+
+    return {"dry_run": False, "filled": filled, "total": len(filled)}
 
 
 @router.post("/api/projects/{name}/activities/{dirname}/review")

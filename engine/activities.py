@@ -6,7 +6,11 @@
 """
 from __future__ import annotations
 
+from typing import Callable
+
 from pathlib import Path
+
+import yaml
 
 CN_NUMS = "一二三四五六七八九十"
 _CN_DIGITS = "零一二三四五六七八九"
@@ -119,16 +123,27 @@ def find_activity_dir(project_dir: Path, keyword: str,
     return hits[0] if len(hits) == 1 else None
 
 
-def create_activity_dirs(project_dir: Path, planned: list[dict]) -> list[str]:
+def create_activity_dirs(project_dir: Path, planned: list[dict],
+                         code_maker: "Callable[[dict, set[str]], str | None] | None" = None
+                         ) -> list[str]:
     """按 planned 建活动目录，幂等：已存在跳过。
 
-    只 mkdir，不写任何文件。返回实际新建的目录名列表。
+    原来「只 mkdir，不写任何文件」——于是 split 建出来的活动天然没有
+    activity.yaml，一进入生成接口就报 CODE_MISSING，且当时没有任何 API
+    能补编号，活动就此卡死（2026-11-24 客户端实测）。
+
+    code_maker(planned_item, used_codes) -> code 由调用方注入（编号规则在
+    api/routes 层，engine 不反向依赖）。给了就在建目录时写最小 activity.yaml；
+    失败不阻断建目录（编号可事后用 PATCH .../code 补）。
+
+    返回实际新建的目录名列表。
     """
     if not planned:
         return []
     act_dir = Path(project_dir) / "活动"
     act_dir.mkdir(parents=True, exist_ok=True)
     created: list[str] = []
+    used: set[str] = set()
     for item in planned:
         dirname = _safe_dirname(item.get("dirname") if isinstance(item, dict) else item)
         target = act_dir / dirname
@@ -136,6 +151,22 @@ def create_activity_dirs(project_dir: Path, planned: list[dict]) -> list[str]:
             continue
         target.mkdir()
         created.append(dirname)
+        if code_maker is not None:
+            try:
+                code = code_maker(item if isinstance(item, dict) else {"dirname": dirname}, used)
+            except Exception:
+                code = None
+            if code:
+                used.add(code)
+                try:
+                    from . import ylock as _ylock
+                    payload = {"code": code, "status": "created"}
+                    _ylock.atomic_write_text(
+                        target / "activity.yaml",
+                        yaml.safe_dump(payload, allow_unicode=True, sort_keys=False),
+                    )
+                except Exception:
+                    pass
     return created
 
 
