@@ -372,8 +372,13 @@ def _task_spec(task: str) -> dict:
 
 
 def build_prompt(task: str, facts: dict, style: str,
-                 style_config: dict | None = None) -> str:
-    """三层拼装 prompt：角色 → 文风与样例 → 本次内容与输出骨架。"""
+                 style_config: dict | None = None,
+                 context_block: str = "") -> str:
+    """三层拼装 prompt：角色 → 文风与样例 → 本次内容与输出骨架。
+
+    context_block 是「冷化材料」（项目书/协议/知识库片段），插在事实之后、
+    骨架之前，让模型有据可依。为空时行为与原来完全一致。
+    """
     spec = _task_spec(task)
     config = style_config if style_config is not None else load_style_config()
     style_spec = (config.get("styles") or {}).get(style)
@@ -415,6 +420,11 @@ def build_prompt(task: str, facts: dict, style: str,
         "活动基本信息：",
         _facts_text(facts) or "- （未提供）",
         "",
+    ]
+    # 冷化材料（项目书/协议/知识库）：有才插，没有就不占 prompt
+    if context_block.strip():
+        blocks += [context_block.strip(), ""]
+    blocks += [
         spec.get("intro") or (f"需要生成 {len(spec['fields'])} 段，"
                               "严格按下面骨架。只输出 JSON，不要任何解释："),
         "",
@@ -724,7 +734,8 @@ def _generate(task: str, prompt: str) -> dict:
 def write(task: str, facts: dict, *, style: str = "",
           style_config: dict | None = None,
           max_rewrite: int = 1,
-          on_progress: "Callable[[str, int], None] | None" = None) -> dict:
+          on_progress: "Callable[[str, int], None] | None" = None,
+          context_block: str = "") -> dict:
     """生成 → 自检 → 不达标则带自检意见重写 → 再自检。
 
     返回字段 dict，另带两个内部键（调用方 fill 时会忽略以 _ 开头的键）：
@@ -735,7 +746,8 @@ def write(task: str, facts: dict, *, style: str = "",
     config = style_config if style_config is not None else load_style_config()
     chosen = str(style or "").strip() or resolve_style(
         str(facts.get("项目名称") or ""), str(facts.get("活动名称") or ""))
-    prompt = build_prompt(task, facts, chosen, style_config=config)
+    prompt = build_prompt(task, facts, chosen, style_config=config,
+                          context_block=context_block)
 
     # 进度回调：一次 LLM 调用实测 50~100 秒，前端需要知道「还活着」。
     # stage: generating / checking / rewriting / done

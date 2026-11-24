@@ -415,8 +415,15 @@ def check(dir_path: Path) -> dict:
             status, detail = "na", "文件名标注不适用"
         else:
             status = match_status
-        items.append({"no": item["no"], "name": item["name"],
-                      "status": status, "detail": detail})
+        entry = {"no": item["no"], "name": item["name"],
+                 "status": status, "detail": detail}
+        # 命中路径一并带出：自动整理要据此知道文件在哪、该搬去哪
+        if found is not None:
+            try:
+                entry["path"] = found.relative_to(act_dir.resolve()).as_posix()
+            except ValueError:
+                entry["path"] = found.name
+        items.append(entry)
 
     # 第 15 项没有命中规则，恒为不适用
     items.append({"no": OTHER_ITEM["no"], "name": OTHER_ITEM["name"],

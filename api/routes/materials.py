@@ -18,6 +18,7 @@ from engine import caption as _caption
 from engine import checks as _checks
 from engine import fill as _fill
 from engine import ingest as _ingest
+from engine import grounding as _grounding
 from engine import llm as _llm
 from engine import projects as _projects
 from engine import readme as _readme
@@ -197,6 +198,11 @@ def api_activity_llm(name: str, dirname: str, body: dict, request: Request,
         raise HTTPException(400, "缺 task")
     style = str(body.get("style") or "")
     facts = _activity.build_data(name, dirname, user=user)
+    # 冷化：从项目书/协议/知识库取事实注入 prompt，避免模型凭空编内容
+    ctx = _grounding.build_context(
+        Path(_projects.PROJECTS_ROOT) / name, name,
+        str(facts.get("活动名称") or task))
+    context_block = _grounding.render_prompt_block(ctx)
     key = _progress_key(name, dirname)
 
     def _on_progress(stage: str, percent: int) -> None:
@@ -205,7 +211,8 @@ def api_activity_llm(name: str, dirname: str, body: dict, request: Request,
 
     _on_progress("generating", 5)
     try:
-        result = _llm.write(task, facts, style=style, on_progress=_on_progress)
+        result = _llm.write(task, facts, style=style, on_progress=_on_progress,
+                            context_block=context_block)
     except ValueError as exc:
         _LLM_PROGRESS.pop(key, None)
         raise HTTPException(400, str(exc))
@@ -222,7 +229,8 @@ def api_activity_llm(name: str, dirname: str, body: dict, request: Request,
     _audit_mod.audit(conn, user["id"], "llm_generate", project=name, target=task,
                      detail={"activity": dirname, "style": style},
                      ip=request.client.host)
-    return {"task": task, "style": style, "result": result}
+    return {"task": task, "style": style, "result": result,
+            "grounding": _grounding.summarize(ctx["docs"], ctx["kb"])}
 
 
 # LLM 生成结果留档目录（活动目录下）
@@ -315,8 +323,12 @@ def api_activity_llm_fill(name: str, dirname: str, body: dict, request: Request,
     dst = fill_output(act_dir, body, tpl)
 
     facts = _activity.build_data(name, dirname, user=user)
+    ctx = _grounding.build_context(
+        Path(_projects.PROJECTS_ROOT) / name, name,
+        str(facts.get("活动名称") or task))
     try:
-        generated = _llm.write(task, facts, style=style)
+        generated = _llm.write(task, facts, style=style,
+                               context_block=_grounding.render_prompt_block(ctx))
     except ValueError as exc:
         raise HTTPException(400, str(exc))
     except _llm.LLMError as exc:

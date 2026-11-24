@@ -657,7 +657,7 @@ async function pageActivity(name, dirname, params) {
         <button class="btn primary" data-act="open-fill" ${canWrite() ? '' : 'disabled title="需 editor/admin"'}>生成材料</button>
         <button class="btn" data-act="open-photo-upload" ${canWrite() ? '' : 'disabled title="需 editor/admin"'}>上传照片</button>
         <button class="btn" data-act="act-upload" ${canWrite() ? '' : 'disabled title="需 editor/admin"'}>上传文件</button>
-        <button class="btn" data-act="open-llm" ${canWrite() ? '' : 'disabled title="需 editor/admin"'}>LLM 生成</button>
+        <button class="btn" data-act="open-tidy" ${canWrite() ? '' : 'disabled title="需 editor/admin"'}>自动整理</button>
         <button class="btn" data-act="do-check">核对</button>
         <button class="btn" data-act="open-trash">回收站</button>
         <button class="btn" data-act="sync-feishu" ${isAdmin() ? '' : 'disabled title="需 admin"'}>同步飞书</button>
@@ -1521,6 +1521,11 @@ async function openFillModal() {
       <label class="field"><span>模板</span><select id="fillTpl">${options}</select></label>
       <label class="field"><span>输出文件名（留空 = 模板名）</span><input id="fillOut" placeholder="如 01-活动计划.docx"></label>
     </div>
+    <label class="field" style="flex-direction:row;align-items:center;gap:8px;margin:4px 0 10px">
+      <input type="checkbox" id="fillUseLlm" style="width:auto;margin:0">
+      <span style="margin:0" id="fillLlmLabel">使用 LLM 生成内容</span>
+    </label>
+    <div id="fillLlmHint" class="hint" style="margin:-6px 0 10px"></div>
     <div class="section-title">模板占位符</div>
     <div id="fillPh" class="chips"></div>
     <div class="section-title">填充数据 <span class="hint">留空不改；改动过的值会覆盖系统数据</span></div>
@@ -1536,6 +1541,21 @@ async function openFillModal() {
     el('#fillPh').innerHTML = phs.length
       ? phs.map(p => `<span class="chip">${esc(p)}</span>`).join('')
       : '<span class="muted">该模板没有占位符</span>';
+    // 计划书/简报的内容段只能由 LLM 产出，不勾就是一片空白 → 强制勾选并置灰
+    const REQUIRED_LLM = ['计划书', '简报'];
+    const box = el('#fillUseLlm');
+    if (box) {
+      const need = REQUIRED_LLM.includes(t.name);
+      // 切模板时按模板重置，避免把上一个模板的勾选状态带过来
+      box.checked = need;
+      box.disabled = need;
+      el('#fillLlmLabel').textContent = need
+        ? '使用 LLM 生成内容（该模板必须用 LLM，不可取消）'
+        : '使用 LLM 生成内容（可选：先用知识库+项目资料冷化，再填模板）';
+      el('#fillLlmHint').textContent = need
+        ? '计划书/简报的背景、目的、目标等段落没有现成数据，只能由 LLM 依据项目书与知识库生成。'
+        : '不勾选则只用系统已有数据直接填充。';
+    }
     el('#fillForm').innerHTML = phs.map(p => {
       const key = phKey(p);
       const val = defaults[key] != null ? defaults[key] : '';
@@ -1547,6 +1567,12 @@ async function openFillModal() {
   tplSel.addEventListener('change', renderForm);
   renderForm();
 }
+
+/* 模板名 → LLM 任务名。只有这两类模板有 LLM 内容段。*/
+const LLM_TASK_BY_TPL = {
+  '计划书': 'plan',
+  '简报': 'brief',
+};
 
 async function submitFill() {
   if (!actCtx) return;
@@ -1562,14 +1588,33 @@ async function submitFill() {
   });
   const body = { template: tpl, data };
   if (out) body.output = out;
-  el('#fillMsg').innerHTML = '<span class="muted">生成中…</span>';
+  const useLlm = !!(el('#fillUseLlm') && el('#fillUseLlm').checked);
+  // 勾了 LLM 且用户没改任何字段 → 走 llm-fill（一次调用：冷化+生成+落盘）
+  // 用户改过字段 → 仍走 fill 用改后的值；LLM 内容从已有的 _llm 留档里取
+  const untouched = Object.keys(data).length === 0;
+  if (useLlm) {
+    el('#fillMsg').innerHTML = '<span class="muted">正在用 LLM 冷化生成（约 2–4 分钟，'
+      + '依据项目书与知识库）…</span>';
+  } else {
+    el('#fillMsg').innerHTML = '<span class="muted">生成中…</span>';
+  }
   try {
-    const r = await api(`/projects/${enc(projectName)}/activities/${enc(dirname)}/fill`, {
-      method: 'POST', body,
-    });
+    let r;
+    if (useLlm && untouched) {
+      const task = LLM_TASK_BY_TPL[tpl.replace(/^\d+-/, '').replace(/\.(docx|xlsx)$/i, '')]
+        || 'plan';
+      r = await api(`/projects/${enc(projectName)}/activities/${enc(dirname)}/llm-fill`, {
+        method: 'POST', body: { task, template: tpl, ...(out ? { output: out } : {}) },
+      });
+    } else {
+      r = await api(`/projects/${enc(projectName)}/activities/${enc(dirname)}/fill`, {
+        method: 'POST', body,
+      });
+    }
     const missing = r.missing || [];
+    const g = r.grounding ? `；冷化依据：${esc(r.grounding)}` : '';
     el('#fillMsg').innerHTML = `<div class="notice green">
-      已生成 <b>${esc(r.path)}</b>，填充 ${esc(r.filled)} 处${missing.length ? `；缺 ${missing.length} 个占位符：${esc(missing.join('、'))}` : ''}。
+      已生成 <b>${esc(r.path)}</b>，填充 ${esc(r.filled)} 处${missing.length ? `；缺 ${missing.length} 个占位符：${esc(missing.join('、'))}` : ''}${g}。
     </div>`;
     $('modalFoot').innerHTML = '<button class="btn" data-close-modal>关闭</button>' +
       '<button class="btn primary" data-act="close-refresh">关闭并刷新</button>';
@@ -1581,6 +1626,64 @@ async function submitFill() {
 }
 
 /* ---------------- LLM 生成弹窗 ---------------- */
+/* 自动整理：把放错位置/命名不规范的材料归位改名。先出方案给用户看。*/
+let tidyPlan = null;
+async function openTidyModal() {
+  if (!actCtx) return;
+  const { projectName, dirname } = actCtx;
+  openModal('自动整理 · 材料归位', '<div class="muted">正在扫描…</div>',
+    '<button class="btn" data-close-modal>取消</button>', true);
+  try {
+    const p = await api(`/projects/${enc(projectName)}/activities/${enc(dirname)}/tidy`);
+    tidyPlan = p.actions || [];
+    if (!tidyPlan.length) {
+      $('modalBody').innerHTML = '<div class="notice green">'
+        + '材料位置与命名都符合规范，无需整理。</div>';
+      if ((p.skipped || []).length) {
+        $('modalBody').innerHTML += '<div class="section-title">已跳过</div>'
+          + p.skipped.map(x => `<div class="muted">${esc(x.from)} — ${esc(x.reason)}</div>`).join('');
+      }
+      $('modalFoot').innerHTML = '<button class="btn" data-close-modal>关闭</button>';
+      return;
+    }
+    $('modalBody').innerHTML = '<div class="notice">将执行以下 '
+      + tidyPlan.length + ' 项整理（只搬动和改名，不改内容）：</div>'
+      + tidyPlan.map(a => `<div class="file-row"><span class="nm">${esc(a.from)}</span>`
+        + `<span class="sz">→ ${esc(a.to)}</span>`
+        + `<span class="tm">${esc(a.reason)}</span></div>`).join('')
+      + ((p.skipped || []).length
+        ? '<div class="section-title">已跳过</div>'
+          + p.skipped.map(x => `<div class="muted">${esc(x.from)} — ${esc(x.reason)}</div>`).join('')
+        : '')
+      + '<div id="tidyMsg" style="margin-top:12px"></div>';
+    $('modalFoot').innerHTML = '<button class="btn" data-close-modal>取消</button>'
+      + '<button class="btn primary" data-act="tidy-apply">执行整理</button>';
+  } catch (e) {
+    $('modalBody').innerHTML = `<div class="notice">扫描失败：${esc(e.message)}</div>`;
+    $('modalFoot').innerHTML = '<button class="btn" data-close-modal>关闭</button>';
+  }
+}
+
+async function applyTidy() {
+  if (!actCtx || !tidyPlan || !tidyPlan.length) return;
+  const { projectName, dirname } = actCtx;
+  el('#tidyMsg').innerHTML = '<span class="muted">整理中…</span>';
+  try {
+    const r = await api(`/projects/${enc(projectName)}/activities/${enc(dirname)}/tidy`, {
+      method: 'POST', body: { actions: tidyPlan },
+    });
+    const errs = r.errors || [];
+    el('#tidyMsg').innerHTML = `<div class="notice green">已整理 ${r.moved} 项`
+      + `${errs.length ? `，${errs.length} 项失败` : ''}。</div>`
+      + errs.map(e => `<div class="muted">${esc(e.from)} — ${esc(e.error)}</div>`).join('');
+    $('modalFoot').innerHTML = '<button class="btn" data-close-modal>关闭</button>'
+      + '<button class="btn primary" data-act="close-refresh">关闭并刷新</button>';
+    toast(`已整理 ${r.moved} 项`, 'ok');
+  } catch (e) {
+    el('#tidyMsg').innerHTML = `<div class="notice">整理失败：${esc(e.message)}</div>`;
+  }
+}
+
 async function openLlmModal() {
   if (!actCtx) return;
   const { projectName, dirname } = actCtx;
@@ -2827,7 +2930,8 @@ document.addEventListener('click', async e => {
     if (act === 'photo-done') { closeModal(); await refreshActivity(); return; }
     if (act === 'fill-submit') { await submitFill(); return; }
     if (act === 'close-refresh') { closeModal(); await refreshActivity(); return; }
-    if (act === 'open-llm') { await openLlmModal(); return; }
+    if (act === 'open-tidy') { await openTidyModal(); return; }
+    if (act === 'tidy-apply') { await applyTidy(); return; }
     if (act === 'nav-fold') {
       e.preventDefault(); e.stopPropagation();
       const key = node.dataset.fold;

@@ -314,8 +314,9 @@ def test_llm_fill_writes_output(tmp_path, projects_root, monkeypatch):
     monkeypatch.setattr(app, "ROOT", tmp_path)
     monkeypatch.setattr("api.state.ROOT", tmp_path)
     act = _activity(projects_root, "惠民项目", "01-走访调研-第一期")
+    # 端点在 llm.write 上会传 on_progress / context_block（冷化），替身要收下
     monkeypatch.setattr(app._llm, "write",
-                        lambda task, facts, style="": {"导语": "AI 写的导语"})
+                        lambda task, facts, style="", **kw: {"导语": "AI 写的导语"})
 
     out = api_activity_llm_fill(
         "惠民项目", "01-走访调研-第一期",

@@ -18,6 +18,7 @@ from PIL import Image
 
 from engine import caption as _caption
 from engine import office_convert as _office
+from engine import tidy as _tidy
 
 from api.deps import current_user, db, require_write
 from api.shared import audit as _audit_mod
@@ -215,6 +216,42 @@ def api_activity_download(name: str, dirname: str, path: str,
         raise HTTPException(404, f"文件不存在：{path}")
     media = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
     return FileResponse(target, media_type=media, filename=target.name)
+
+
+@router.get("/api/projects/{name}/activities/{dirname}/tidy")
+def api_activity_tidy_plan(name: str, dirname: str,
+                           user=Depends(current_user)):
+    """出整理方案：把放错位置/命名不规范的材料列出来该怎么归位。
+
+    只读，不改文件；由 POST 执行。
+    """
+    act_dir, _meta = activity_meta_or_404(name, dirname, user)
+    return _tidy.plan(act_dir)
+
+
+@router.post("/api/projects/{name}/activities/{dirname}/tidy")
+def api_activity_tidy_apply(name: str, dirname: str, body: dict,
+                            request: Request,
+                            user=Depends(require_write), conn=Depends(db)):
+    """执行整理：把材料搬到规范位置并改名。请求体 {"actions": [...]}。
+
+    不传 actions 就先现算一遍方案再执行。都只搬/改名，不改内容。
+    """
+    require_write(user)
+    act_dir, _meta = activity_meta_or_404(name, dirname, user, write=True)
+    actions = body.get("actions")
+    if not isinstance(actions, list):
+        actions = _tidy.plan(act_dir)["actions"]
+    if not actions:
+        return {"moved": 0, "errors": [], "actions": []}
+    result = _tidy.apply(act_dir, actions)
+    _audit_mod.audit(conn, user["id"], "tidy_activity_files", project=name,
+                     target=dirname,
+                     detail={"moved": result["moved"],
+                             "actions": [{"from": a.get("from"), "to": a.get("to")}
+                                         for a in result["actions"]]},
+                     ip=request.client.host)
+    return result
 
 
 @router.get("/api/projects/{name}/activities/{dirname}/preview")
