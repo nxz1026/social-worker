@@ -33,7 +33,9 @@ from engine.markdown import file_to_md  # noqa: E402
 
 DOC_EXTS = {".docx", ".doc", ".xlsx", ".pdf"}
 IMAGE_EXTS = {".jpg", ".jpeg", ".png"}
-FIXED_DIRS = (("方案", "方案"), ("协议", "协议"), ("报告", "报告"))
+# 项目级固定目录。`其他/` 是「未命中归档清单」的资料落点（联络表、阶段成果等），
+# 上传端点会把它们放进去 —— 不索引就等于「存得下、搜不到」（2026-11-24 补）。
+FIXED_DIRS = (("方案", "方案"), ("协议", "协议"), ("报告", "报告"), ("其他", "其他"))
 ACTIVITY_DIR = "活动"
 ACTIVITY_YAML = "activity.yaml"
 

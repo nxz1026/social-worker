@@ -1541,8 +1541,9 @@ async function openFillModal() {
     el('#fillPh').innerHTML = phs.length
       ? phs.map(p => `<span class="chip">${esc(p)}</span>`).join('')
       : '<span class="muted">该模板没有占位符</span>';
-    // 计划书/简报的内容段只能由 LLM 产出，不勾就是一片空白 → 强制勾选并置灰
-    const REQUIRED_LLM = ['计划书', '简报'];
+    // 这些模板的内容段只能由 LLM 产出，不勾就是一片空白 → 强制勾选并置灰。
+    // 必须与 LLM_TASK_BY_TPL 的 key 完全一致：少了哪个，那个模板就会被静默降级成普通 fill。
+    const REQUIRED_LLM = ['计划书', '简报', '总结报告', '监督记录'];
     const box = el('#fillUseLlm');
     if (box) {
       const need = REQUIRED_LLM.includes(t.name);
@@ -1553,7 +1554,7 @@ async function openFillModal() {
         ? '使用 LLM 生成内容（该模板必须用 LLM，不可取消）'
         : '使用 LLM 生成内容（可选：先用知识库+项目资料冷化，再填模板）';
       el('#fillLlmHint').textContent = need
-        ? '计划书/简报的背景、目的、目标等段落没有现成数据，只能由 LLM 依据项目书与知识库生成。'
+        ? '该模板的背景、目的、目标、总结等段落没有现成数据，只能由 LLM 依据项目书与知识库生成。'
         : '不勾选则只用系统已有数据直接填充。';
     }
     el('#fillForm').innerHTML = phs.map(p => {
@@ -1568,10 +1569,15 @@ async function openFillModal() {
   renderForm();
 }
 
-/* 模板名 → LLM 任务名。只有这两类模板有 LLM 内容段。*/
+/* 模板名 → LLM 任务名。只有这四类模板有 LLM 内容段。
+   漏映射的模板会被下面的 `|| 'plan'` 兜底成 plan，生成出 13 个计划书字段，
+   一个都填不进模板 —— 总结报告曾因此整篇留空（2026-11-24 查出）。
+   与 engine/llm.py 的 TASKS 及 api/routes/agent.py 的 _SW_TASK_TEMPLATE 保持一致。*/
 const LLM_TASK_BY_TPL = {
   '计划书': 'plan',
   '简报': 'brief',
+  '总结报告': 'summary',
+  '监督记录': 'supervision',
 };
 
 async function submitFill() {
@@ -1589,8 +1595,10 @@ async function submitFill() {
   const body = { template: tpl, data };
   if (out) body.output = out;
   const useLlm = !!(el('#fillUseLlm') && el('#fillUseLlm').checked);
-  // 勾了 LLM 且用户没改任何字段 → 走 llm-fill（一次调用：冷化+生成+落盘）
-  // 用户改过字段 → 仍走 fill 用改后的值；LLM 内容从已有的 _llm 留档里取
+  // 勾了 LLM 就走 LLM（不管有没有改字段）：
+  // 原实现在「勾选 + 改过字段」时静默走普通 fill，LLM 根本不执行，
+  // 用户以为用了 LLM 其实没用（2026-11-24 查出的 bug）。
+  // 复用的是 _llm 留档：有留档直接取，没有才调 LLM，避免重复等 2–4 分钟。
   const untouched = Object.keys(data).length === 0;
   if (useLlm) {
     el('#fillMsg').innerHTML = '<span class="muted">正在用 LLM 冷化生成（约 2–4 分钟，'
@@ -1600,12 +1608,29 @@ async function submitFill() {
   }
   try {
     let r;
-    if (useLlm && untouched) {
+    if (useLlm) {
       const task = LLM_TASK_BY_TPL[tpl.replace(/^\d+-/, '').replace(/\.(docx|xlsx)$/i, '')]
         || 'plan';
-      r = await api(`/projects/${enc(projectName)}/activities/${enc(dirname)}/llm-fill`, {
-        method: 'POST', body: { task, template: tpl, ...(out ? { output: out } : {}) },
-      });
+      // 先看有没有留档：有就只补 LLM 字段（秒出），没有才真调 LLM
+      let cached = null;
+      try {
+        const c = await api(`/projects/${enc(projectName)}/activities/${enc(dirname)}`
+          + `/llm-cache?task=${enc(task)}`);
+        if (c && c.exists && c.result) cached = c.result;
+      } catch { /* 读不到就当没有 */ }
+      if (cached && !untouched) {
+        // 用户改过的字段优先，LLM 字段从留档补
+        const merged = { ...Object.fromEntries(
+          Object.entries(cached).filter(([k]) => !k.startsWith('_'))) , ...data };
+        r = await api(`/projects/${enc(projectName)}/activities/${enc(dirname)}/fill`, {
+          method: 'POST', body: { template: tpl, data: merged, ...(out ? { output: out } : {}) },
+        });
+        r.grounding_used = '复用留档';
+      } else {
+        r = await api(`/projects/${enc(projectName)}/activities/${enc(dirname)}/llm-fill`, {
+          method: 'POST', body: { task, template: tpl, ...(out ? { output: out } : {}) },
+        });
+      }
     } else {
       r = await api(`/projects/${enc(projectName)}/activities/${enc(dirname)}/fill`, {
         method: 'POST', body,
