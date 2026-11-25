@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from typing import Callable
 
+import re
 from pathlib import Path
 
 import yaml
@@ -107,6 +108,40 @@ def list_existing_activities(project_dir: Path) -> list[str]:
     return sorted(p.name for p in act_dir.iterdir() if p.is_dir())
 
 
+_SEQ_PREFIX_RE = re.compile(r"^\d{2,3}-")
+
+
+def activity_key(dirname: str) -> str:
+    """活动目录的比对键：去掉序号前缀后的名字。
+
+    目录序号是历史遗留，同一个活动在不同时期可能叫：
+      12-安全隐患专项排查-七彩花都B1   （用户手工建的）
+      13-安全隐患专项排查-七彩花都B1   （按指标顺序算出来的）
+    序号不同但活动是同一个。比对「是否已存在」必须忽略序号，
+    否则 split 会把已有活动当成新的再建一遍（2026-11-25 实测：
+    dry_run 建议新建 10 个，其中 7 个已存在）。
+    """
+    return _SEQ_PREFIX_RE.sub("", str(dirname or "").strip())
+
+
+def match_existing(planned_names: list[str],
+                   existing: list[str]) -> tuple[list[str], list[str]]:
+    """把计划目录名与已有目录名配对，返回 (待建, 已存在)。
+
+    配对规则（方案 A）：**按去掉序号后的活动名精确匹配**。
+    不用模糊包含 —— 「爱邻议事会-第一期」与「爱邻议事会-第十期」
+    会互相误配。
+    """
+    existing_keys = {activity_key(n) for n in existing}
+    to_create, to_skip = [], []
+    for name in planned_names:
+        if activity_key(name) in existing_keys:
+            to_skip.append(name)
+        else:
+            to_create.append(name)
+    return to_create, to_skip
+
+
 def no_extras(code: str) -> str:
     """项目编号校验占位：返回去空白后的 code；是否为空由调用方判断。"""
     return str(code if code is not None else "").strip()
@@ -188,6 +223,16 @@ def create_activity_dirs(project_dir: Path, planned: list[dict],
                 try:
                     from . import ylock as _ylock
                     payload = {"code": code, "status": "created"}
+                    # 顺手把计划里已知的字段写进 yaml，省得建完还要手工补。
+                    # 只写有值的键，空串会让 build_data 拿到空字段。
+                    name = str(item.get("indicator_name") or "").strip()
+                    community = str(item.get("community") or "").strip()
+                    if name:
+                        payload["活动名称"] = (f"{name}（{community}）" if community
+                                                else name)
+                    if community:
+                        payload["活动地点"] = community
+                        payload["服务对象"] = "辖区居民"
                     _ylock.atomic_write_text(
                         target / "activity.yaml",
                         yaml.safe_dump(payload, allow_unicode=True, sort_keys=False),

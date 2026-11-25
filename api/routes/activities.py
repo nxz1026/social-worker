@@ -20,7 +20,6 @@ router = APIRouter()
 # api.app 在 import 本模块时还没执行完，模块级 `from api.app import ...`
 # 会循环 import，所以这里做函数内延迟 import。
 
-@router.post("/api/projects/{name}/activities/split")
 def _bump_serial(code: str) -> str:
     """把编号末尾 4 位流水号 +1，用于同批去重。"""
     head, tail = code[:-4], code[-4:]
@@ -29,6 +28,7 @@ def _bump_serial(code: str) -> str:
     return code
 
 
+@router.post("/api/projects/{name}/activities/split")
 def api_split_activities(name: str, body: dict, user=Depends(current_user)):
     """按 indicators 建活动目录。body: {"dry_run": true/false}，默认只预演。"""
     meta = project_meta_or_404(name)
@@ -44,11 +44,18 @@ def api_split_activities(name: str, body: dict, user=Depends(current_user)):
     project_dir = Path(_projects.PROJECTS_ROOT) / name
 
     if bool(body.get("dry_run", True)):
-        existing = set(_activities.list_existing_activities(project_dir))
+        existing = _activities.list_existing_activities(project_dir)
+        # 按活动名（忽略序号前缀）比对：已有目录的序号是历史遗留，
+        # 与按指标顺序算出的序号未必一致，直接比全名会把已有活动当成新的。
+        to_create, to_skip = _activities.match_existing(planned_names, existing)
         return {
             "dry_run": True,
-            "would_create": [d for d in planned_names if d not in existing],
-            "would_skip": [d for d in planned_names if d in existing],
+            "would_create": to_create,
+            "would_skip": to_skip,
+            # 磁盘上有、指标里没有登记的目录（人工加的活动）
+            "extra_on_disk": [n for n in existing
+                              if _activities.activity_key(n)
+                              not in {_activities.activity_key(x) for x in planned_names}],
         }
 
     # 建目录时顺手写最小 activity.yaml（含 code），避免产出「无编号活动」——
@@ -73,12 +80,16 @@ def api_split_activities(name: str, body: dict, user=Depends(current_user)):
             code = _bump_serial(code)
         return code or None
 
-    created = _activities.create_activity_dirs(project_dir, planned, code_maker=_code_maker)
-    created_set = set(created)
+    existing = _activities.list_existing_activities(project_dir)
+    to_create, to_skip = _activities.match_existing(planned_names, existing)
+    # 只建真正缺的（按活动名判断），不按全名
+    planned_to_build = [a for a in planned if a["dirname"] in set(to_create)]
+    created = _activities.create_activity_dirs(project_dir, planned_to_build,
+                                               code_maker=_code_maker)
     return {
         "dry_run": False,
         "created": created,
-        "skipped": [d for d in planned_names if d not in created_set],
+        "skipped": to_skip,
     }
 
 
