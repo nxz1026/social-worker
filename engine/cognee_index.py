@@ -177,7 +177,14 @@ def add_text(root: Path, dataset: str, text: str, filename: str) -> str:
 _MIN_POLL_INTERVAL = 0.5
 
 
-def cognify(root: Path, dataset: str, *, timeout: int = 1800,
+# 建图实测约 2 条/分钟（256 条数据集跑 2 小时以上），30 分钟超时会让
+# 大项目永远「超时失败」，且 index_cognee 遇错即中断，后面项目一条都建不了
+# （2026-11-25 实测：惠民 112/256 超时后，花都两个项目 0/152、0/32 完全没有开始）。
+# 默认放宽到 6 小时；调用方可用参数覆盖。
+_COGNIFY_TIMEOUT_DEFAULT = 6 * 3600
+
+
+def cognify(root: Path, dataset: str, *, timeout: int = _COGNIFY_TIMEOUT_DEFAULT,
             poll_interval: float = 10) -> bool:
     """POST /api/v1/cognify，带 datasets 参数。成功后返回 True。
 

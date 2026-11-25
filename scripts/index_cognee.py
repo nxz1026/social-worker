@@ -308,13 +308,29 @@ def run(root: Path, project: str = "") -> dict:
             print(f"  + {item.rel} -> {data_id}", flush=True)
 
     # 全部送完后，按项目统一 cognify
+    # 建图逐个做。**单个项目失败不能中断后面项目**：cognify 很慢（约 2 条/分钟），
+    # 大项目超时是常态，但那不该让其它项目一条都建不了
+    # （2026-11-25 实测：惠民超时后花都两个项目 0/152、0/32 完全没开始）。
+    cognify_errors: list[str] = []
     for proj in by_project:
-        print(f"[{proj}] cognify 开始（可能几分钟）……", flush=True)
-        cognee_index.cognify(root, proj)
-        print(f"[{proj}] cognify 完成", flush=True)
+        print(f"[{proj}] cognify 开始（大项目可能 1-2 小时）……", flush=True)
+        try:
+            cognee_index.cognify(root, proj)
+            print(f"[{proj}] cognify 完成", flush=True)
+        except Exception as exc:
+            cognify_errors.append(f"{proj}: {exc}")
+            print(f"[{proj}] cognify 失败（数据已入库，不影响检索）：{exc}",
+                  flush=True)
+    if cognify_errors:
+        print(f"\n建图失败 {len(cognify_errors)} 个项目（数据均已入库，"
+              f"可稍后重跑补图）：", flush=True)
+        for e in cognify_errors:
+            print(f"  - {e}", flush=True)
 
     return {"projects": list(by_project), "added": added, "errors": errors,
-            "empty": False}
+            "empty": False,
+            # 建图失败是「数据已入库、图谱关系没建」的状态，调用方要能看到
+            "cognify_errors": cognify_errors}
 
 
 def main() -> int:
