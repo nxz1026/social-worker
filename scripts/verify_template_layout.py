@@ -32,8 +32,10 @@ MAX_WIDTH_PT = 487.0
 LONGEST_PROJECT_NAME = '"花小帮·邻里队"——花都社区矛盾纠纷预防与化解微治理项目'
 
 HEADER_RE = re.compile(r"^[ \u3000\t]*\{\{项目名称\}\}")
+# 签到表的编号占位符是 {{活动编号}}，其余模板是 {{项目编号}}，两种都算档案编号
 ARCHIVE_RE = re.compile(
-    r"^[ \u3000\t]*(?:档案编号|项目编号)[ \u3000]*[:：]?[ \u3000]*\{\{项目编号\}\}"
+    r"^[ \u3000\t]*(?:档案编号|项目编号)[ \u3000]*[:：]?[ \u3000]*"
+    r"\{\{(?:项目编号|活动编号)\}\}"
 )
 
 W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"

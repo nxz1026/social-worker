@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -114,7 +115,13 @@ def test_no_excessive_leading_spaces(layout_items):
     assert not bad, "页眉/编号前导空格超过 8：\n" + "\n".join(bad)
 
 
-def test_expected_header_spaces_are_8(layout_items):
+def test_header_has_no_padding_spaces(layout_items):
+    """页眉不得用连续空格凑位置（2026-11-25 用户要求）。
+
+    历史做法是「前导 8 个空格 + 项目名」，长项目名会溢出 487pt；
+    现在统一改成「logo / 制表位 / 右对齐」，前导空格必须为 0。
+    这里仍保留「页眉存在」的检查，防止模板丢页眉。
+    """
     expected = {
         ("决算表.docx", "word/header1.xml"),
         ("志愿者补贴领取表.docx", "word/header1.xml"),
@@ -127,6 +134,8 @@ def test_expected_header_spaces_are_8(layout_items):
         ("简报.docx", "word/header1.xml"),
         ("计划书.docx", "word/header1.xml"),
         ("项目管理目录.docx", "word/header1.xml"),
+        ("活动通知.docx", "word/header1.xml"),
+        ("签到表.docx", "word/header1.xml"),
     }
     found = {
         (item.template, item.part): item
@@ -135,28 +144,35 @@ def test_expected_header_spaces_are_8(layout_items):
     missing = expected - set(found)
     assert not missing, f"缺少页眉：{sorted(missing)}"
     wrong = {
-        key: found[key].leading for key in expected if found[key].leading != 8
+        key: found[key].leading for key in expected if found[key].leading != 0
     }
-    assert not wrong, f"页眉前导空格不是 8：{wrong}"
+    assert not wrong, f"页眉仍有凑位空格（应为 0）：{wrong}"
 
 
-def test_archive_number_font_is_24(layout_items):
+def test_archive_number_font_is_12pt(layout_items):
     archive = [item for item in layout_items if item.kind == "档案编号"]
     assert archive
     bad = {
         f"{item.template} {item.part} p{item.paragraph}": item.sizes
         for item in archive if any(sz != "24" for sz in item.sizes)
     }
-    assert not bad, f"档案编号字号不是 24：{bad}"
+    assert not bad, f"档案编号字号不是小四（12pt / 24 半磅）：{bad}"
 
 
 def test_archive_number_spaces(layout_items):
+    """档案编号必须右对齐（不再靠空格顶到右边）。
+
+    2026-11-25 用户要求：「有的模板的档案编号没有靠最右，并且字号太大，
+    用小四即可」。所以编号行前导空格必须为 0，且段落右对齐。
+    """
     expected = {
         ("劳务领取表.docx", "word/document.xml"),
         ("志愿者补贴领取表.docx", "word/document.xml"),
         ("物资领取表.docx", "word/document.xml"),
         ("计划书.docx", "word/document.xml"),
         ("项目管理目录.docx", "word/document.xml"),
+        ("活动目录.docx", "word/document.xml"),
+        ("签到表.docx", "word/document.xml"),
     }
     found = {
         (item.template, item.part): item
@@ -165,9 +181,34 @@ def test_archive_number_spaces(layout_items):
     missing = expected - set(found)
     assert not missing, f"缺少档案编号：{sorted(missing)}"
     wrong = {
-        key: found[key].leading for key in expected if found[key].leading != 8
+        key: found[key].leading for key in expected if found[key].leading != 0
     }
-    assert not wrong, f"档案编号前导空格不是 8：{wrong}"
+    assert not wrong, f"档案编号仍有凑位空格（应为 0）：{wrong}"
+
+
+def test_archive_number_is_right_aligned():
+    """档案编号段落必须是右对齐（jc=right），不靠空格。"""
+    from lxml import etree as _etree
+    import zipfile as _zipfile
+
+    W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    bad = []
+    for path in sorted(TEMPLATES.glob("*.docx")):
+        with _zipfile.ZipFile(path) as zf:
+            if "word/document.xml" not in zf.namelist():
+                continue
+            root = _etree.fromstring(zf.read("word/document.xml"))
+        for p in root.iter(f"{W}p"):
+            text = "".join(t.text or "" for t in p.iter(f"{W}t"))
+            if not re.match(r"^[ \u3000\t]*(?:档案编号|项目编号)", text):
+                continue
+            if "{{" not in text:
+                continue
+            jc = p.find(f"{W}pPr/{W}jc")
+            val = jc.get(f"{W}val") if jc is not None else None
+            if val != "right":
+                bad.append(f"{path.name}: jc={val} text={text.strip()[:24]!r}")
+    assert not bad, "档案编号未右对齐：\n" + "\n".join(bad)
 
 
 def test_width_with_real_project_name(layout_items):
