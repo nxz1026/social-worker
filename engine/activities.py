@@ -165,6 +165,10 @@ _DIRNAME_RE = re.compile(r"^(\d{2,3})-([^-]+)-(.+)$")
 _FORBIDDEN_CHARS = set('\\/:*?"<>|\t\n\r')
 
 
+class DuplicateActivityError(ValueError):
+    """同名活动已存在。调用方应返回 409 而不是 400。"""
+
+
 def validate_activity_dirname(name: str, *,
                               existing: list[str] | None = None,
                               allow_duplicate_key: bool = False) -> list[str]:
@@ -200,15 +204,19 @@ def validate_activity_dirname(name: str, *,
 
     warnings: list[str] = []
     if existing:
+        # 同名活动已存在 → 硬性拒绝（409），不给「换序号再建一个」留口子。
+        # 同一活动在不同序号下是同一个活动，重复建会让归档与核对全部错乱。
         key = activity_key(raw)
         same_key = [n for n in existing if activity_key(n) == key]
         if same_key and not allow_duplicate_key:
-            warnings.append(f"同活动已存在：{'、'.join(same_key)}")
+            raise DuplicateActivityError(
+                f"同活动已存在：{'、'.join(same_key)}（如需重建请先删除旧目录）")
+        # 序号重复只是提示（方案 A：历史序号不强制对齐）
         same_seq = [n for n in existing if n.startswith(f"{seq}-")]
         if same_seq:
             warnings.append(
                 f"序号 {seq} 已被 {len(same_seq)} 个目录使用"
-                f"（{same_seq[0]}…），方案 A 允许，但编号不会自动对齐")
+                f"（{same_seq[0]}…），允许，但编号不会自动对齐")
     return warnings
 
 

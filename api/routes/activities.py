@@ -52,6 +52,9 @@ def api_create_activity(name: str, body: dict, user=Depends(current_user)):
     existing = _activities.list_existing_activities(project_dir)
     try:
         warnings = _activities.validate_activity_dirname(dirname, existing=existing)
+    except _activities.DuplicateActivityError as exc:
+        # 同名活动（忽略序号）已存在 → 409，不是命名不合规
+        raise HTTPException(409, str(exc))
     except ValueError as exc:
         raise HTTPException(400, f"目录名不合规：{exc}")
 
@@ -173,6 +176,8 @@ def api_rename_activity(name: str, dirname: str, body: dict,
               if n != dirname]
     try:
         _activities.validate_activity_dirname(new_name, existing=others)
+    except _activities.DuplicateActivityError as exc:
+        raise HTTPException(409, str(exc))
     except ValueError as exc:
         raise HTTPException(400, f"目录名不合规：{exc}")
     try:

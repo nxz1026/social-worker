@@ -52,12 +52,26 @@ def test_too_long_dirname_rejected():
         activities.validate_activity_dirname("12-" + "活" * 90 + "-第一期")
 
 
-def test_duplicate_activity_key_warns():
-    """同一活动换序号：允许但要告警（方案 A）。"""
+def test_duplicate_activity_key_rejected():
+    """同一活动换序号重建 → 硬性拒绝（409）。
+
+    2026-11-25 收紧：原来只给告警，换序号就能再建一个同名活动，
+    归档与核对会全部错乱。现在抛 DuplicateActivityError，API 映射成 409。
+    """
+    with pytest.raises(activities.DuplicateActivityError) as exc:
+        activities.validate_activity_dirname(
+            "13-安全隐患专项排查-七彩花都B1",
+            existing=["12-安全隐患专项排查-七彩花都B1"])
+    assert "同活动已存在" in str(exc.value)
+
+
+def test_duplicate_activity_key_can_be_explicitly_allowed():
+    """显式 allow_duplicate_key=True 时才放行（内部批量建期用）。"""
     warnings = activities.validate_activity_dirname(
         "13-安全隐患专项排查-七彩花都B1",
-        existing=["12-安全隐患专项排查-七彩花都B1"])
-    assert any("同活动已存在" in w for w in warnings)
+        existing=["12-安全隐患专项排查-七彩花都B1"],
+        allow_duplicate_key=True)
+    assert isinstance(warnings, list)
 
 
 def test_duplicate_seq_warns():
