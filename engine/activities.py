@@ -44,6 +44,12 @@ def plan_activities(data: dict) -> list[dict]:
         if not isinstance(ind, dict):
             continue
         name = str(ind.get("name") or "").strip()
+        # 期数只认显式 count 字段。
+        # 试过从 target 文本推（「6次」→6期），但 target 是**服务量指标**不是期数：
+        # 花都激励「楼栋网格矛盾排查 target: ≥3次」实际只建了 1 个活动目录，
+        # 按 target 拆会凭空多出 2 个（2026-11-25 实测 11 → 13）。
+        # 需要多期就在指标里显式写 count。
+        # 需要「本项目某个指标实际分几期」时，看磁盘上已存在的目录数，不看 target。
         try:
             count = int(ind.get("count") or 1)
         except (TypeError, ValueError):
@@ -58,13 +64,34 @@ def plan_activities(data: dict) -> list[dict]:
                 budget = float(budget)
             except (TypeError, ValueError):
                 budget = 0
+        # periods 可选：把每期的小区名登记下来，目录名就用小区名而不是「第N期」。
+        # 例：安全隐患专项排查按小区分 6 期，目录名是「12-安全隐患专项排查-七彩花都B1」。
+        declared = ind.get("periods")
+        by_period: dict[int, dict] = {}
+        if isinstance(declared, list):
+            for item in declared:
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    no = int(item.get("period"))
+                except (TypeError, ValueError):
+                    continue
+                by_period[no] = item
+
         for period in range(1, count + 1):
             seq += 1
+            spec = by_period.get(period) or {}
+            community = str(spec.get("community") or "").strip()
+            # 有小区名用小区名，没有就用「第N期」
+            tail = community or f"第{ordinal(period)}期"
             out.append({
                 "seq": seq,
-                "dirname": f"{seq:02d}-{name}-第{ordinal(period)}期",
+                "dirname": f"{seq:02d}-{name}-{tail}",
                 "indicator_name": name,
                 "target": ind.get("target"),
+                "period": period,
+                "community": community,
+                "placeholder": bool(spec.get("placeholder")),
                 "budget": budget,
                 # count=1 时就是 budget 本身，不引入浮点尾数
                 "activity_budget": budget if count == 1 else round(budget / count, 2),

@@ -23,14 +23,34 @@ router = APIRouter()
 
 
 def _existing_codes(meta: dict) -> list[str]:
-    """本项目已有编号：project.code + 以编号命名的活动目录（解析不了的自动跳过）。
+    """本项目已有编号：project.code + 各活动 activity.yaml 里的 code。
 
-    从 app.py 搬过来（原实现见 1734239）；1942829 抽 shared/domain.py 时漏了它，
-    导致本文件落地前 `/api/projects/{name}/code?serial=0` 会 NameError → 500。
+    **不能拿活动目录名当编号**：目录名是「01-项目启动-第一期」这种形式，
+    parse_code 直接抛 ValueError，于是 next_serial 永远算不出已用流水，
+    每个活动都分到 0001 —— 这就是「多期活动编号全撞」的根因
+    （2026-11-25 实测：花都保障 20 个活动，activity_dirs 返回的目录名
+    0/20 能当编号解析）。
+
+    正确做法是读每个活动目录下的 activity.yaml。
     """
     codes = [meta["code"]] if meta.get("code") else []
     project_dir = Path(_projects.PROJECTS_ROOT) / meta["name"]
-    codes.extend(_activities.activity_dirs(project_dir).keys())
+    act_root = project_dir / "活动"
+    if not act_root.is_dir():
+        return codes
+    for d in sorted(act_root.iterdir()):
+        if not d.is_dir() or d.name.startswith("."):
+            continue
+        yaml_path = d / "activity.yaml"
+        if not yaml_path.is_file():
+            continue
+        try:
+            data = yaml.safe_load(yaml_path.read_text(encoding="utf-8")) or {}
+        except Exception:
+            continue
+        code = str(data.get("code") or "").strip()
+        if code:
+            codes.append(code)
     return codes
 
 
