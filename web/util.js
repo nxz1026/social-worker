@@ -10,6 +10,9 @@
  * 此前只映射 imported/generated，reviewed/signed/edited 会落进兜底的
  * 「新目录」，把已审核、已签字的材料显示成没开始处理（审计 PR-04）。*/
 const STATUS_TEXT = {
+  // created：目录刚建好、还没传任何材料。由建目录 API 与 split 写入
+  // （2026-11-25 补：原来没有这个键，界面上显示成「未知状态（created）」）
+  created: '新建（待上传）',
   imported: '已入库',
   generated: '已生成',
   edited: '人工修改',
@@ -17,6 +20,7 @@ const STATUS_TEXT = {
   signed: '已签字',
 };
 const STATUS_CLASS = {
+  created: 'muted',
   imported: 'info',
   generated: 'ok',
   edited: 'warn',

@@ -34,6 +34,12 @@ from engine.markdown import file_to_md  # noqa: E402
 
 DOC_EXTS = {".docx", ".doc", ".xlsx", ".pdf"}
 IMAGE_EXTS = {".jpg", ".jpeg", ".png"}
+# 用户 2026-11-25：图片与 txt 也要进知识库，图片只按文件名入条目、不做 OCR。
+# 但「纯照片目录」（10-物资照片资料 / 11-活动照片资料 之类）仍走照片清单，
+# 不逐张入图 —— 那里动辄几十张，逐张建节点只会把图谱冲垮。
+ASSET_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".txt"}
+# 这些目录名里的图片交给「照片清单」聚合，不单独建条目
+PHOTO_DIR_MARKERS = ("物资照片", "活动照片", "发票")
 # `.md` 是 Obsidian 骨架（由 docx 转出，如 01-计划书.docx + 01-计划书.md 成对存在）。
 # 用户 2026-11-24 要求 `.md` 也要能搜到，但成对入图会让同一内容重复建边 ——
 # 所以只在**没有同名原件**时才索引 .md（见 drop_md_with_twin）。
@@ -148,12 +154,28 @@ def _visible(path: Path, base: Path) -> bool:
     return not _excluded(path)
 
 
+def _in_photo_dir(path: Path, base: Path) -> bool:
+    """文件是否落在「照片/发票目录」里（那些由照片清单聚合，不逐张入图）。"""
+    try:
+        parts = path.relative_to(base).parts[:-1]
+    except ValueError:
+        return False
+    return any(any(m in part for m in PHOTO_DIR_MARKERS) for part in parts)
+
+
 def _candidate_files(base: Path) -> list[Path]:
-    """base 下可入图的文件：原件 + .md，跳过隐藏目录。"""
-    return [p for p in sorted(base.rglob("*"))
-            if p.is_file()
-            and _visible(p, base)
-            and p.suffix.lower() in DOC_EXTS | MD_EXTS]
+    """base 下可入图的文件：原件 + .md + 图片/txt（图片按文件名，不 OCR）。"""
+    out: list[Path] = []
+    for p in sorted(base.rglob("*")):
+        if not p.is_file() or not _visible(p, base):
+            continue
+        suffix = p.suffix.lower()
+        if suffix in DOC_EXTS | MD_EXTS:
+            out.append(p)
+        elif suffix in ASSET_EXTS and not _in_photo_dir(p, base):
+            # 散落在普通目录里的图片/txt（如 13-其他佐证/ 的海报、通知记录）
+            out.append(p)
+    return out
 
 
 def scan_project(project_dir: Path) -> list[Item]:

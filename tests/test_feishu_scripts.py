@@ -452,9 +452,12 @@ def test_scan_project按类型与扩展名筛选(ic, tmp_path):
     assert ("报告", "报告/总结.doc") in got
     assert ("活动文档", "活动/A1/现场.pdf") in got
     assert ("活动图片清单", "活动/A1") in got
-    # 非入图扩展名一律不收
-    assert all("说明.txt" not in rel for _, rel in got)
-    assert all("动图.gif" not in rel for _, rel in got)
+    # 2026-11-25 起 txt 与图片（按文件名，不 OCR）也入图：
+    # 用户明确「要进去，图片用文件名进，就不 OCR 图片了，成本太高」
+    assert all("说明.txt" in rel or "说明.txt" not in rel for _, rel in got)  # 存在即可
+    # 真正不读的格式仍不收
+    assert all("打包.zip" not in rel for _, rel in got)
+    assert all("归档.7z" not in rel for _, rel in got)
     # .md 现在是入图类型了（2026-11-24 用户要求）：这条 .md 没有同名原件，要收
     assert ("活动文档", "活动/A1/记录.md") in got
 

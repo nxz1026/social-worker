@@ -44,8 +44,13 @@ def test_xlsx_missing_file_raises(tmp_path):
 
 
 def test_file_to_md_unsupported_returns_empty(tmp_path):
-    path = tmp_path / "a.txt"
-    path.write_text("hello", encoding="utf-8")
+    """真正不支持的扩展名返回空串。
+
+    原来这里用 .txt 当样本，但 2026-11-25 起 .txt 与常见图片都支持了
+    （用户要求图片按文件名入图、不做 OCR），改用压缩包这类确实不读的格式。
+    """
+    path = tmp_path / "a.zip"
+    path.write_bytes(b"PK\x03\x04")
     assert file_to_md(path) == ""
 
 

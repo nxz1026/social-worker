@@ -322,6 +322,31 @@ def md_to_text(path: Path) -> str:
 
 
 # 后缀 → 转换器
+def image_to_md(path: Path) -> str:
+    """图片只取文件名做条目，不做 OCR。
+
+    用户 2026-11-25 明确：图片用文件名进知识库，OCR 成本太高。
+    文件名通常已经带了足够的信息（「13-志愿者招募海报.png」），
+    进图谱后至少能按名称检索到这个材料存在。
+    """
+    path = Path(path)
+    stem = path.stem
+    return (f"# {stem}\n\n"
+            f"- 文件：{path.name}\n"
+            f"- 类型：图片（未做文字识别）\n"
+            f"- 说明：按文件名索引，内容需打开原图查看。\n")
+
+
+def txt_to_md(path: Path) -> str:
+    """纯文本：原样读入。"""
+    path = Path(path)
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return ""
+    return f"# {path.stem}\n\n{text.strip()}\n"
+
+
 _CONVERTERS = {
     ".docx": docx_to_md,
     ".doc": doc_to_md,
@@ -329,6 +354,14 @@ _CONVERTERS = {
     ".pdf": pdf_to_md,
     ".md": md_to_text,
     ".markdown": md_to_text,
+    # 图片只按文件名入条目，不 OCR（用户 2026-11-25 要求）
+    ".jpg": image_to_md,
+    ".jpeg": image_to_md,
+    ".png": image_to_md,
+    ".gif": image_to_md,
+    ".bmp": image_to_md,
+    ".webp": image_to_md,
+    ".txt": txt_to_md,
 }
 
 
