@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import yaml
+
 import re
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -26,6 +28,69 @@ def _bump_serial(code: str) -> str:
     if tail.isdigit():
         return f"{head}{int(tail) + 1:04d}"
     return code
+
+
+@router.post("/api/projects/{name}/activities")
+def api_create_activity(name: str, body: dict, user=Depends(current_user)):
+    """新建单个活动目录。body:
+
+        {"dirname": "12-安全隐患专项排查-七彩花都B1",
+         "code": "CDYJR2026005-C-16010017",     # 可选，不给就自动分配
+         "fields": {"活动时间": "2026-12-01 下午"}  # 可选，写进 activity.yaml
+        }
+
+    命名由服务端强校验（见 engine.activities.validate_activity_dirname）：
+    必须是「两位序号-活动名-期次或小区」。不合规直接 400，不建目录。
+    """
+    meta = project_meta_or_404(name)
+    require_project_write(user, meta)
+    project_dir = Path(_projects.PROJECTS_ROOT) / name
+    act_root = project_dir / "活动"
+    act_root.mkdir(parents=True, exist_ok=True)
+
+    dirname = str((body or {}).get("dirname") or "").strip()
+    existing = _activities.list_existing_activities(project_dir)
+    try:
+        warnings = _activities.validate_activity_dirname(dirname, existing=existing)
+    except ValueError as exc:
+        raise HTTPException(400, f"目录名不合规：{exc}")
+
+    target = act_root / dirname
+    if target.exists():
+        raise HTTPException(409, f"活动目录已存在：{dirname}")
+
+    # 编号：显式给了就用，否则按项目规则自动分配
+    code = str((body or {}).get("code") or "").strip()
+    if not code:
+        from api.routes.projects import api_project_code
+        act_month = 1
+        m = re.search(r"-(\d{2})-", str((body or {}).get("fields", {}).get("活动时间") or ""))
+        if m:
+            act_month = int(m.group(1))
+        try:
+            code = str((api_project_code(name, act_type=1, act_month=act_month,
+                                         user=user) or {}).get("code") or "")
+        except Exception:
+            code = ""
+        if not code:
+            raise HTTPException(400, "自动分配编号失败，请显式传 code")
+
+    target.mkdir()
+    from engine import ylock as _ylock
+    payload: dict = {"code": code, "status": "created"}
+    fields = (body or {}).get("fields")
+    if isinstance(fields, dict):
+        for k, v in fields.items():
+            key = str(k).strip()
+            if key and key not in ("code", "status"):
+                payload[key] = v
+    _ylock.atomic_write_text(
+        target / "activity.yaml",
+        yaml.safe_dump(payload, allow_unicode=True, sort_keys=False),
+    )
+
+    return {"ok": True, "dirname": dirname, "code": code, "warnings": warnings,
+            "activity_yaml": payload}
 
 
 @router.post("/api/projects/{name}/activities/split")
@@ -103,6 +168,13 @@ def api_rename_activity(name: str, dirname: str, body: dict,
     if not new_name:
         raise HTTPException(400, "new_name 不能为空")
     project_dir = Path(_projects.PROJECTS_ROOT) / name
+    # 改名同样受命名规范约束（跳过自己，避免把自己判成重名）
+    others = [n for n in _activities.list_existing_activities(project_dir)
+              if n != dirname]
+    try:
+        _activities.validate_activity_dirname(new_name, existing=others)
+    except ValueError as exc:
+        raise HTTPException(400, f"目录名不合规：{exc}")
     try:
         _activities.rename_activity_dir(project_dir, dirname, new_name)
     except FileNotFoundError:

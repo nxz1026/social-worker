@@ -159,6 +159,59 @@ def _safe_dirname(name: str) -> str:
     return raw
 
 
+# 活动目录名规范：`<两位序号>-<活动名>-<期次或小区>`
+# 例：12-安全隐患专项排查-七彩花都B1、04-爱邻议事会-第一期
+_DIRNAME_RE = re.compile(r"^(\d{2,3})-([^-]+)-(.+)$")
+_FORBIDDEN_CHARS = set('\\/:*?"<>|\t\n\r')
+
+
+def validate_activity_dirname(name: str, *,
+                              existing: list[str] | None = None,
+                              allow_duplicate_key: bool = False) -> list[str]:
+    """校验新建活动目录名是否合规，返回告警列表；硬性不合规抛 ValueError。
+
+    硬性规则（违反即拒绝）：
+      1. 非空、不含路径分隔符、不含文件系统非法字符
+      2. 必须是 `<序号>-<活动名>-<期次|小区>` 三段式，序号两位数字
+      3. 活动名与期次段都不能为空
+    软性规则（返回告警，不拒绝）：
+      4. 去掉序号后与已有目录重名（同一活动重复建）
+      5. 序号与已有目录重复（历史遗留，方案 A 允许）
+    """
+    raw = str(name if name is not None else "").strip()
+    _safe_dirname(raw)                                  # 规则 1（含路径穿越）
+
+    bad = sorted({c for c in raw if c in _FORBIDDEN_CHARS})
+    if bad:
+        raise ValueError(f"活动目录名含非法字符 {' '.join(bad)}：{raw}")
+    if len(raw) > 80:
+        raise ValueError(f"活动目录名过长（{len(raw)} 字符，上限 80）：{raw}")
+
+    m = _DIRNAME_RE.match(raw)
+    if not m:
+        raise ValueError(
+            f"活动目录名格式不符：{raw}；"
+            "要求「两位序号-活动名-期次或小区」，如 12-安全隐患专项排查-七彩花都B1")
+    seq, title, tail = m.group(1), m.group(2).strip(), m.group(3).strip()
+    if not title:
+        raise ValueError(f"活动目录名缺活动名：{raw}")
+    if not tail:
+        raise ValueError(f"活动目录名缺期次或小区：{raw}")
+
+    warnings: list[str] = []
+    if existing:
+        key = activity_key(raw)
+        same_key = [n for n in existing if activity_key(n) == key]
+        if same_key and not allow_duplicate_key:
+            warnings.append(f"同活动已存在：{'、'.join(same_key)}")
+        same_seq = [n for n in existing if n.startswith(f"{seq}-")]
+        if same_seq:
+            warnings.append(
+                f"序号 {seq} 已被 {len(same_seq)} 个目录使用"
+                f"（{same_seq[0]}…），方案 A 允许，但编号不会自动对齐")
+    return warnings
+
+
 def activity_dirs(project_dir: Path) -> dict[str, Path]:
     """返回 {目录名: 绝对路径}，只收 <project_dir>/活动/ 下的一级子目录。"""
     act_dir = Path(project_dir) / "活动"
