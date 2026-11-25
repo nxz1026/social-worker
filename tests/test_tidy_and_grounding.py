@@ -118,3 +118,48 @@ def test_grounding_render_includes_docs():
 def test_grounding_summarize():
     assert grounding.summarize([], "") == "无可用冷化材料"
     assert "1 份" in grounding.summarize([{"name": "a", "text": "x"}], "")
+
+
+# ---------- 散落文件归集（2026-11-25） ----------
+
+def test_tidy_collects_loose_files_into_dir(tmp_path):
+    """根目录里 13- 开头的散文件，应归到 13-其他佐证/。
+
+    实测问题：9 个「13-志愿者招募海报.pdf」这类文件平铺在活动根目录，
+    第 13 项只认「13-」开头的**目录**，于是判 missing，
+    而 tidy 只处理 ok/partial 的项，散文件永远没人管。
+    """
+    d = _act(tmp_path)
+    for name in ("13-志愿者招募海报.pdf", "13-志愿者登记表.pdf",
+                 "13-招募微信群宣传图.png"):
+        (d / name).write_bytes(b"x")
+
+    plan = tidy.plan(d)
+    moves = [a for a in plan["actions"] if a["kind"] == "file_into_dir"]
+    assert len(moves) == 3
+    assert all(a["to"].startswith("13-其他佐证/") for a in moves)
+
+    result = tidy.apply(d, plan["actions"])
+    assert result["moved"] == 3 and not result["errors"]
+    assert (d / "13-其他佐证" / "13-志愿者招募海报.pdf").is_file()
+    assert not (d / "13-志愿者招募海报.pdf").exists()
+
+
+def test_tidy_does_not_collect_non_dir_items(tmp_path):
+    """非目录类项（如文件类）不该走散落归集。"""
+    d = _act(tmp_path)
+    (d / "06-总结报告.docx").write_bytes(b"x")
+    plan = tidy.plan(d)
+    assert not [a for a in plan["actions"] if a["kind"] == "file_into_dir"]
+
+
+def test_tidy_collect_skips_when_dir_exists(tmp_path):
+    """已有 13-其他佐证/ 目录时，再把散文件收进去（不重复建）。"""
+    d = _act(tmp_path)
+    folder = d / "13-其他佐证"
+    folder.mkdir()
+    (folder / "已有.pdf").write_bytes(b"x")
+    (d / "13-新佐证.pdf").write_bytes(b"x")
+    plan = tidy.plan(d)
+    moves = [a for a in plan["actions"] if a["kind"] == "file_into_dir"]
+    assert len(moves) == 1

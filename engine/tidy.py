@@ -78,6 +78,40 @@ def _is_canonical(path: Path, act_dir: Path, item: dict) -> bool:
     return len(rel.parts) >= 2 and any(rel.parts[0].startswith(p) for p in prefixes)
 
 
+def _collect_loose_into_dir(act_dir: Path, item: dict) -> list[dict]:
+    """把根目录里以该项序号前缀开头的散落文件，归到「<前缀><项名>/」目录下。
+
+    只针对目录类项（kind 以 dir_ 开头）。返回 actions 列表。
+    文件名保持原样搬进目录，不改名 —— 用户上传时已经带了序号。
+    """
+    kind = str(item.get("kind") or "")
+    if not kind.startswith("dir_"):
+        return []
+    prefixes = checks._item_prefixes(item)
+    if not prefixes:
+        return []
+    folder_name = f"{prefixes[0]}{item['name']}"
+    folder = Path(act_dir) / folder_name
+    if folder.exists() and not folder.is_dir():
+        return []
+    out: list[dict] = []
+    for path in sorted(Path(act_dir).iterdir()):
+        if not path.is_file() or path.name.startswith("."):
+            continue
+        if not any(path.name.startswith(p) for p in prefixes):
+            continue
+        if path.suffix.lower() not in checks.ANY_FILE_EXT:
+            continue
+        out.append({
+            "item": item["no"], "item_name": item["name"],
+            "from": path.name,
+            "to": f"{folder_name}/{path.name}",
+            "kind": "file_into_dir",
+            "reason": f"散在活动根目录，应归到 {folder_name}/",
+        })
+    return out
+
+
 def plan(act_dir: Path) -> dict:
     """给一个活动目录出整理方案。
 
@@ -92,13 +126,19 @@ def plan(act_dir: Path) -> dict:
     taken: set[str] = set()
 
     for got in result["items"]:
+        item = next((c for c in checks.CHECKLIST if c["no"] == got["no"]), None)
+        if item is None:
+            continue
+        # 目录类项：无论判定是 ok 还是 missing，根目录里散着的同序号前缀文件
+        # 都该收进目录（实测：已存在 13-其他佐证/ 时又传了新的 13-xxx.pdf，
+        #  核对判 ok，但散文件躺在根目录里没人管）
+        loose = _collect_loose_into_dir(act_dir, item)
+        if loose:
+            actions.extend(loose)
         rel = got.get("path")
         if not rel:
             continue
         src = (act_dir / rel)
-        item = next((c for c in checks.CHECKLIST if c["no"] == got["no"]), None)
-        if item is None:
-            continue
         if got["status"] not in ("ok", "partial"):
             continue
         if src.is_dir():
