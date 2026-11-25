@@ -356,7 +356,11 @@ def test_from_docx_full_flow_with_indicators(projects_root):
     listed = [p["name"] for p in _projects.list_projects()]
     assert "指标项目" in listed
     plan = api_split_activities("指标项目", {"dry_run": True}, ADMIN)
-    assert plan["would_create"] == ["01-主题课程培训-第一期", "02-安全隐患专项排查-第一期"]
+    # 2026-11-25 起建项目时顺手建活动目录（每指标 1 期），
+    # 所以 split 的 would_create 应该是空 —— 活动已经在了。
+    assert plan["would_create"] == []
+    assert set(plan["would_skip"]) == {"01-主题课程培训-第一期",
+                                       "02-安全隐患专项排查-第一期"}
     api_split_activities("指标项目", {"dry_run": False}, ADMIN)
     out2 = api_set_activity_code("指标项目", "01-主题课程培训-第一期",
                                  {"code": "CDYJR2026007-C-17260001"}, ADMIN)

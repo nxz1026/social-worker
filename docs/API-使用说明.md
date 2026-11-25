@@ -636,6 +636,17 @@ POST /api/projects/from-docx      multipart/form-data
 与现有项目重名 → **409**。它是目录名、Cognee 数据集名、API 路径参数，
 必须唯一。
 
+**建项目时顺手建活动目录**（2026-11-25 起）：按项目书的指标列表，
+**每个指标建 1 个活动**（`01-主题课程培训-第一期`…），编号自动分配并写进
+各活动的 `activity.yaml`。返回体带 `activities` 与 `activity_count`。
+
+只建 1 期是刻意的：项目书的 `target`（「3期」「6次」「120人次」）是
+**服务量指标不是目录数**，按它拆会凭空多建（实测花都激励 11 个活动会被
+拆成 13 个）。要补剩余期数，用 `POST .../activities/split`，
+或在项目 yaml 的指标里显式写 `count` / `periods`。
+
+建活动失败**不回滚已建的项目**，只在 `warnings` 里说明，可事后补建。
+
 **建完项目默认没有任何账号有权限**，返回体带 `permissions.audit_url`
 指向 `GET /api/projects/{name}/permissions-audit`，列出待授权账号。
 去「用户管理」（`#/admin/users`）→ 编辑用户 → 勾选该项目 write/readonly。

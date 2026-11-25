@@ -266,6 +266,77 @@ def _unique_project_name(base: str) -> str:
     raise HTTPException(409, f"项目名 {base} 重名过多，请用 ?project_name= 指定目录名")
 
 
+def _bootstrap_activities(name: str, yaml_data: dict, user,
+                          *, max_per_indicator: int = 1) -> list[dict]:
+    """新项目建完目录后，按指标顺手建活动目录。
+
+    用户 2026-11-25：「建项目时候就顺手建立活动目录」。
+
+    每个指标先建 1 个活动（第一期），后续期数由调用方用
+    POST .../activities/split 补 —— 因为 target 文本（「3期」「6次」
+    「120人次」）是**服务量指标不是目录数**，按它拆会凭空多建
+    （实测：花都激励 11 个活动会被拆成 13 个）。
+
+    max_per_indicator > 1 时按最少期数建，仅供将来扩用。
+    编号写进每个活动的 activity.yaml（走 api_project_code）。
+    """
+    from api.routes.activities import _bump_serial
+    from engine import activities as _acts
+    from engine import ylock as _ylock
+
+    project_dir = Path(_projects.PROJECTS_ROOT) / name
+    planned = _acts.plan_activities(yaml_data)
+    if not planned:
+        return []
+
+    # 每个指标只取前 max_per_indicator 期
+    by_indicator: dict[str, int] = {}
+    keep: list[dict] = []
+    for item in planned:
+        nm = str(item.get("indicator_name") or "")
+        used = by_indicator.get(nm, 0)
+        if used >= max_per_indicator:
+            continue
+        by_indicator[nm] = used + 1
+        keep.append(item)
+    if not keep:
+        return []
+
+    used_codes: set[str] = set()
+
+    def _code_maker(item: dict, _used: set[str]) -> str | None:
+        dirname = str(item.get("dirname") or "")
+        act_month = 1
+        m = re.search(r"-(\d{2})-", dirname)
+        if m:
+            act_month = int(m.group(1))
+        try:
+            generated = api_project_code(name, act_type=1, act_month=act_month,
+                                         user=user)
+        except Exception:
+            return None
+        code = str((generated or {}).get("code") or "").strip()
+        while code and code in used_codes:
+            code = _bump_serial(code)
+        return code or None
+
+    created = _acts.create_activity_dirs(project_dir, keep, code_maker=_code_maker)
+    out: list[dict] = []
+    act_root = project_dir / "活动"
+    for dirname in created:
+        y = act_root / dirname / "activity.yaml"
+        code = ""
+        if y.is_file():
+            try:
+                code = str((yaml.safe_load(y.read_text(encoding="utf-8")) or {}).get("code") or "")
+            except Exception:
+                code = ""
+            if code:
+                used_codes.add(code)
+        out.append({"dirname": dirname, "code": code})
+    return out
+
+
 @router.post("/api/projects/from-docx")
 def api_create_project_from_docx(
     request: Request,
@@ -390,6 +461,13 @@ def api_create_project_from_docx(
         except FileExistsError as exc:
             raise HTTPException(409, f"{exc}（可传 ?project_name=其他名字）")
 
+        # 顺手建活动目录（每个指标先建 1 期）
+        bootstrapped: list[dict] = []
+        try:
+            bootstrapped = _bootstrap_activities(name, data, user)
+        except Exception as exc:          # 建活动失败不该让整个建项目回滚
+            warnings.append(f"活动目录未能自动创建：{exc}")
+
         # 项目书原件进 方案/：文件名保持原样，重名不覆盖
         doc_dir = target / "方案"
         dest = doc_dir / Path(str(file.filename)).name
@@ -422,6 +500,9 @@ def api_create_project_from_docx(
         "parsed": parsed,
         "warnings": warnings,
         "yaml_preview": yaml_path.read_text(encoding="utf-8"),
+        # 建项目时顺手建的活动目录（每个指标 1 期）
+        "activities": bootstrapped,
+        "activity_count": len(bootstrapped),
         "hint": hint,
         "permissions": {
             "note": "新项目默认没有任何账号有权限，需在 用户管理（#/admin/users）里授权",
