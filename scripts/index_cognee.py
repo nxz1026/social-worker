@@ -273,7 +273,7 @@ def upload_name(item: Item) -> str:
     return item.rel.replace("/", "__") + ".md"
 
 
-def run(root: Path, project: str = "") -> dict:
+def run(root: Path, project: str = "", *, wait: bool = True) -> dict:
     """入库并建图（供 API 后台任务复用，行为与 CLI 非 dry-run 一致）。
 
     返回 {"projects": [项目名], "added": 入库条数, "errors": [转换失败的文件],
@@ -315,7 +315,7 @@ def run(root: Path, project: str = "") -> dict:
     for proj in by_project:
         print(f"[{proj}] cognify 开始（大项目可能 1-2 小时）……", flush=True)
         try:
-            cognee_index.cognify(root, proj)
+            cognee_index.cognify(root, proj, wait=wait)
             print(f"[{proj}] cognify 完成", flush=True)
         except Exception as exc:
             cognify_errors.append(f"{proj}: {exc}")
@@ -337,6 +337,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="文档转 Markdown 后送入 Cognee 建图")
     parser.add_argument("--dry-run", action="store_true", help="只列出将入图的文件")
     parser.add_argument("--project", help="只处理指定项目（目录名）")
+    parser.add_argument("--no-wait", action="store_true",
+                        help="只提交建图不等待（给定时器用：cognify 一次可能跑几小时）")
     args = parser.parse_args()
 
     cfg = load_config()
@@ -362,7 +364,7 @@ def main() -> int:
         print(f"\n共 {len(by_project)} 个项目 / {docs} 个文档 / {lists} 条照片清单")
         return 0
 
-    result = run(root, args.project or "")
+    result = run(root, args.project or "", wait=not args.no_wait)
     if result["empty"]:
         return 0
 

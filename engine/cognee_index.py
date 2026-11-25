@@ -185,6 +185,7 @@ _COGNIFY_TIMEOUT_DEFAULT = 6 * 3600
 
 
 def cognify(root: Path, dataset: str, *, timeout: int = _COGNIFY_TIMEOUT_DEFAULT,
+            wait: bool = True,
             poll_interval: float = 10) -> bool:
     """POST /api/v1/cognify，带 datasets 参数。成功后返回 True。
 
@@ -212,6 +213,11 @@ def cognify(root: Path, dataset: str, *, timeout: int = _COGNIFY_TIMEOUT_DEFAULT
     run_id = run.get("pipeline_run_id") if isinstance(run, dict) else None
     sys.stderr.write(f"[cognify] {dataset} 已提交，run={run_id}\n")
     sys.stderr.flush()
+
+    # wait=False：只提交不轮询。Cognee 服务端本来就是 runInBackground，
+    # 提交后自己会建图；定时任务用它避免一次跑几小时把定时器堵住。
+    if not wait:
+        return True
 
     deadline = time.monotonic() + timeout
     last_report = 0.0
