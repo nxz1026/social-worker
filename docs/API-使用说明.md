@@ -643,6 +643,34 @@ POST /api/projects/{name}/activities
 （每期 `{period, community, placeholder}`），`POST .../activities/split`
 即可按小区名批量生成目录名，不再只产出「第N期」。
 
+### 5.5.6c `POST .../activities/split` 的匹配规则（方案 A）
+
+**按「去掉序号后的活动名」配对，序号不参与比对。**
+
+```http
+POST /api/projects/{name}/activities/split
+{"dry_run": true}      // 默认 true，只预演
+```
+
+返回：
+
+| 字段 | 含义 |
+|---|---|
+| `would_create` | 计划里有、磁盘上没有的目录名 |
+| `would_skip` | 计划里有、磁盘上已存在（活动名对上）的目录名 |
+| `extra_on_disk` | 磁盘上有、指标里没登记的人工活动目录 |
+
+**为什么忽略序号**：已有目录的序号是历史遗留，与按指标顺序算出的序号未必一致。
+同一个活动可能叫 `12-安全隐患专项排查-七彩花都B1`（手建）或
+`13-安全隐患专项排查-七彩花都B1`（按序算出）。比全名会把已有活动判成新的、
+重复建目录——实测曾一次建议新建 10 个，其中 7 个已存在。
+
+**用精确匹配不用模糊包含**：`爱邻议事会-第一期` 与 `爱邻议事会-第十期`
+必须是两个活动，包含匹配会让它们互相误配。
+
+对应实现：`engine.activities.activity_key()` 去序号、
+`match_existing()` 配对，split 端点两处（预演与执行）都走它。
+
 ### 5.5.7 三表校验（决算 / 报销 / 发票）
 
 ```http
@@ -1164,3 +1192,6 @@ POST /api/projects/{name}/activities/{dirname}/trash/restore  # 恢复
 | 用 `GET` 调三表校验 | 是 `POST .../invoice/scan`，`GET .../invoice` 不存在 |
 | 以为 `.doc` 不支持 | 决算表/票据都支持 `.doc`（走 soffice 转换，§5.5.7） |
 | 以为索引页会进知识库 | `_X-资料索引.md`、`活动目录.docx`、支出证明一律排除 |
+| 以为 `split` 会按序号比对 | 按**活动名**比对、忽略序号（方案 A），否则已有活动会被重复建 |
+| 以为编号能手工指定任意值 | `POST /activities` 可传 `code`，但全项目必须唯一；不给则自动分配 |
+| 以为目录名可随意起 | 必须 `两位序号-活动名-期次或小区`，服务端 400 拒绝（§5.5.6b） |
