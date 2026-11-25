@@ -119,8 +119,10 @@ from api.routes import agent as _r_agent
 from api.routes import misc as _r_misc  # noqa: E402
 # 测试直接按名字调端点函数（tests/test_api_web.py），这里保留同名入口。
 from api.routes.projects import (api_check_project, api_create_project,  # noqa: E402,F401
+                                 api_create_project_from_docx,
                                  api_get_project, api_list_activities,
                                  api_list_projects, api_project_code,
+                                 api_project_permissions_audit,
                                  api_update_project)
 
 app.include_router(_r_assets.router)

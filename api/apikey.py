@@ -142,11 +142,29 @@ def _touch_last_used(key_id: int) -> None:
 def load_projects(conn, user_id: int, role: str) -> dict[str, str]:
     """读项目授权：{项目: 'readonly'|'write'}。
 
-    admin 返回配置里的全部项目，均为 write。零项目账号返回空 dict，
-    绝不能兜底成「全部项目」。
+    admin 返回**全部**项目，均为 write。来源是两个并集：
+      1. config/api.yaml 的 projects（授权项目清单，Cognee 数据集按它建）
+      2. 磁盘上 projects/ 下的项目目录（list_projects 扫出来）
+    只认配置会让「新建项目」在用户管理页的下拉里彻底消失 —— 新项目不在配置里，
+    admin 的 projects 里没有它，前端也就没法给它授权（2026-11-25 实测）。
+    注意：磁盘上多出来的项目没有 Cognee 数据集，检索时会是空数据集，
+    需要补进 config/api.yaml 的 projects 才会真正建立知识库。
+
+    零项目账号返回空 dict，绝不能兜底成「全部项目」。
     """
     if role == "admin":
-        return {str(name): "write" for name in SETTINGS.projects}
+        names = [str(name) for name in SETTINGS.projects]
+        try:
+            from engine import projects as _projects
+            for item in _projects.list_projects():
+                name = str(item.get("name") or "")
+                # 没 yaml 的目录不算项目（与 GET /api/projects 口径一致）
+                if name and item.get("has_config") and name not in names:
+                    names.append(name)
+        except Exception:
+            # 项目目录读不了不该让登录失败：退回只看配置
+            pass
+        return {name: "write" for name in names}
     with conn.cursor() as cur:
         cur.execute(
             "SELECT project, access FROM user_projects WHERE user_id = %s",

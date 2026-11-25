@@ -611,6 +611,38 @@ POST  /api/projects/{name}/activities/backfill-code
 API 另返回 `act_year_full`（完整年份）与 `act_year_note` 说明。
 传 `2026` / `26` / `0`（取当前年）三种写法都接受。
 
+### 5.5.6a 新建项目（必须上传项目书）
+
+```http
+POST /api/projects/from-docx      multipart/form-data
+  file=<项目书.docx|pdf|md>      必填
+  project_name=<目录名>           可选，覆盖解析出的项目名
+  short=<项目简称>                可选，默认同 project_name
+  dry_run=true                    可选，只解析不落盘（Web 预览用）
+```
+
+**必须上传项目书**，缺失返回 400。流程：转 Markdown → 正则抽字段 →
+校验简称 → 建目录骨架（`方案/协议/报告/活动/其他`）→ 写项目 yaml，
+项目书原件存入 `方案/`。
+
+**解析到的字段**：项目名称、类别、级别、立项单位（funder）、申报单位（executer）、
+负责人+电话、项目周期、指标列表、预算、税与管费。
+
+**解析不到关键字段**（项目名称/立项单位/申报单位）→ **400**，`detail.missing`
+列出缺哪几个，可带 query 参数补后重试。其它字段解析不到一律留空并写进
+`warnings`——**不编造数据**。
+
+**简称 `short` 校验**：不能以 `.` 开头、不含路径分隔符、≤40 字符、
+与现有项目重名 → **409**。它是目录名、Cognee 数据集名、API 路径参数，
+必须唯一。
+
+**建完项目默认没有任何账号有权限**，返回体带 `permissions.audit_url`
+指向 `GET /api/projects/{name}/permissions-audit`，列出待授权账号。
+去「用户管理」（`#/admin/users`）→ 编辑用户 → 勾选该项目 write/readonly。
+
+新项目**会自动被 Cognee 索引扫到**（`index_cognee.scan()` 扫磁盘 `projects/`，
+不看 `config/api.yaml` 的 projects 清单——那份是历史遗留，无代码读取）。
+
 ### 5.5.6b 新建活动目录（开放的建目录 API）
 
 ```http

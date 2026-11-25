@@ -321,6 +321,208 @@ function errorState(e) {
   </div>`;
 }
 
+/* ============================================================
+ * 新建项目：上传项目书 → 解析预览 → 确认建项目
+ *
+ * 后端 POST /api/projects/from-docx 是唯一入口（必须传项目书）。
+ * 三步向导写在同一个弹窗里，用 newProjState 暂存解析结果：
+ *   pick    选文件 → 上传解析
+ *   preview 展示解析字段 + warnings（缺关键字段时给补填框）
+ *   done    创建成功 → 直接跳到新项目，并提示去授权
+ * ============================================================ */
+const NEWPROJ_ACCEPT = '.docx,.pdf,.md';
+let newProjState = null;
+
+function openNewProjectModal() {
+  if (!isAdmin()) { toast('仅 admin 可新建项目', 'warn'); return; }
+  newProjState = { file: null, step: 'pick' };
+  renderNewProjectModal();
+}
+
+function renderNewProjectModal() {
+  const st = newProjState || {};
+  if (st.step === 'preview' || st.step === 'missing') {
+    const r = st.result || {};
+    const p = r.parsed || {};
+    const missing = st.missing || [];
+    const nameMissing = missing.includes('project_name');
+    const unitMissing = missing.filter(m => m !== 'project_name');
+    const warnRows = (st.warnings || []).map(w => `<li>${esc(w)}</li>`).join('');
+    openModal('新建项目 · 确认', `
+      <div class="notice blue">已解析项目书，下面是识别结果。确认后创建项目目录骨架并写入项目 yaml。</div>
+      ${nameMissing ? `<div class="notice" style="border-color:#f3c6c6;background:#fff2f2;color:#8a2020">
+        <b>项目书里没识别到项目名称</b>，请补上（会同时作为目录名）：</div>
+        <div class="field" style="margin-top:8px"><span>项目名称</span>
+          <input id="npNameFix" placeholder="如：花都社区微网实格项目"></div>` : ''}
+      ${unitMissing.length ? `<div class="notice" style="border-color:#f3c6c6;background:#fff2f2;color:#8a2020">
+        项目书里缺关键字段：<b>${esc(unitMissing.join('、'))}</b>。
+        这两个字段只能来自项目书本身，系统不会替你编 —— 请换一份带「立项单位 / 申报单位」栏目的申报书，
+        或先用「按地址栏手填」的方式建好项目目录再补 yaml。</div>` : ''}
+      <div class="kv" style="margin-top:8px">
+        <div class="kv-row"><span class="k">项目名称</span><span class="v">${esc(p.project_name || '—（未解析到）')}</span></div>
+        <div class="kv-row"><span class="k">项目简称 short</span><span class="v mono">${esc(st.short || '—')}</span></div>
+        <div class="kv-row"><span class="k">立项单位</span><span class="v">${esc(p.funder || '—（未解析到）')}</span></div>
+        <div class="kv-row"><span class="k">申报单位</span><span class="v">${esc(p.executer || '—（未解析到）')}</span></div>
+        <div class="kv-row"><span class="k">项目负责人</span><span class="v">${esc((p.leader_name || '—') + (p.leader_phone ? ' ' + p.leader_phone : ''))}</span></div>
+        <div class="kv-row"><span class="k">项目类别 / 级别</span><span class="v">${esc(p.category || '—')} / ${esc(p.level || '—')}</span></div>
+        <div class="kv-row"><span class="k">项目周期</span><span class="v">${esc([p.period_start, p.period_end].filter(Boolean).join(' ～ ') || '—（未解析到）')}</span></div>
+        <div class="kv-row"><span class="k">量化指标 / 活动类型</span><span class="v">${esc(p.indicator_count ?? 0)} 条 / ${esc(p.act_type_count ?? 0)} 类</span></div>
+      </div>
+      ${warnRows ? `<div class="section-title">解析提示（${(st.warnings || []).length} 条，缺的字段留空，不猜）</div>
+        <ul class="muted" style="margin:0 0 0 18px;font-size:13px">${warnRows}</ul>` : '<div class="muted" style="margin-top:8px">无解析提示</div>'}
+      ${st.yamlPreview ? `<details style="margin-top:10px"><summary class="muted">查看将写入的项目 yaml</summary>
+        <pre class="mono" style="max-height:240px;overflow:auto;background:#fafafa;padding:10px;border-radius:8px">${esc(st.yamlPreview)}</pre></details>` : ''}
+      <div class="hint" style="margin-top:10px">名字填错要改？点「重新选文件」，弹窗顶部就能先改名字/简称。
+        建好之后再改名会连带改目录名与知识库数据集名，风险大，所以这一步是最佳时机。</div>
+    `, `<button class="btn" data-act="np-restart">重新选文件</button>
+        <button class="btn primary" data-act="np-create" ${unitMissing.length ? 'disabled title="缺立项单位/申报单位，不能建"' : ''}>确认创建</button>`, true);
+    return;
+  }
+  if (st.step === 'done') {
+    const r = st.result || {};
+    const warnRows = (r.warnings || []).map(w => `<li>${esc(w)}</li>`).join('');
+    openModal('新建项目 · 完成', `
+      <div class="notice green">项目已创建：<b>${esc(r.project)}</b></div>
+      <div class="kv" style="margin-top:10px">
+        <div class="kv-row"><span class="k">简称</span><span class="v mono">${esc(r.short)}</span></div>
+        <div class="kv-row"><span class="k">目录</span><span class="v mono">${esc(r.dir)}</span></div>
+        <div class="kv-row"><span class="k">项目书</span><span class="v mono">${esc(r.doc)}</span></div>
+      </div>
+      ${warnRows ? `<div class="section-title">解析提示</div><ul class="muted" style="margin:0 0 0 18px">${warnRows}</ul>` : ''}
+      <div class="notice" style="margin-top:12px">
+        <b>下一步：给用户配项目读写权限。</b>新项目默认没有任何账号有权限（admin 除外），
+        请到「用户管理」里给需要的账号分配只读 / 读写。
+        <div style="margin-top:8px">
+          <button class="btn sm" data-act="np-goto-perms" data-project="${esc(r.project)}">去用户管理授权</button>
+        </div>
+      </div>
+    `, `<button class="btn" data-close-modal>关闭</button>
+        <button class="btn primary" data-act="np-open">查看新项目</button>`, true);
+    return;
+  }
+  // pick
+  openModal('新建项目', `
+    <div class="notice blue">必须上传项目书（.docx / .pdf / .md）。系统会转成 Markdown 后抽取
+      项目名称、类别、立项单位、申报单位、负责人、周期、指标，再据此建目录与项目 yaml；
+      解析不到的一律留空并给出提示，不会填假值。</div>
+    <div class="field" style="margin-top:12px">
+      <span>项目书文件</span>
+      <input id="npFile" type="file" accept="${NEWPROJ_ACCEPT}">
+    </div>
+    <div class="form-grid">
+      <label class="field"><span>项目名称（留空 = 用项目书里的名字）</span>
+        <input id="npName" placeholder="如：花都社区微网实格项目"></label>
+      <label class="field"><span>项目简称 short（留空 = 同上；目录名 / 数据集名，必须唯一）</span>
+        <input id="npShort" placeholder="如：花都社区保障资金项目"></label>
+    </div>
+    <div class="row">
+      <button class="btn primary" data-act="np-upload">上传并解析</button>
+      <span class="hint" id="npMsg"></span>
+    </div>
+  `, `<button class="btn" data-close-modal>取消</button>`, true);
+}
+
+/* 从表单里取名字/简称。项目书里的名字常带全角引号（“…”）和书名号，
+ * 直接当目录名又长又难认；用户能在建之前就改掉，比建完再改名安全得多。 */
+function _npFormName() {
+  const nameEl = el('#npName'), shortEl = el('#npShort');
+  return { name: nameEl ? nameEl.value.trim() : '', short: shortEl ? shortEl.value.trim() : '' };
+}
+
+/* 把「文件 + 名字/简称」发给 from-docx。dry_run=1 只解析不落盘（预览用），
+ * 否则真的建项目。统一一个出口，避免预览与创建两处参数不一致。 */
+async function _postFromDocx(file, want, dryRun) {
+  const fd = new FormData();
+  fd.append('file', file);
+  const qs = new URLSearchParams();
+  if (want.name) qs.set('project_name', want.name);
+  if (want.short) qs.set('short', want.short);
+  if (dryRun) qs.set('dry_run', '1');
+  const headers = {};
+  if (token) headers['x-token'] = token;
+  const r = await fetch(`${API}/projects/from-docx?${qs}`, { method: 'POST', headers, body: fd });
+  const text = await r.text();
+  let data;
+  try { data = text ? JSON.parse(text) : null; } catch { data = text; }
+  return { status: r.status, data };
+}
+
+async function uploadNewProjectDoc() {
+  const input = el('#npFile');
+  const file = input && input.files && input.files[0];
+  if (!file) { toast('请先选择项目书文件', 'warn'); return; }
+  const want = _npFormName();
+  // 前端先挡一次非法简称：省一次 1MB 文档上传，也给即时反馈
+  const bad = validateShortClient(want.short || want.name || '项目');
+  if (bad) { toast(bad, 'err'); return; }
+  const msg = el('#npMsg');
+  if (msg) msg.textContent = '解析中…';
+
+  // dry_run 预演：只解析、不建目录，用户确认后才真正写盘
+  const { status, data } = await _postFromDocx(file, want, true);
+  if (status === 401) { logoutLocal(); return; }
+  if (status !== 200) {
+    const detail = (data && data.detail) || data;
+    // 只缺项目名称：进预览页让人在弹窗里补，不用重新选文件
+    if (status === 400 && detail && detail.missing
+        && detail.missing.every(m => m === 'project_name')) {
+      newProjState = { file, step: 'missing', want,
+                       result: { parsed: detail.parsed || {} },
+                       missing: detail.missing || [], warnings: detail.warnings || [] };
+      renderNewProjectModal();
+      return;
+    }
+    const m = detail && detail.message ? detail.message
+      : (typeof detail === 'string' ? detail : JSON.stringify(detail));
+    if (msg) msg.innerHTML = `<span class="err">${esc(m)}</span>`;
+    toast('解析失败：' + m, 'err');
+    return;
+  }
+  newProjState = { file, step: 'preview', want, result: data,
+                   warnings: data.warnings || [], yamlPreview: data.yaml_preview || '',
+                   missing: [] };
+  renderNewProjectModal();
+}
+
+async function createProjectFromNewProj() {
+  const st = newProjState;
+  if (!st || !st.file) { toast('没有项目书，请重新选择', 'err'); return; }
+  // 补填页（项目书里没有项目名称）时，名字以输入框为准
+  const fixEl = el('#npNameFix');
+  const want = Object.assign({}, st.want || {});
+  if (fixEl && fixEl.value.trim()) want.name = fixEl.value.trim();
+  const bad = validateShortClient(want.short || want.name || '项目');
+  if (bad) { toast(bad, 'err'); return; }
+
+  const { status, data } = await _postFromDocx(st.file, want, false);
+  if (status === 401) { logoutLocal(); return; }
+  if (status !== 200) {
+    const detail = (data && data.detail) || data;
+    const m = detail && detail.message ? detail.message
+      : (typeof detail === 'string' ? detail : JSON.stringify(detail));
+    toast('创建失败：' + m, 'err');
+    return;
+  }
+  // 新项目已落盘：项目缓存必须清掉，否则列表 / 用户管理的项目下拉还是旧的
+  projectsCache = null; projectsPromise = null;
+  newProjState = { step: 'done', result: data };
+  renderNewProjectModal();
+  toast('项目已创建', 'ok');
+}
+
+/* 简称前端预校验：与 engine/projects.validate_short 同规则（后端仍会再校验一次） */
+const SHORT_MAX_LEN = 40;          // 与 engine/projects.py 的 SHORT_MAX_LEN 保持一致
+function validateShortClient(short) {
+  const raw = String(short || '').trim();
+  if (!raw) return '项目简称不能为空';
+  if (raw === '.' || raw === '..') return '项目简称非法';
+  if (raw.startsWith('.')) return '项目简称不能以「.」开头';
+  const bad = Array.from(raw).filter(ch => '/\\:*?"<>|'.includes(ch));
+  if (bad.length) return `项目简称不能包含字符：${bad.join('')}`;
+  if (raw.length > SHORT_MAX_LEN) return `项目简称最多 ${SHORT_MAX_LEN} 个字符，当前 ${raw.length} 个`;
+  return '';
+}
+
 /* ---------------- 路由 ---------------- */
 function parseHash() {
   const raw = location.hash.replace(/^#\/?/, '');
@@ -357,7 +559,7 @@ async function route() {
     if (parts[0] === 'search') { await pageSearch(params); return; }
     if (parts[0] === 'docs') { await pageSearch(new URLSearchParams('tab=docs')); return; }
     if (parts[0] === 'doc' && parts[1]) { await pageDoc(parts[1]); return; }
-    if (parts[0] === 'admin' && parts[1] === 'users') { await pageUsers(); return; }
+    if (parts[0] === 'admin' && parts[1] === 'users') { await pageUsers(params); return; }
     if (parts[0] === 'admin' && parts[1] === 'audit') { await pageAudit(); return; }
     history.replaceState(null, '', '#/dashboard');
     await pageDashboard();
@@ -398,6 +600,9 @@ async function pageDashboard() {
     </a>`).join('');
 
   $('view').innerHTML = `
+    ${isAdmin() ? `<div class="row" style="justify-content:flex-end;margin-bottom:10px">
+      <button class="btn primary" data-act="open-newproject">+ 新建项目</button>
+    </div>` : ''}
     <div class="stats">
       <div class="stat"><div class="k">项目数</div><div class="v">${ps.length}</div></div>
       <div class="stat"><div class="k">活动总数</div><div class="v">${total}</div></div>
@@ -2680,9 +2885,12 @@ function readProjectPerms(dsKey) {
   return out;
 }
 
-async function pageUsers() {
+async function pageUsers(params) {
   setTitle('用户管理');
   if (!isAdmin()) { $('view').innerHTML = empty('需要 admin 权限'); return; }
+  // 从「新建项目」向导跳过来时带 ?grant=<项目>：置顶该项目并默认给「读写」，
+  // 让「建完项目 → 立刻授权」是两步点击，而不是让管理员在新下拉里自己找。
+  const grantProject = (params && params.get && params.get('grant')) || '';
   $('view').innerHTML = loading();
   const [d, projects, kd] = await Promise.all([
     api('/admin/users'), ensureProjects(true),
@@ -2706,7 +2914,8 @@ async function pageUsers() {
       <td>${esc(u.username)}</td>
       <td><span class="badge ${u.role === 'admin' ? 'info' : u.role === 'editor' ? 'ok' : 'muted'}">${esc(u.role)}</span></td>
       <td>${u.enabled ? '<span class="badge ok">启用</span>' : '<span class="badge err">禁用</span>'}</td>
-      <td class="muted" title="${esc(permText(u.projects))}">${esc(permText(u.projects))}</td>
+      <td class="muted" title="${esc(permText(u.projects))}">${esc(permText(u.projects))}
+        ${u.role === 'admin' ? '' : `<button class="btn sm" data-act="user-perms" data-uid="${u.id}">项目权限</button>`}</td>
       <td class="nowrap">${keyCell(u, latestKey[u.id])}</td>
       <td class="nowrap">
         <button class="btn sm" data-act="user-edit" data-uid="${u.id}">编辑</button>
@@ -2717,8 +2926,32 @@ async function pageUsers() {
       </td>
     </tr>`).join('');
 
+  // 每个项目被多少非 admin 账号授权（含 0）——新建项目在这里能立刻看出「还没人有权」
+  const grantedCount = {};
+  for (const p of (projects || [])) grantedCount[p.name] = 0;
+  for (const u of users) {
+    if (u.role === 'admin') continue;
+    for (const key of Object.keys(u.projects || {})) {
+      if (key in grantedCount) grantedCount[key] += 1;
+    }
+  }
+  const permSummary = (projects || []).map(p => {
+    const n = grantedCount[p.name] || 0;
+    return `<span class="chip"${n ? '' : ' style="border-color:#f0c0c0;color:#a33"'}>${esc(projectShort(p))} · ${n ? n + ' 人可访问' : '无人有权'}</span>`;
+  }).join('');
+
   $('view').innerHTML = `
     ${pageHead('用户管理', '真实姓名、角色与项目权限')}
+    ${grantProject ? `<div class="notice green" style="margin-bottom:12px">
+      <b>新项目「${esc(grantProject)}」还没有分配权限。</b>
+      编辑用户 → 在项目权限里选「只读 / 读写」→ 保存即可生效
+      （保存后该用户 GET /api/me 的 projects 立即出现该项目）。
+    </div>` : ''}
+    <div class="card">
+      <div class="card-head"><h3>项目权限总览</h3><span class="muted">非 admin 账号授权人数</span></div>
+      <div class="row" style="flex-wrap:wrap;gap:8px">${permSummary || '<span class="muted">暂无项目</span>'}</div>
+      <div class="hint" style="margin-top:8px">admin 按角色恒有全部项目权限，不占 user_projects 记录。点下面的「项目权限」可直接批准某用户。</div>
+    </div>
     <div class="muted" style="margin:-4px 0 12px">API Key 明文以加密形式存储，可随时查看。分享请走安全渠道。</div>
     <div class="card">
       <div class="card-head"><h3>新建用户</h3></div>
@@ -2734,7 +2967,7 @@ async function pageUsers() {
         <button class="btn primary" data-act="user-create">建号</button>
       </div>
       <div class="row" style="margin-top:10px;flex-wrap:wrap">
-        <span class="muted">项目权限：</span>${projectPermSelects(projects, {}, 'data-newproj')}
+        <span class="muted">项目权限：</span>${projectPermSelects(projects, grantProject ? { [grantProject]: 'write' } : {}, 'data-newproj')}
       </div>
       <div id="nuMsg" style="margin-top:8px"></div>
     </div>
@@ -2810,6 +3043,35 @@ async function createUser() {
     el('#nuMsg').innerHTML = `<span class="err">失败：${esc(e.message)}</span>`;
     toast('创建失败：' + e.message, 'err');
   }
+}
+
+/* 单用户项目权限弹窗：从用户列表的「项目权限」按钮进来。
+ * 与「编辑用户」分开，是因为授权是日常最高频的运维动作，
+ * 不该混在改密码/改角色/禁用之类的危险操作旁边。 */
+async function openUserPerms(uid) {
+  const u = (usersCache || []).find(x => String(x.id) === String(uid));
+  if (!u) return;
+  const projects = await ensureProjects(true);
+  if (u.role === 'admin') {
+    toast('admin 按角色恒有全部项目权限，无需单独授权', 'warn');
+    return;
+  }
+  openModal(`项目权限 · ${u.real_name || u.username}`, `
+    <div class="notice blue">每个项目选「无 / 只读 / 读写」。保存后立即生效：
+      该账号 GET /api/me 的 projects 里会马上出现授权项目。</div>
+    <div style="display:flex;flex-wrap:wrap;margin-top:12px">${projectPermSelects(projects, u.projects, 'data-permsproj')}</div>
+  `, `<button class="btn" data-close-modal>取消</button>
+      <button class="btn primary" data-act="user-perms-save" data-uid="${u.id}">保存权限</button>`, true);
+}
+
+async function saveUserPerms(uid) {
+  await api('/admin/users/' + uid, {
+    method: 'PATCH',
+    body: { projects: readProjectPerms('permsproj') },
+  });
+  closeModal();
+  toast('项目权限已更新', 'ok');
+  await pageUsers();
 }
 
 async function openUserEdit(uid) {
@@ -2888,7 +3150,20 @@ async function pageAudit() {
  * ============================================================ */
 document.addEventListener('click', async e => {
   const closer = e.target.closest('[data-close-modal]');
-  if (closer) { closeModal(); return; }
+  if (closer) {
+    const created = newProjState && newProjState.step === 'done';
+    closeModal();
+    if (created) {
+      // 新建项目成功后关弹窗：项目列表已经变了，但 location.hash 仍是 #/dashboard，
+      // 设同一个 hash 不会触发 hashchange —— 不主动重渲染，用户就会看到
+      // 「提示建好了、列表里却没有」。
+      newProjState = null;
+      projectsCache = null; projectsPromise = null;
+      const parts = parseHash().parts;
+      if (!parts.length || parts[0] === 'dashboard') await route();
+    }
+    return;
+  }
   const node = e.target.closest('[data-act]');
   if (!node) return;
   const act = node.dataset.act;
@@ -2958,6 +3233,24 @@ document.addEventListener('click', async e => {
     if (act === 'act-upload') { await openActivityUploadModal(); return; }
     if (act === 'act-upload-run') { await uploadActivityFile(); return; }
     if (act === 'open-photo-upload') { await openPhotoUploadModal(); return; }
+    if (act === 'open-newproject') { openNewProjectModal(); return; }
+    if (act === 'np-upload') { await uploadNewProjectDoc(); return; }
+    if (act === 'np-create') { await createProjectFromNewProj(); return; }
+    if (act === 'np-restart') { newProjState = { step: 'pick' }; renderNewProjectModal(); return; }
+    if (act === 'np-open') {
+      const name = (newProjState && newProjState.result && newProjState.result.project) || '';
+      newProjState = null;
+      closeModal();
+      if (name) location.hash = `#/project/${enc(name)}`;
+      return;
+    }
+    if (act === 'np-goto-perms') {
+      const proj = node.dataset.project || '';
+      closeModal();
+      // 带上 ?grant=<项目>，用户管理页会高亮新项目并默认选「读写」
+      location.hash = `#/admin/users${proj ? '?grant=' + enc(proj) : ''}`;
+      return;
+    }
     if (act === 'open-projfile') { await openProjectFileModal(node.dataset.project || parseHash().parts[1] || ''); return; }
     if (act === 'pf-upload') { await doProjectFileUpload(); return; }
     if (act === 'photo-pick') { e.preventDefault(); el('#photoFiles').click(); return; }
@@ -3071,6 +3364,8 @@ document.addEventListener('click', async e => {
     if (act === 'user-key-issue') { await issueUserKey(node.dataset.uid); return; }
     if (act === 'user-create') { await createUser(); return; }
     if (act === 'user-edit') { await openUserEdit(node.dataset.uid); return; }
+    if (act === 'user-perms') { await openUserPerms(node.dataset.uid); return; }
+    if (act === 'user-perms-save') { await saveUserPerms(node.dataset.uid); return; }
     if (act === 'user-save') { await saveUser(node.dataset.uid); return; }
     if (act === 'user-del') {
       if (!confirm(`硬删除用户「${node.dataset.name}」？其 API Key 和会话会一并删除，不可恢复。`)) return;
